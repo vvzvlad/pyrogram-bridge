@@ -1,15 +1,13 @@
+# Pyrogram Bridge
 
-
-
-
-Create API ID/HASH:
+## Create API ID/HASH:
 
 1)Login at https://my.telegram.org/apps
 2)API development tools
 3)Create new application
 4)Copy App api_id and api_hash 
 
-Get session:
+## Get session:
 1)python3 -m venv .venv
 2)source .venv/bin/activate
 3)pip install pyrogram
@@ -42,4 +40,12 @@ Use session on ENV variable TG_SESSION_STRING in docker-compose.yml
       TZ: Europe/Moscow
     volumes:
 ....
+```
+### Get channel messages:
+```
+curl http://127.0.0.1:8000/html/DragorWW_space/87
+```
+Or
+```
+curl http://127.0.0.1:8000/json/DragorWW_space/87
 ```
