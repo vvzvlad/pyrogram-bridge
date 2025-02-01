@@ -3,12 +3,10 @@ services:
     image: ghcr.io/vvzvlad/pyrogram-bridge:latest
     container_name: pyrogram-bridge
     environment:
-      TG_API_ID: ${TG_API_ID}
-      TG_API_HASH: ${TG_API_HASH}
-      TG_SESSION_STRING: ${TG_SESSION_STRING}
+      TG_API_ID: //TG_API_ID//
+      TG_API_HASH: //TG_API_HASH//
+      TG_SESSION_STRING: //TG_SESSION_STRING//
       TZ: Europe/Moscow
-    volumes:
-      - ./sessions:/data
     ports:
       - "8000:8000"
     restart: always
