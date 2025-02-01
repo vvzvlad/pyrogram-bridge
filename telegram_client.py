@@ -378,7 +378,8 @@ class TelegramClient:
                 "title": title,
                 "text": "".join([m["text"] for m in parsed_messages if m["text"]]),
                 "views": max(m["views"] for m in parsed_messages),
-                "media_group_id": message.media_group_id
+                "media_group_id": message.media_group_id,
+                "author": parsed_messages[0]["author"] if parsed_messages else ""
             }
             logger.debug(f"Combined result: {combined}")
 
