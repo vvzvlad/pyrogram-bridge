@@ -1,11 +1,15 @@
 import logging
 import json
+import re
 
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, Response
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, HTTPException, Response, BackgroundTasks
+from fastapi.responses import HTMLResponse, FileResponse
 from telegram_client import TelegramClient
 from config import get_settings
+import mimetypes
+import os
+from pyrogram import errors
 
 logger = logging.getLogger(__name__)
 client = TelegramClient()
@@ -68,4 +72,46 @@ async def health_check():
     return {
         "status": "ok",
         "connected": client.client.is_connected
-    } 
+    }
+
+@app.get("/media/{file_id}")
+async def get_media(
+    file_id: str,
+    background_tasks: BackgroundTasks,
+    response: Response
+):
+    try:
+        file_path = await client.download_media_file(file_id)
+        
+        # Additional safety checks
+        if not os.path.exists(file_path):
+            raise HTTPException(status_code=404, detail="Temporary file not found")
+        
+        # Determine media type from file extension
+        media_type, _ = mimetypes.guess_type(file_path)
+        if not media_type:
+            media_type = "application/octet-stream"
+        
+        # Add cleanup task
+        background_tasks.add_task(lambda: os.remove(file_path) if os.path.exists(file_path) else None)
+        
+        return FileResponse(
+            path=file_path,
+            media_type=media_type,
+            headers={
+                "Content-Disposition": f"inline; filename={os.path.basename(file_path)}"
+            }
+        )
+        
+    except HTTPException:
+        # Пробрасываем уже сформированные HTTPException как есть
+        raise
+    except errors.RPCError as e:
+        logger.error(f"Media request RPC error {file_id}: {type(e).__name__} - {str(e)}")
+        raise HTTPException(status_code=404, detail="File not found in Telegram")
+    except Exception as e:
+        logger.error(f"Media request failed {file_id}: {type(e).__name__} - {str(e)}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Internal server error: {str(e)}"
+        ) 

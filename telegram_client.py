@@ -2,7 +2,6 @@ import logging
 from pyrogram import Client, errors
 from pyrogram.types import Message
 from config import get_settings
-import base64
 import os
 import re
 
@@ -69,42 +68,11 @@ class TelegramClient:
             # Extract HTML from entities
             raw_text = message.text.html if message.text else ""
         
-        # Process text entities for links
-        #text_parts = []
-        #last_offset = 0
-        #entities = getattr(message, "entities", None)
-        #if entities and isinstance(entities, list):
-        #    # Sort entities by offset
-        #    entities = sorted(entities, key=lambda x: x.offset)
-        #    
-        #    for entity in entities:
-        #        if entity.offset > last_offset:
-        #            text_parts.append(raw_text[last_offset:entity.offset])
-        #        
-        #        entity_text = raw_text[entity.offset:entity.offset+entity.length]
-        #        
-        #        if entity.type == "text_link":
-        #            text_parts.append(f"<a href='{entity.url}'>{entity_text}</a>")
-        #        elif entity.type == "url":
-        #            text_parts.append(f"<a href='{entity_text}'>{entity_text}</a>")
-        #        else:
-        #            text_parts.append(entity_text)
-        #        
-        #        last_offset = entity.offset + entity.length
-        #    
-        #    # Add remaining text
-        #    if last_offset < len(raw_text):
-        #        text_parts.append(raw_text[last_offset:])
-        #    
-        #    processed_text = "".join(text_parts)
-        #else:
-        processed_text = raw_text
-
         # Replace only URLs not already in <a> tags
         processed_text = re.sub(
             r'(?<!href=")(https?://\S+)(?!">)',
             r'<a href="\1">\1</a>',
-            processed_text
+            raw_text
         )
         
         # Parse media and add video markers
@@ -143,15 +111,29 @@ class TelegramClient:
         if media:
             previews = []
             for m in media:
-                if m.get('thumbnail'):
-                    media_type = m.get('type', 'media').upper()
-                    overlay = f"<div style='position:absolute; top:5px; left:5px; background:rgba(0,0,0,0.7); color:white; padding:2px 5px; border-radius:3px; font-size:0.8em;'>{media_type}</div>"
+                media_type = m.get('type', 'media')
+                file_id = m.get('url')
+                
+                if media_type in ['video', 'animation']:
+                    # Direct video/animation embedding
+                    previews.append(
+                        f"<div style='margin:5px;'>"
+                        f"<video controls style='max-width:600px; max-height:600px;'>"
+                        f"<source src='/media/{file_id}' type='video/mp4'>"
+                        f"Your browser does not support the video tag."
+                        f"</video>"
+                        f"</div>"
+                    )
+                elif m.get('thumbnail_file_id'):
+                    # Image preview for other types
+                    overlay = f"<div style='position:absolute; top:5px; left:5px; background:rgba(0,0,0,0.7); color:white; padding:2px 5px; border-radius:3px; font-size:0.8em;'>{media_type.upper()}</div>"
                     previews.append(
                         f"<div style='position:relative; display:inline-block; margin:5px;'>"
-                        f"<img src='data:image/jpeg;base64,{m['thumbnail']}' style='max-width:600px; max-height:600px; object-fit: contain;'>"
+                        f"<img src='/media/{m['thumbnail_file_id']}' style='max-width:600px; max-height:600px; object-fit: contain;'>"
                         f"{overlay}"
                         f"</div>"
                     )
+
             if previews:
                 previews_container = f"<div class='media-preview' style='white-space: nowrap; overflow-x: auto;'>{''.join(previews)}</div>"
                 processed_text = previews_container + processed_text
@@ -194,7 +176,9 @@ class TelegramClient:
         if hasattr(media_obj, "file_id"):
             file_id = media_obj.file_id
         
-        thumbnail_base64 = None
+        thumbnail_file_id = None
+        if media_obj.thumbs:
+            thumbnail_file_id = media_obj.thumbs[0].file_id
         
         # Special cases
         if media_type == "photofile":
@@ -202,43 +186,20 @@ class TelegramClient:
         elif media_type == "webpage":
             return {"type": "webpage", "url": getattr(media_obj, "url", "")}
         elif media_type == "video":
-            # Download and encode thumbnail
-            if media_obj.thumbs:
-                try:
-                    thumb_path = await self.client.download_media(media_obj.thumbs[0].file_id)
-                    with open(thumb_path, "rb") as image_file:
-                        thumbnail_base64 = base64.b64encode(image_file.read()).decode("utf-8")
-                    os.remove(thumb_path)
-                except Exception as e:
-                    logger.error(f"Thumbnail error: {e.__class__.__name__} - {str(e)}")
-            
             return {
                 "type": "video",
                 "url": file_id,
                 "size": media_obj.file_size,
                 "duration": media_obj.duration,
-                "thumbnail": thumbnail_base64
+                "thumbnail_file_id": thumbnail_file_id
             }
         elif media_type == "animation":
-            # Process animation (GIF/Video)
-            logger.debug(f"Animation details: {media_obj}")
-            logger.debug(f"Animation file_id: {media_obj.file_id}")
-            logger.debug(f"Animation thumbs: {media_obj.thumbs}")
-            if media_obj.thumbs:
-                try:
-                    thumb_path = await self.client.download_media(media_obj.thumbs[0].file_id)
-                    with open(thumb_path, "rb") as image_file:
-                        thumbnail_base64 = base64.b64encode(image_file.read()).decode("utf-8")
-                    os.remove(thumb_path)
-                except Exception as e:
-                    logger.error(f"Animation thumbnail error: {e.__class__.__name__} - {str(e)}")
-            
             return {
                 "type": "animation",
                 "url": media_obj.file_id,
                 "size": media_obj.file_size,
                 "duration": media_obj.duration,
-                "thumbnail": thumbnail_base64
+                "thumbnail_file_id": thumbnail_file_id
             }
         elif media_type == "messagemediatype":
             # Handle Telegram's internal media type
@@ -246,29 +207,18 @@ class TelegramClient:
             logger.debug(f"Resolved MessageMediaType: {actual_type}")
             return {"type": actual_type}
         elif media_type == "photo":
-            # Download and encode full photo
-            if hasattr(media_obj, "file_id"):
-                try:
-                    # Download full size photo
-                    photo_path = await self.client.download_media(media_obj.file_id)
-                    with open(photo_path, "rb") as image_file:
-                        thumbnail_base64 = base64.b64encode(image_file.read()).decode("utf-8")
-                    os.remove(photo_path)
-                except Exception as e:
-                    logger.error(f"Photo download error: {e.__class__.__name__} - {str(e)}")
-            
             return {
                 "type": "photo",
                 "url": file_id,
                 "size": media_obj.file_size,
-                "thumbnail": thumbnail_base64
+                "thumbnail_file_id": file_id
             }
         
         return {
             "type": media_type,
             "url": file_id,
             "size": getattr(media_obj, "file_size", None),
-            "thumbnail": None
+            "thumbnail_file_id": thumbnail_file_id
         }
 
     async def _parse_animation(self, animation_obj) -> dict:
@@ -277,26 +227,16 @@ class TelegramClient:
             logger.error("Invalid animation object")
             return {"type": "animation", "error": "invalid_object"}
         
-        try:
-            # Check if thumbs exist and have items
-            if not animation_obj.thumbs or len(animation_obj.thumbs) == 0:
-                raise ValueError("No thumbnails available")
-            
-            thumb_file_id = animation_obj.thumbs[0].file_id
-            thumb_path = await self.client.download_media(thumb_file_id)
-            with open(thumb_path, "rb") as f:
-                thumbnail = base64.b64encode(f.read()).decode()
-            os.remove(thumb_path)
-        except Exception as e:
-            logger.error(f"Animation error: {str(e)}")
-            thumbnail = None
+        thumbnail_file_id = None
+        if animation_obj.thumbs and len(animation_obj.thumbs) > 0:
+            thumbnail_file_id = animation_obj.thumbs[0].file_id
         
         return {
             "type": "animation",
             "url": getattr(animation_obj, "file_id", ""),
             "size": animation_obj.file_size,
             "duration": animation_obj.duration,
-            "thumbnail": thumbnail
+            "thumbnail_file_id": thumbnail_file_id
         }
 
     def _generate_title(self, raw_text: str) -> str:
@@ -491,4 +431,30 @@ class TelegramClient:
                 "height": thumb.height,
                 "file_size": thumb.file_size
             } for thumb in media_obj.thumbs
-        ] 
+        ]
+
+    async def download_media_file(self, file_id: str) -> str:
+        """Download media file and return local path"""
+        try:
+            if not self.client.is_connected:
+                await self.start()
+            
+            # Validate file_id format before downloading
+            if len(file_id) < 20 or not re.match(r'^[a-zA-Z0-9_-]+$', file_id):
+                logger.error(f"Invalid file_id format: {file_id}")
+                raise ValueError("Invalid file identifier format")
+
+            return await self.client.download_media(
+                file_id,
+                in_memory=False,
+                block=True
+            )
+        except errors.RPCError as e:
+            logger.error(f"Telegram media download error {file_id}: {type(e).__name__} - {str(e)}")
+            raise
+        except ValueError as e:
+            logger.error(f"Invalid file_id {file_id}: {str(e)}")
+            raise
+        except Exception as e:
+            logger.error(f"Media download failed {file_id}: {type(e).__name__} - {str(e)}")
+            raise 
