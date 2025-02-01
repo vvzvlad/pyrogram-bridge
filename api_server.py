@@ -22,11 +22,16 @@ async def shutdown():
 async def get_post_html(channel: str, post_id: int):
     try:
         post = await client.get_post(channel, post_id)
+        if post.get("error"):
+            raise HTTPException(
+                status_code=404,
+                detail=post["details"]
+            )
         if "error" in post:
             raise HTTPException(status_code=404, detail=post["details"])
         return post["html"]
     except Exception as e:
-        logger.error(f"Error in get_post_html: {str(e)}")
+        logger.error(f"HTML endpoint error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/json/{channel}/{post_id}")

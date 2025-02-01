@@ -137,7 +137,7 @@ class TelegramClient:
                 for r in message.reactions.reactions
             )
         processed_text += reactions_text
-        raw_text += reactions_text  # Add reactions to raw text
+        raw_text += reactions_text
 
         # Add media previews to text
         if media:
@@ -304,7 +304,7 @@ class TelegramClient:
             return ""
         # Get first non-empty line
         first_line = next((line.strip() for line in raw_text.split('\n') if line.strip()), "")
-        # Trim to 65 characters and remove HTML tags
+        # Trim and remove HTML tags
         clean_line = re.sub('<[^<]+?>', '', first_line)
         
         max_length = 65
@@ -331,20 +331,54 @@ class TelegramClient:
                     "details": f"Message {post_id} in {channel} does not exist"
                 }
             
-            # Process the message
-            parsed_message = await self._parse_message(message)
+            # Check for media group
+            media_group = []
+            if message.media_group_id:
+                logger.debug(f"Processing media group {message.media_group_id} for message {post_id}")
+                current_id = post_id
+                # Collect previous messages in group
+                while True:
+                    prev_msg = await self.client.get_messages(
+                        chat_id=channel,
+                        message_ids=current_id - 1
+                    )
+                    if prev_msg and prev_msg.media_group_id == message.media_group_id:
+                        logger.debug(f"Found previous message in group: {prev_msg.id}")
+                        media_group.insert(0, prev_msg)
+                        current_id -= 1
+                    else:
+                        break
+
+                # Collect next messages in group
+                current_id = post_id
+                while True:
+                    next_msg = await self.client.get_messages(
+                        chat_id=channel,
+                        message_ids=current_id + 1
+                    )
+                    if next_msg and next_msg.media_group_id == message.media_group_id:
+                        logger.debug(f"Found next message in group: {next_msg.id}")
+                        media_group.append(next_msg)
+                        current_id += 1
+                    else:
+                        break
+
+            # Process all messages in group
+            all_messages = media_group + [message]
+            logger.debug(f"Combined {len(all_messages)} messages in media group")
+            parsed_messages = [await self._parse_message(msg) for msg in all_messages]
 
             # Combine results
             combined = {
                 "id": post_id,
                 "date": message.date.isoformat(),
                 "title": self._generate_title(message.text or message.caption or ""),
-                "html": parsed_message["html"],
-                "text": parsed_message["text"],
                 "raw": self._parse_raw_message(message),
-                "views": parsed_message["views"],
-                "media_group_id": parsed_message["media_group_id"],
-                "author": parsed_message["author"]
+                "html": "".join([m["html"] for m in parsed_messages if m["html"]]),
+                "text": "".join([m["text"] for m in parsed_messages if m["text"]]),
+                "views": max(m["views"] for m in parsed_messages),
+                "media_group_id": message.media_group_id,
+                "author": parsed_messages[0]["author"] if parsed_messages else ""
             }
             logger.debug(f"Combined result: {combined}")
 
