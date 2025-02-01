@@ -70,35 +70,35 @@ class TelegramClient:
             raw_text = message.text.html if message.text else ""
         
         # Process text entities for links
-        text_parts = []
-        last_offset = 0
-        entities = getattr(message, "entities", None)
-        if entities and isinstance(entities, list):
-            # Sort entities by offset
-            entities = sorted(entities, key=lambda x: x.offset)
-            
-            for entity in entities:
-                if entity.offset > last_offset:
-                    text_parts.append(raw_text[last_offset:entity.offset])
-                
-                entity_text = raw_text[entity.offset:entity.offset+entity.length]
-                
-                if entity.type == "text_link":
-                    text_parts.append(f"<a href='{entity.url}'>{entity_text}</a>")
-                elif entity.type == "url":
-                    text_parts.append(f"<a href='{entity_text}'>{entity_text}</a>")
-                else:
-                    text_parts.append(entity_text)
-                
-                last_offset = entity.offset + entity.length
-            
-            # Add remaining text
-            if last_offset < len(raw_text):
-                text_parts.append(raw_text[last_offset:])
-            
-            processed_text = "".join(text_parts)
-        else:
-            processed_text = raw_text
+        #text_parts = []
+        #last_offset = 0
+        #entities = getattr(message, "entities", None)
+        #if entities and isinstance(entities, list):
+        #    # Sort entities by offset
+        #    entities = sorted(entities, key=lambda x: x.offset)
+        #    
+        #    for entity in entities:
+        #        if entity.offset > last_offset:
+        #            text_parts.append(raw_text[last_offset:entity.offset])
+        #        
+        #        entity_text = raw_text[entity.offset:entity.offset+entity.length]
+        #        
+        #        if entity.type == "text_link":
+        #            text_parts.append(f"<a href='{entity.url}'>{entity_text}</a>")
+        #        elif entity.type == "url":
+        #            text_parts.append(f"<a href='{entity_text}'>{entity_text}</a>")
+        #        else:
+        #            text_parts.append(entity_text)
+        #        
+        #        last_offset = entity.offset + entity.length
+        #    
+        #    # Add remaining text
+        #    if last_offset < len(raw_text):
+        #        text_parts.append(raw_text[last_offset:])
+        #    
+        #    processed_text = "".join(text_parts)
+        #else:
+        processed_text = raw_text
 
         # Replace only URLs not already in <a> tags
         processed_text = re.sub(
