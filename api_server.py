@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException, Response
+from fastapi.responses import HTMLResponse
 from telegram_client import TelegramClient
 from config import get_settings
 import logging
@@ -17,10 +18,35 @@ async def startup():
 async def shutdown():
     await client.stop()
 
-@app.get("/post/{channel}/{post_id}")
+@app.get("/html/{channel}/{post_id}", response_class=HTMLResponse)
+async def get_post_html(channel: str, post_id: int):
+    try:
+        post = await client.get_post(channel, post_id)
+        if post.get("error"):
+            raise HTTPException(
+                status_code=404,
+                detail=post["details"]
+            )
+        return f"""
+        <html>
+            <body style="font-family: Arial; margin: 20px;">
+                {post['text']}
+            </body>
+        </html>
+        """
+    except Exception as e:
+        logger.error(f"HTML endpoint error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/json/{channel}/{post_id}")
 async def get_post(channel: str, post_id: int):
     try:
         data = await client.get_post(channel, post_id)
+        if data.get("error"):
+            raise HTTPException(
+                status_code=404,
+                detail=data
+            )
         return Response(
             content=json.dumps(data),
             media_type="application/json"

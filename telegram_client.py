@@ -39,30 +39,40 @@ class TelegramClient:
 
     async def _parse_message(self, message: Message) -> dict:
         # Extract text from different sources
-        text = message.text or ""
+        text = message.text.html if message.text else ""  # Get HTML formatted text
         
         # Try to get caption for media messages
-        if not text and hasattr(message, "caption"):
-            text = message.caption or ""
+        if not text and hasattr(message, "caption") and message.caption:
+            text = message.caption.html
         
         # Try to get text from other attributes
         if not text and hasattr(message, "action"):
-            text = str(message.action)  # For service messages
+            text = str(message.action)
+        elif not text and hasattr(message, "entities"):
+            # Extract HTML from entities
+            text = message.text.html if message.text else ""
         
         # Parse media and add video markers
         media = []
         if message.media:
-            media_obj = message.media
-            if hasattr(message, "video"):
-                media.append(await self._parse_media(message.video))
+            # Handle animations directly from message object
+            if hasattr(message, "animation") and message.animation:
+                animation = message.animation
+                media.append(await self._parse_animation(animation))
+            # Handle videos directly from message object
+            elif hasattr(message, "video") and message.video:
+                video = message.video
+                media.append(await self._parse_media(video))
+            # Handle photos directly from message object
+            elif hasattr(message, "photo") and message.photo:
+                photo = message.photo
+                media.append(await self._parse_media(photo))
             else:
-                if isinstance(media_obj, list):
-                    for m in media_obj:
-                        media.append(await self._parse_media(m))
-                elif hasattr(media_obj, "photo"):
-                    media.append(await self._parse_media(media_obj.photo))
-                else:
-                    media.append(await self._parse_media(media_obj))
+                media_obj = message.media
+                parsed_media = await self._parse_media(media_obj)
+                if parsed_media["type"] not in ["webpage", "nonetype"]:
+                    media.append(parsed_media)
+                    logger.debug(f"Parsed media: {parsed_media}")
 
         video_count = sum(1 for m in media if m.get("type") == "video")
         if video_count > 0:
@@ -77,19 +87,35 @@ class TelegramClient:
             )
         text += reactions_text
 
+        # Add media previews to text
+        if media:
+            previews = []
+            for m in media:
+                if m.get('thumbnail'):
+                    previews.append(f"<img src='data:image/jpeg;base64,{m['thumbnail']}' style='max-width: 600px; margin: 10px 0;'>")
+            if previews:
+                text = "<br>".join(previews) + "<br><br>" + text
+
+        # Convert newlines to HTML breaks AFTER adding reactions
+        text = text.replace('\n', '<br>')
+
         return {
             "id": message.id,
             "date": message.date.isoformat(),
             "text": text,
-            "media": media,
-            "views": message.views or 0,
-            "reactions": [r.emoji for r in message.reactions.reactions] if getattr(message, "reactions", None) else []
+            "views": message.views or 0
         }
 
     async def _parse_media(self, media_obj) -> dict:
         # Handle different media types
         media_type = media_obj.__class__.__name__.lower()
-        file_id = getattr(media_obj, "file_id", "")
+        logger.debug(f"Parsing media type: {media_type}")
+        
+        # Get file_id directly from media object
+        file_id = ""
+        if hasattr(media_obj, "file_id"):
+            file_id = media_obj.file_id
+        
         thumbnail_base64 = None
         
         # Special cases
@@ -115,12 +141,84 @@ class TelegramClient:
                 "duration": media_obj.duration,
                 "thumbnail": thumbnail_base64
             }
+        elif media_type == "animation":
+            # Process animation (GIF/Video)
+            logger.debug(f"Animation details: {media_obj}")
+            logger.debug(f"Animation file_id: {media_obj.file_id}")
+            logger.debug(f"Animation thumbs: {media_obj.thumbs}")
+            if media_obj.thumbs:
+                try:
+                    thumb_path = await self.client.download_media(media_obj.thumbs[0].file_id)
+                    with open(thumb_path, "rb") as image_file:
+                        thumbnail_base64 = base64.b64encode(image_file.read()).decode("utf-8")
+                    os.remove(thumb_path)
+                except Exception as e:
+                    logger.error(f"Animation thumbnail error: {e.__class__.__name__} - {str(e)}")
+            
+            return {
+                "type": "animation",
+                "url": media_obj.file_id,
+                "size": media_obj.file_size,
+                "duration": media_obj.duration,
+                "thumbnail": thumbnail_base64
+            }
+        elif media_type == "messagemediatype":
+            # Handle Telegram's internal media type
+            actual_type = str(media_obj).split('.')[-1].lower()
+            logger.debug(f"Resolved MessageMediaType: {actual_type}")
+            return {"type": actual_type}
+        elif media_type == "photo":
+            # Download and encode full photo
+            if hasattr(media_obj, "file_id"):
+                try:
+                    # Download full size photo
+                    photo_path = await self.client.download_media(media_obj.file_id)
+                    with open(photo_path, "rb") as image_file:
+                        thumbnail_base64 = base64.b64encode(image_file.read()).decode("utf-8")
+                    os.remove(photo_path)
+                except Exception as e:
+                    logger.error(f"Photo download error: {e.__class__.__name__} - {str(e)}")
+            
+            return {
+                "type": "photo",
+                "url": file_id,
+                "size": media_obj.file_size,
+                "thumbnail": thumbnail_base64
+            }
         
         return {
             "type": media_type,
-            "url": str(file_id),
+            "url": file_id,
             "size": getattr(media_obj, "file_size", None),
-            "thumbnail": thumbnail_base64
+            "thumbnail": None
+        }
+
+    async def _parse_animation(self, animation_obj) -> dict:
+        logger.debug(f"Parsing animation: {animation_obj}")
+        if not animation_obj or not hasattr(animation_obj, 'thumbs'):
+            logger.error("Invalid animation object")
+            return {"type": "animation", "error": "invalid_object"}
+        
+        try:
+            # Check if thumbs exist and have items
+            if not animation_obj.thumbs or len(animation_obj.thumbs) == 0:
+                raise ValueError("No thumbnails available")
+            
+            thumb_file_id = animation_obj.thumbs[0].file_id
+            thumb_path = await self.client.download_media(thumb_file_id)
+            with open(thumb_path, "rb") as f:
+                thumbnail = base64.b64encode(f.read()).decode()
+            os.remove(thumb_path)
+        except Exception as e:
+            logger.error(f"Animation error: {str(e)}")
+            thumbnail = None
+        
+        return {
+            "type": "animation",
+            "url": getattr(animation_obj, "file_id", ""),
+            "size": animation_obj.file_size,
+            "duration": animation_obj.duration,
+            "thumbnail": thumbnail
         }
 
     async def get_post(self, channel: str, post_id: int) -> dict:
@@ -129,13 +227,14 @@ class TelegramClient:
                 chat_id=channel,
                 message_ids=post_id
             )
-            if not message:
-                raise ValueError("Message not found")
+            if not message or message.empty:
+                return {
+                    "error": "message_not_found",
+                    "details": f"Message {post_id} in {channel} does not exist"
+                }
             
             # Debug raw message structure
             print("Raw message object: %s", message)
-            print("Message attributes: %s", dir(message))
-            print("Message media type: %s", type(message.media) if message.media else None)
             
             return await self._parse_message(message)
         except errors.RPCError as e:

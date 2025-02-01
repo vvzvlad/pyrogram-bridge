@@ -1,5 +1,5 @@
 fastapi
 uvicorn
-pyrogram
+kurigram
 tgcrypto
-pillow>=10.0.0
+pillow
