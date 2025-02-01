@@ -181,12 +181,11 @@ class TelegramClient:
 
         return {
             "id": message.id,
-            "date": message.date.isoformat(),
+            "date": message.date,
             "html": processed_text,
-            "text": re.sub('<[^<]+?>', '', raw_text).strip(),
-            "views": message.views or 0,
-            "media_group_id": message.media_group_id,
-            "author": author_str
+            "raw_text": raw_text,
+            "media": media,
+            "author": self._get_author_info(message)
         }
 
     async def _parse_media(self, media_obj) -> dict:
@@ -497,3 +496,28 @@ class TelegramClient:
         except Exception as e:
             logger.error(f"Media download failed {file_id}: {type(e).__name__} - {str(e)}")
             raise 
+
+    async def get_channel_posts(self, channel: str, limit: int = 20) -> list:
+        try:
+            if not self.client.is_connected:
+                await self.start()
+            
+            posts = []
+            async for message in self.client.get_chat_history(
+                chat_id=channel,
+                limit=limit
+            ):
+                parsed = await self._parse_message(message)
+                if parsed:
+                    posts.append({
+                        "id": message.id,
+                        "date": message.date,
+                        "title": self._generate_title(parsed.get("raw_text", "")),
+                        "html": parsed["html"],
+                        "media": parsed.get("media", [])
+                    })
+            return posts
+
+        except Exception as e:
+            logger.error(f"Channel posts error {channel}: {type(e).__name__} - {str(e)}")
+            return [] 

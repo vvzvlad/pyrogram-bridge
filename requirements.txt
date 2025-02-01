@@ -1,5 +1,8 @@
 fastapi
 uvicorn
+python-multipart
 kurigram
 tgcrypto
 pillow
+feedgen
+python-dateutil

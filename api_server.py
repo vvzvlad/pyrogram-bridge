@@ -4,12 +4,13 @@ import re
 
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Response, BackgroundTasks
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import HTMLResponse, FileResponse, PlainTextResponse
 from telegram_client import TelegramClient
 from config import get_settings
 import mimetypes
 import os
 from pyrogram import errors
+from feedgen.feed import FeedGenerator
 
 logger = logging.getLogger(__name__)
 client = TelegramClient()
@@ -30,12 +31,7 @@ app = FastAPI(
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(
-        "api_server:app",
-        host=settings["api_host"],
-        port=settings["api_port"],
-        reload=False
-    )
+    uvicorn.run( "api_server:app", host=settings["api_host"], port=settings["api_port"], reload=False)
 
 @app.get("/html/{channel}/{post_id}", response_class=HTMLResponse)
 async def get_post_html(channel: str, post_id: int):
@@ -124,3 +120,47 @@ async def get_media(
             status_code=500, 
             detail=f"Internal server error: {str(e)}"
         ) 
+
+@app.get("/rss/{channel}", response_class=PlainTextResponse)
+async def get_rss_feed(channel: str):
+    try:
+        # Get last 20 posts
+        posts = await client.get_channel_posts(channel, limit=20)
+        
+        # Create FeedGenerator
+        fg = FeedGenerator()
+        fg.title(channel)
+        fg.link(href=f"{settings['pyrogram_bridge_url']}/html/{channel}", rel='alternate')
+        fg.description(f'Telegram channel {channel} RSS feed')
+        fg.language('ru-ru')
+        
+        # Add channel metadata
+        fg.id(f"{settings['pyrogram_bridge_url']}/rss/{channel}")
+        fg.link(href=f"{settings['pyrogram_bridge_url']}/rss/{channel}", rel='self', type='application/rss+xml')
+        
+        # Add posts
+        for post in posts:
+            fe = fg.add_entry()
+            fe.id(f"{settings['pyrogram_bridge_url']}/html/{channel}/{post['id']}")
+            fe.title(post['title'])
+            fe.link(href=f"{settings['pyrogram_bridge_url']}/html/{channel}/{post['id']}")
+            fe.pubDate(post['date'].astimezone(tz=None))
+            fe.description(post['html'])
+            fe.content(content=post['html'], type='CDATA')
+            
+            # Add media enclosures
+            for media in post.get('media', []):
+                if media.get('url'):
+                    fe.enclosure(
+                        url=f"{settings['pyrogram_bridge_url']}/media/{media['url']}",
+                        type=media.get('type', 'image/jpeg'),
+                        length=str(media.get('size', 0))
+                    )
+        
+        # Generate RSS
+        rss = fg.rss_str(pretty=True)
+        return Response(content=rss, media_type="application/xml")
+
+    except Exception as e:
+        logger.error(f"RSS generation error: {str(e)}")
+        raise HTTPException(status_code=500, detail="RSS feed generation failed") 
