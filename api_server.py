@@ -22,49 +22,11 @@ async def shutdown():
 async def get_post_html(channel: str, post_id: int):
     try:
         post = await client.get_post(channel, post_id)
-        if post.get("error"):
-            raise HTTPException(
-                status_code=404,
-                detail=post["details"]
-            )
-        return f"""
-        <html>
-            <head>
-                <title>Post {post_id}</title>
-                <style>
-                    body {{ font-family: Arial; margin: 20px; }}
-                    .poll {{ 
-                        border: 1px solid #ddd; 
-                        padding: 15px; 
-                        margin: 20px 0;
-                        border-radius: 8px;
-                    }}
-                    .poll-option {{ 
-                        margin: 10px 0;
-                    }}
-                    .progress-bar {{
-                        height: 20px;
-                        background: #4CAF50;
-                        border-radius: 4px;
-                        margin: 5px 0;
-                    }}
-                    .stats {{ 
-                        color: #666;
-                        font-size: 0.9em;
-                    }}
-                    .total {{
-                        margin-top: 15px;
-                        font-weight: bold;
-                    }}
-                </style>
-            </head>
-            <body>
-                {post['text']}
-            </body>
-        </html>
-        """
+        if "error" in post:
+            raise HTTPException(status_code=404, detail=post["details"])
+        return post["html"]
     except Exception as e:
-        logger.error(f"HTML endpoint error: {str(e)}")
+        logger.error(f"Error in get_post_html: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/json/{channel}/{post_id}")
