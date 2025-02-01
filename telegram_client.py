@@ -164,20 +164,6 @@ class TelegramClient:
         # Convert newlines to HTML breaks AFTER adding reactions
         processed_text = processed_text.replace('\n', '<br>')
 
-        # Extract author information
-        #author_str = ""
-        #if message.sender_chat:
-        #    title = getattr(message.sender_chat, "title", "").strip()
-        #    username = getattr(message.sender_chat, "username", "").strip()
-        #    author_str = f"{title} by @{username}" if username else title
-        #elif message.from_user:
-        #    first = getattr(message.from_user, "first_name", "").strip()
-        #    last = getattr(message.from_user, "last_name", "").strip()
-        #    username = getattr(message.from_user, "username", "").strip()
-        #    name = " ".join(filter(None, [first, last]))
-        #    author_str = f"{name} by @{username}" if username else name
-        #else:
-        #    author_str = "Unknown author"
 
         return {
             "text": re.sub('<[^<]+?>', '', raw_text).strip(),
@@ -358,7 +344,6 @@ class TelegramClient:
                 "html": "".join([m["html"] for m in parsed_messages if m["html"]]),
                 "text": "".join([m["text"] for m in parsed_messages if m["text"]]),
                 "views": max(m["views"] for m in parsed_messages),
-                "media_group_id": message.media_group_id,
                 "author": parsed_messages[0]["author"] if parsed_messages else ""
             }
             logger.debug(f"Combined result: {combined}")
@@ -417,6 +402,23 @@ class TelegramClient:
         }
 
     def _get_author_info(self, message: Message) -> dict:
+        # Extract author information
+        author_str = ""
+        if message.sender_chat:
+            title = getattr(message.sender_chat, "title", "").strip()
+            username = getattr(message.sender_chat, "username", "").strip()
+            author_str = f"{title} by @{username}" if username else title
+        elif message.from_user:
+            first = getattr(message.from_user, "first_name", "").strip()
+            last = getattr(message.from_user, "last_name", "").strip()
+            username = getattr(message.from_user, "username", "").strip()
+            name = " ".join(filter(None, [first, last]))
+            author_str = f"{name} by @{username}" if username else name
+        else:
+            author_str = "Unknown author"
+        return author_str
+
+
         if message.sender_chat:
             return {
                 "type": "channel",
