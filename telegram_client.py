@@ -176,7 +176,8 @@ class TelegramClient:
         return {
             "id": message.id,
             "date": message.date.isoformat(),
-            "text": processed_text,
+            "html": processed_text,
+            "text": re.sub('<[^<]+?>', '', raw_text).strip(),
             "views": message.views or 0,
             "media_group_id": message.media_group_id,
             "author": author_str
@@ -371,7 +372,16 @@ class TelegramClient:
                 "id": post_id,
                 "date": message.date.isoformat(),
                 "title": self._generate_title(message.text or message.caption or ""),
+                "html": "".join([m["html"] for m in parsed_messages if m["html"]]),
                 "text": "".join([m["text"] for m in parsed_messages if m["text"]]),
+                "raw_messages": [
+                    {
+                        "id": msg.id,
+                        "date": msg.date.isoformat(),
+                        "media_group_id": msg.media_group_id,
+                        "raw": self._parse_raw_message(msg)
+                    } for msg in all_messages
+                ],
                 "views": max(m["views"] for m in parsed_messages),
                 "media_group_id": message.media_group_id,
                 "author": parsed_messages[0]["author"] if parsed_messages else ""
@@ -384,4 +394,53 @@ class TelegramClient:
             raise
         except Exception as e:
             logger.error(f"Unexpected error in get_post: {str(e)}")
-            raise 
+            raise
+
+    def _parse_raw_message(self, message: Message) -> dict:
+        """Convert Pyrogram Message object to serializable dict"""
+        return {
+            "id": message.id,
+            "date": message.date.isoformat(),
+            "media_type": str(message.media).split('.')[-1].lower() if message.media else None,
+            "text": message.text or message.caption,
+            "author": self._get_author_info(message),
+            "views": message.views,
+            "reactions": self._parse_reactions(message),
+            "media": self._parse_media_metadata(message)
+        }
+
+    def _get_author_info(self, message: Message) -> dict:
+        if message.sender_chat:
+            return {
+                "type": "channel",
+                "title": getattr(message.sender_chat, "title", ""),
+                "username": getattr(message.sender_chat, "username", "")
+            }
+        elif message.from_user:
+            return {
+                "type": "user",
+                "first_name": getattr(message.from_user, "first_name", ""),
+                "last_name": getattr(message.from_user, "last_name", ""),
+                "username": getattr(message.from_user, "username", "")
+            }
+        return {"type": "unknown"}
+
+    def _parse_reactions(self, message: Message) -> list:
+        if not message.reactions:
+            return []
+        return [
+            {
+                "emoji": r.emoji,
+                "count": r.count
+            } for r in message.reactions.reactions
+        ]
+
+    def _parse_media_metadata(self, message: Message) -> dict:
+        if not message.media:
+            return {}
+        return {
+            "type": str(message.media).split('.')[-1].lower(),
+            "file_id": getattr(message.media, "file_id", None),
+            "file_size": getattr(message.media, "file_size", None),
+            "duration": getattr(message.media, "duration", None)
+        } 
