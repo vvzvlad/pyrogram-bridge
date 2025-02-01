@@ -157,7 +157,7 @@ class TelegramClient:
                         f"</div>"
                     )
             if previews:
-                previews_container = f"<div style='white-space: nowrap; overflow-x: auto;'>{''.join(previews)}</div>"
+                previews_container = f"<div class='media-preview' style='white-space: nowrap; overflow-x: auto;'>{''.join(previews)}</div>"
                 processed_text = previews_container + processed_text
 
         # Convert newlines to HTML breaks AFTER adding reactions
@@ -286,6 +286,15 @@ class TelegramClient:
             "thumbnail": thumbnail
         }
 
+    def _generate_title(self, raw_text: str) -> str:
+        if not raw_text:
+            return ""
+        # Берем первую непустую строку
+        first_line = next((line.strip() for line in raw_text.split('\n') if line.strip()), "")
+        # Обрезаем до 50 символов и убираем HTML-теги
+        clean_line = re.sub('<[^<]+?>', '', first_line)
+        return clean_line[:50].strip()
+
     async def get_post(self, channel: str, post_id: int) -> dict:
         try:
             message = await self.client.get_messages(
@@ -336,9 +345,14 @@ class TelegramClient:
             parsed_messages = [await self._parse_message(msg) for msg in all_messages]
 
             # Combine results
+            # Берем исходный текст из первого сообщения до обработки
+            raw_text = message.text or message.caption or ""
+            title = self._generate_title(raw_text)
+
             combined = {
                 "id": post_id,
                 "date": message.date.isoformat(),
+                "title": title,
                 "text": "".join([m["text"] for m in parsed_messages if m["text"]]),
                 "views": max(m["views"] for m in parsed_messages),
                 "media_group_id": message.media_group_id
