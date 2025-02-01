@@ -4,6 +4,7 @@ from pyrogram.types import Message
 from config import get_settings
 import base64
 import os
+import re
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -38,19 +39,74 @@ class TelegramClient:
             logger.info("Telegram client disconnected")
 
     async def _parse_message(self, message: Message) -> dict:
+        # Debug raw message structure
+        print(f"Raw message object: \n{message}")
+
         # Extract text from different sources
-        text = message.text.html if message.text else ""  # Get HTML formatted text
+        raw_text = message.text.html if message.text else ""
+        
+        # Handle polls
+        poll = getattr(message, "poll", None)
+        if poll:
+            try:
+                question = getattr(poll, "question", "No question text")
+                raw_text += f"\n📊 Poll: {poll.question}\n"
+                if hasattr(poll, "options") and poll.options:
+                    for i, option in enumerate(poll.options, 1):
+                        raw_text += f"{i}. {getattr(option, 'text', '')}\n"
+                raw_text += "\n→ Vote in Telegram 🔗\n"
+            except Exception as e:
+                logger.error(f"Error parsing poll: {str(e)}")
+                raw_text += "\n[Error displaying poll]"
         
         # Try to get caption for media messages
-        if not text and hasattr(message, "caption") and message.caption:
-            text = message.caption.html
+        if not raw_text and hasattr(message, "caption") and message.caption:
+            raw_text = message.caption.html
         
         # Try to get text from other attributes
-        if not text and hasattr(message, "action"):
-            text = str(message.action)
-        elif not text and hasattr(message, "entities"):
+        if not raw_text and hasattr(message, "action"):
+            raw_text = str(message.action)
+        elif not raw_text and hasattr(message, "entities"):
             # Extract HTML from entities
-            text = message.text.html if message.text else ""
+            raw_text = message.text.html if message.text else ""
+        
+        # Process text entities for links
+        text_parts = []
+        last_offset = 0
+        entities = getattr(message, "entities", None)
+        if entities and isinstance(entities, list):
+            # Sort entities by offset
+            entities = sorted(entities, key=lambda x: x.offset)
+            
+            for entity in entities:
+                if entity.offset > last_offset:
+                    text_parts.append(raw_text[last_offset:entity.offset])
+                
+                entity_text = raw_text[entity.offset:entity.offset+entity.length]
+                
+                if entity.type == "text_link":
+                    text_parts.append(f"<a href='{entity.url}'>{entity_text}</a>")
+                elif entity.type == "url":
+                    text_parts.append(f"<a href='{entity_text}'>{entity_text}</a>")
+                else:
+                    text_parts.append(entity_text)
+                
+                last_offset = entity.offset + entity.length
+            
+            # Add remaining text
+            if last_offset < len(raw_text):
+                text_parts.append(raw_text[last_offset:])
+            
+            processed_text = "".join(text_parts)
+        else:
+            processed_text = raw_text
+
+        # Replace only URLs not already in <a> tags
+        processed_text = re.sub(
+            r'(?<!href=")(https?://\S+)(?!">)',
+            r'<a href="\1">\1</a>',
+            processed_text
+        )
         
         # Parse media and add video markers
         media = []
@@ -74,9 +130,9 @@ class TelegramClient:
                     media.append(parsed_media)
                     logger.debug(f"Parsed media: {parsed_media}")
 
-        video_count = sum(1 for m in media if m.get("type") == "video")
-        if video_count > 0:
-            text = f"[{'Video' if video_count == 1 else f'{video_count} Videos'}] {text}" if text else f"[{'Video' if video_count == 1 else f'{video_count} Videos'}]"
+        #video_count = sum(1 for m in media if m.get("type") == "video")
+        #if video_count > 0:
+        # #   processed_text = f"[{'Video' if video_count == 1 else f'{video_count} Videos'}] {processed_text}" if processed_text else f"[{'Video' if video_count == 1 else f'{video_count} Videos'}]"
         
         # Always add reactions if present
         reactions_text = ""
@@ -85,25 +141,34 @@ class TelegramClient:
                 f"{r.emoji}({r.count})"
                 for r in message.reactions.reactions
             )
-        text += reactions_text
+        processed_text += reactions_text
 
         # Add media previews to text
         if media:
             previews = []
             for m in media:
                 if m.get('thumbnail'):
-                    previews.append(f"<img src='data:image/jpeg;base64,{m['thumbnail']}' style='max-width: 600px; margin: 10px 0;'>")
+                    media_type = m.get('type', 'media').upper()
+                    overlay = f"<div style='position:absolute; top:5px; left:5px; background:rgba(0,0,0,0.7); color:white; padding:2px 5px; border-radius:3px; font-size:0.8em;'>{media_type}</div>"
+                    previews.append(
+                        f"<div style='position:relative; display:inline-block; margin:5px;'>"
+                        f"<img src='data:image/jpeg;base64,{m['thumbnail']}' style='max-width:600px; max-height:600px; object-fit: contain;'>"
+                        f"{overlay}"
+                        f"</div>"
+                    )
             if previews:
-                text = "<br>".join(previews) + "<br><br>" + text
+                previews_container = f"<div style='white-space: nowrap; overflow-x: auto;'>{''.join(previews)}</div>"
+                processed_text = previews_container + processed_text
 
         # Convert newlines to HTML breaks AFTER adding reactions
-        text = text.replace('\n', '<br>')
+        processed_text = processed_text.replace('\n', '<br>')
 
         return {
             "id": message.id,
             "date": message.date.isoformat(),
-            "text": text,
-            "views": message.views or 0
+            "text": processed_text,
+            "views": message.views or 0,
+            "media_group_id": message.media_group_id
         }
 
     async def _parse_media(self, media_obj) -> dict:
@@ -233,10 +298,54 @@ class TelegramClient:
                     "details": f"Message {post_id} in {channel} does not exist"
                 }
             
-            # Debug raw message structure
-            print("Raw message object: %s", message)
-            
-            return await self._parse_message(message)
+            # Check for media group
+            media_group = []
+            if message.media_group_id:
+                logger.debug(f"Processing media group {message.media_group_id} for message {post_id}")
+                current_id = post_id
+                # Collect previous messages in group
+                while True:
+                    prev_msg = await self.client.get_messages(
+                        chat_id=channel,
+                        message_ids=current_id - 1
+                    )
+                    if prev_msg and prev_msg.media_group_id == message.media_group_id:
+                        logger.debug(f"Found previous message in group: {prev_msg.id}")
+                        media_group.insert(0, prev_msg)
+                        current_id -= 1
+                    else:
+                        break
+
+                # Collect next messages in group
+                current_id = post_id
+                while True:
+                    next_msg = await self.client.get_messages(
+                        chat_id=channel,
+                        message_ids=current_id + 1
+                    )
+                    if next_msg and next_msg.media_group_id == message.media_group_id:
+                        logger.debug(f"Found next message in group: {next_msg.id}")
+                        media_group.append(next_msg)
+                        current_id += 1
+                    else:
+                        break
+
+            # Process all messages in group
+            all_messages = media_group + [message]
+            logger.debug(f"Combined {len(all_messages)} messages in media group")
+            parsed_messages = [await self._parse_message(msg) for msg in all_messages]
+
+            # Combine results
+            combined = {
+                "id": post_id,
+                "date": message.date.isoformat(),
+                "text": "".join([m["text"] for m in parsed_messages if m["text"]]),
+                "views": max(m["views"] for m in parsed_messages),
+                "media_group_id": message.media_group_id
+            }
+            logger.debug(f"Combined result: {combined}")
+
+            return combined
         except errors.RPCError as e:
             logger.error(f"Telegram API error: {e.__class__.__name__} - {e}")
             raise

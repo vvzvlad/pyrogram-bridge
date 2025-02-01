@@ -29,7 +29,36 @@ async def get_post_html(channel: str, post_id: int):
             )
         return f"""
         <html>
-            <body style="font-family: Arial; margin: 20px;">
+            <head>
+                <title>Post {post_id}</title>
+                <style>
+                    body {{ font-family: Arial; margin: 20px; }}
+                    .poll {{ 
+                        border: 1px solid #ddd; 
+                        padding: 15px; 
+                        margin: 20px 0;
+                        border-radius: 8px;
+                    }}
+                    .poll-option {{ 
+                        margin: 10px 0;
+                    }}
+                    .progress-bar {{
+                        height: 20px;
+                        background: #4CAF50;
+                        border-radius: 4px;
+                        margin: 5px 0;
+                    }}
+                    .stats {{ 
+                        color: #666;
+                        font-size: 0.9em;
+                    }}
+                    .total {{
+                        margin-top: 15px;
+                        font-weight: bold;
+                    }}
+                </style>
+            </head>
+            <body>
                 {post['text']}
             </body>
         </html>
