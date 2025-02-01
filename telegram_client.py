@@ -5,6 +5,18 @@ from config import get_settings
 import os
 import re
 
+
+#tests
+#http://127.0.0.1:8000/html/DragorWW_space/114 — video
+#http://127.0.0.1:8000/html/DragorWW_space/20 - many photos
+#http://127.0.0.1:8000/html/DragorWW_space/58 - photos+video
+#http://127.0.0.1:8000/html/DragorWW_space/44 - poll
+#http://127.0.0.1:8000/html/DragorWW_space/46 - photo
+#http://127.0.0.1:8000/html/DragorWW_space/49, http://127.0.0.1:8000/html/DragorWW_space/63  — webpage
+#http://127.0.0.1:8000/html/deckru/826 - animation
+#http://127.0.0.1:8000/html/DragorWW_space/61 — links
+
+
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
@@ -78,24 +90,34 @@ class TelegramClient:
         # Parse media and add video markers
         media = []
         if message.media:
-            # Handle animations directly from message object
-            if hasattr(message, "animation") and message.animation:
-                animation = message.animation
-                media.append(await self._parse_animation(animation))
-            # Handle videos directly from message object
-            elif hasattr(message, "video") and message.video:
-                video = message.video
-                media.append(await self._parse_media(video))
-            # Handle photos directly from message object
-            elif hasattr(message, "photo") and message.photo:
-                photo = message.photo
-                media.append(await self._parse_media(photo))
-            else:
-                media_obj = message.media
-                parsed_media = await self._parse_media(media_obj)
-                if parsed_media["type"] not in ["webpage", "nonetype"]:
-                    media.append(parsed_media)
-                    logger.debug(f"Parsed media: {parsed_media}")
+            # Process web page with photo
+            web_page = getattr(message, "web_page", None)
+            if web_page and web_page.photo:
+                # Add photo from web page regardless of type
+                media.append({
+                    "type": "webpage_photo",
+                    "url": web_page.photo.file_id,
+                    "thumbnail_file_id": web_page.photo.file_id
+                })
+            elif not (getattr(message, "poll", None)):
+                # Handle animations directly from message object
+                if hasattr(message, "animation") and message.animation:
+                    animation = message.animation
+                    media.append(await self._parse_animation(animation))
+                # Handle videos directly from message object
+                elif hasattr(message, "video") and message.video:
+                    video = message.video
+                    media.append(await self._parse_media(video))
+                # Handle photos directly from message object
+                elif hasattr(message, "photo") and message.photo:
+                    photo = message.photo
+                    media.append(await self._parse_media(photo))
+                else:
+                    media_obj = message.media
+                    parsed_media = await self._parse_media(media_obj)
+                    if parsed_media["type"] not in ["webpage", "nonetype"]:
+                        media.append(parsed_media)
+                        logger.debug(f"Parsed media: {parsed_media}")
 
         # Always add reactions if present
         reactions_text = ""
@@ -125,12 +147,10 @@ class TelegramClient:
                         f"</div>"
                     )
                 elif m.get('thumbnail_file_id'):
-                    # Image preview for other types
-                    overlay = f"<div style='position:absolute; top:5px; left:5px; background:rgba(0,0,0,0.7); color:white; padding:2px 5px; border-radius:3px; font-size:0.8em;'>{media_type.upper()}</div>"
+                    # Image preview without type overlay
                     previews.append(
                         f"<div style='position:relative; display:inline-block; margin:5px;'>"
                         f"<img src='/media/{m['thumbnail_file_id']}' style='max-width:600px; max-height:600px; object-fit: contain;'>"
-                        f"{overlay}"
                         f"</div>"
                     )
 
@@ -184,6 +204,15 @@ class TelegramClient:
         if media_type == "photofile":
             file_id = getattr(media_obj, "photo_file_id", file_id)
         elif media_type == "webpage":
+            # Handle web page with photo
+            photo = getattr(media_obj, "photo", None)
+            if photo and hasattr(photo, "file_id"):
+                return {
+                    "type": "webpage_photo",
+                    "url": photo.file_id,
+                    "thumbnail_file_id": photo.file_id,
+                    "size": photo.file_size
+                }
             return {"type": "webpage", "url": getattr(media_obj, "url", "")}
         elif media_type == "video":
             return {
@@ -205,6 +234,13 @@ class TelegramClient:
             # Handle Telegram's internal media type
             actual_type = str(media_obj).rsplit('.', maxsplit=1)[-1].lower()
             logger.debug(f"Resolved MessageMediaType: {actual_type}")
+            
+            # Special handling for specific types
+            if actual_type == "poll":
+                return {"type": "poll", "url": None}
+            elif actual_type == "web_page":
+                return {"type": "webpage", "url": getattr(media_obj, "url", "")}
+            
             return {"type": actual_type}
         elif media_type == "photo":
             return {
