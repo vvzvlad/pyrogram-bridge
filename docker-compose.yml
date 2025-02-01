@@ -6,9 +6,10 @@ services:
       TG_API_ID: //TG_API_ID//
       TG_API_HASH: //TG_API_HASH//
       TG_SESSION_STRING: //TG_SESSION_STRING//
+      API_PORT: 8000
       TZ: Europe/Moscow
     ports:
-      - "8000:8000"
+      - "8080:8000"
     restart: always
     logging:
       driver: "json-file"

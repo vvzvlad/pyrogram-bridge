@@ -28,6 +28,15 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(
+        "api_server:app",
+        host=settings["api_host"],
+        port=settings["api_port"],
+        reload=False
+    )
+
 @app.get("/html/{channel}/{post_id}", response_class=HTMLResponse)
 async def get_post_html(channel: str, post_id: int):
     try:
