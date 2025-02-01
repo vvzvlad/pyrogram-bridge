@@ -304,10 +304,10 @@ class TelegramClient:
             return ""
         # Get first non-empty line
         first_line = next((line.strip() for line in raw_text.split('\n') if line.strip()), "")
-        # Trim to 50 characters and remove HTML tags
+        # Trim to 65 characters and remove HTML tags
         clean_line = re.sub('<[^<]+?>', '', first_line)
         
-        max_length = 50
+        max_length = 65
         if len(clean_line) <= max_length:
             return clean_line.strip()
         
@@ -366,7 +366,39 @@ class TelegramClient:
             "author": self._get_author_info(message),
             "views": message.views,
             "reactions": self._parse_reactions(message),
-            "media": self._parse_media_metadata(message)
+            "media": self._parse_media_metadata(message),
+            "sender_chat": self._parse_sender_chat(message),
+            "edit_date": message.edit_date.isoformat() if message.edit_date else None,
+            "forward_from": self._parse_forward_info(message),
+            "media_group_id": message.media_group_id,
+            "has_protected_content": message.has_protected_content
+        }
+
+    def _parse_sender_chat(self, message: Message) -> dict:
+        if not message.sender_chat:
+            return None
+        return {
+            "id": message.sender_chat.id,
+            "title": getattr(message.sender_chat, "title", ""),
+            "username": getattr(message.sender_chat, "username", ""),
+            "photo": self._parse_chat_photo(message.sender_chat.photo)
+        }
+
+    def _parse_forward_info(self, message: Message) -> dict:
+        if not message.forward_from_chat:
+            return None
+        return {
+            "id": message.forward_from_chat.id,
+            "title": getattr(message.forward_from_chat, "title", ""),
+            "username": getattr(message.forward_from_chat, "username", "")
+        }
+
+    def _parse_chat_photo(self, photo) -> dict:
+        if not photo:
+            return None
+        return {
+            "small_file_id": photo.small_file_id,
+            "big_file_id": photo.big_file_id
         }
 
     def _get_author_info(self, message: Message) -> dict:
@@ -402,5 +434,27 @@ class TelegramClient:
             "type": str(message.media).split('.')[-1].lower(),
             "file_id": getattr(message.media, "file_id", None),
             "file_size": getattr(message.media, "file_size", None),
-            "duration": getattr(message.media, "duration", None)
-        } 
+            "duration": getattr(message.media, "duration", None),
+            "photo": self._parse_photo_metadata(message.media) if hasattr(message.media, "photo") else None,
+            "thumbs": self._parse_thumbs(message.media)
+        }
+
+    def _parse_photo_metadata(self, media_obj) -> dict:
+        return {
+            "width": media_obj.width,
+            "height": media_obj.height,
+            "file_size": media_obj.file_size,
+            "date": media_obj.date.isoformat() if media_obj.date else None
+        }
+
+    def _parse_thumbs(self, media_obj) -> list:
+        if not hasattr(media_obj, "thumbs") or not media_obj.thumbs:
+            return []
+        return [
+            {
+                "file_id": thumb.file_id,
+                "width": thumb.width,
+                "height": thumb.height,
+                "file_size": thumb.file_size
+            } for thumb in media_obj.thumbs
+        ] 
