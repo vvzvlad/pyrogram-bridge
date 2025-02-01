@@ -129,6 +129,9 @@ class TelegramClient:
         processed_text += reactions_text
         raw_text += reactions_text
 
+        # Get base URL from config
+        base_url = settings["pyrogram_bridge_url"].rstrip('/')
+
         # Add media previews to text
         if media:
             previews = []
@@ -141,7 +144,7 @@ class TelegramClient:
                     previews.append(
                         f"<div style='margin:5px;'>"
                         f"<video controls style='max-width:600px; max-height:600px;'>"
-                        f"<source src='/media/{file_id}' type='video/mp4'>"
+                        f"<source src='{base_url}/media/{file_id}' type='video/mp4'>"
                         f"Your browser does not support the video tag."
                         f"</video>"
                         f"</div>"
@@ -150,7 +153,7 @@ class TelegramClient:
                     # Image preview without type overlay
                     previews.append(
                         f"<div style='position:relative; display:inline-block; margin:5px;'>"
-                        f"<img src='/media/{m['thumbnail_file_id']}' style='max-width:600px; max-height:600px; object-fit: contain;'>"
+                        f"<img src='{base_url}/media/{m['thumbnail_file_id']}' style='max-width:600px; max-height:600px; object-fit: contain;'>"
                         f"</div>"
                     )
 

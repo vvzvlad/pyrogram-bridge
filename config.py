@@ -16,5 +16,7 @@ def get_settings():
         "api_host": API_HOST,
         "api_port": API_PORT,
         "request_timeout": REQUEST_TIMEOUT,
-        "session_string": SESSION_STRING
+        "session_string": SESSION_STRING,
+        "pyrogram_bridge_url": os.getenv("PYROGRAM_BRIDGE_URL", ""),
+        "log_level": os.getenv("LOG_LEVEL", "INFO")
     } 
