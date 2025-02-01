@@ -130,7 +130,7 @@ async def get_rss_feed(channel: str):
         # Create FeedGenerator
         fg = FeedGenerator()
         fg.title(channel)
-        fg.link(href=f"{settings['pyrogram_bridge_url']}/html/{channel}", rel='alternate')
+        fg.link(href=f"https://t.me/{channel}", rel='alternate')
         fg.description(f'Telegram channel {channel} RSS feed')
         fg.language('ru-ru')
         
@@ -143,7 +143,7 @@ async def get_rss_feed(channel: str):
             fe = fg.add_entry()
             fe.id(f"{settings['pyrogram_bridge_url']}/html/{channel}/{post['id']}")
             fe.title(post['title'])
-            fe.link(href=f"{settings['pyrogram_bridge_url']}/html/{channel}/{post['id']}")
+            fe.link(href=f"https://t.me/{channel}/{post['id']}")
             fe.pubDate(post['date'].astimezone(tz=None))
             fe.description(post['html'])
             fe.content(content=post['html'], type='CDATA')
