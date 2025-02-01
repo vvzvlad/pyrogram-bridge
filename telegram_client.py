@@ -1,6 +1,6 @@
 import logging
 from pyrogram import Client, errors
-from pyrogram.types import Message
+from pyrogram.types import Message, Document, Audio, Video, VideoNote, Photo
 from config import get_settings
 import os
 import re
@@ -15,7 +15,10 @@ import re
 #http://127.0.0.1:8000/html/DragorWW_space/49, http://127.0.0.1:8000/html/DragorWW_space/63  — webpage
 #http://127.0.0.1:8000/html/deckru/826 - animation
 #http://127.0.0.1:8000/html/DragorWW_space/61 — links
+#http://127.0.0.1:8000/html/theyforcedme/3577 - video note
 
+#audio http://127.0.0.1:8000/html/theyforcedme/3572
+# https://t.me/theyforcedme/3558 audio-note
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -90,34 +93,28 @@ class TelegramClient:
         # Parse media and add video markers
         media = []
         if message.media:
-            # Process web page with photo
-            web_page = getattr(message, "web_page", None)
-            if web_page and web_page.photo:
-                # Add photo from web page regardless of type
-                media.append({
-                    "type": "webpage_photo",
-                    "url": web_page.photo.file_id,
-                    "thumbnail_file_id": web_page.photo.file_id
-                })
-            elif not (getattr(message, "poll", None)):
-                # Handle animations directly from message object
-                if hasattr(message, "animation") and message.animation:
-                    animation = message.animation
-                    media.append(await self._parse_animation(animation))
-                # Handle videos directly from message object
-                elif hasattr(message, "video") and message.video:
-                    video = message.video
-                    media.append(await self._parse_media(video))
-                # Handle photos directly from message object
-                elif hasattr(message, "photo") and message.photo:
-                    photo = message.photo
-                    media.append(await self._parse_media(photo))
-                else:
-                    media_obj = message.media
+            try:
+                # Изменен порядок проверки: video_note перед video
+                media_obj = None
+                if message.video_note:
+                    media_obj = message.video_note
+                elif message.video:
+                    media_obj = message.video
+                elif message.photo:
+                    media_obj = message.photo
+                elif message.document:
+                    media_obj = message.document
+                elif message.audio:
+                    media_obj = message.audio
+                
+                if media_obj:
                     parsed_media = await self._parse_media(media_obj)
-                    if parsed_media["type"] not in ["webpage", "nonetype"]:
+                    if parsed_media.get("url"):
                         media.append(parsed_media)
-                        logger.debug(f"Parsed media: {parsed_media}")
+                        logger.info(f"Processed media: {parsed_media}")
+            except Exception as e:
+                logger.error(f"Media processing error: {str(e)}")
+                media.append({"error": str(e)})
 
         # Always add reactions if present
         reactions_text = ""
@@ -139,7 +136,7 @@ class TelegramClient:
                 media_type = m.get('type', 'media')
                 file_id = m.get('url')
                 
-                if media_type in ['video', 'animation']:
+                if media_type in ['video', 'animation', 'video_note'] and file_id:
                     # Direct video/animation embedding
                     previews.append(
                         f"<div style='margin:5px;'>"
@@ -177,76 +174,49 @@ class TelegramClient:
             "author": self._get_author_info(message)
         }
 
+    def _get_best_thumb(self, thumbs: list) -> str:
+        """Select highest resolution thumbnail from available thumbs"""
+        if not thumbs:
+            return ""
+        return max(thumbs, key=lambda x: x.width * x.height).file_id
+
     async def _parse_media(self, media_obj) -> dict:
-        # Handle different media types
-        media_type = media_obj.__class__.__name__.lower()
-        logger.debug(f"Parsing media type: {media_type}")
-        
-        # Get file_id directly from media object
-        file_id = ""
-        if hasattr(media_obj, "file_id"):
-            file_id = media_obj.file_id
-        
-        thumbnail_file_id = None
-        if media_obj.thumbs:
-            thumbnail_file_id = media_obj.thumbs[0].file_id
-        
-        # Special cases
-        if media_type == "photofile":
-            file_id = getattr(media_obj, "photo_file_id", file_id)
-        elif media_type == "webpage":
-            # Handle web page with photo
-            photo = getattr(media_obj, "photo", None)
-            if photo and hasattr(photo, "file_id"):
-                return {
-                    "type": "webpage_photo",
-                    "url": photo.file_id,
-                    "thumbnail_file_id": photo.file_id,
-                    "size": photo.file_size
-                }
-            return {"type": "webpage", "url": getattr(media_obj, "url", "")}
-        elif media_type == "video":
-            return {
-                "type": "video",
+        try:
+            # Для VideoNote используем явное определение типа
+            if isinstance(media_obj, VideoNote):
+                file_id = media_obj.file_id
+                media_type = "video_note"
+            else:
+                file_id = getattr(media_obj, "file_id", "")
+                media_type = media_obj.__class__.__name__.lower()
+
+            result = {
+                "type": media_type,
                 "url": file_id,
-                "size": media_obj.file_size,
-                "duration": media_obj.duration,
-                "thumbnail_file_id": thumbnail_file_id
+                "size": getattr(media_obj, "file_size", 0),
+                "mime_type": getattr(media_obj, "mime_type", ""),
             }
-        elif media_type == "animation":
-            return {
-                "type": "animation",
-                "url": media_obj.file_id,
-                "size": media_obj.file_size,
-                "duration": media_obj.duration,
-                "thumbnail_file_id": thumbnail_file_id
-            }
-        elif media_type == "messagemediatype":
-            # Handle Telegram's internal media type
-            actual_type = str(media_obj).rsplit('.', maxsplit=1)[-1].lower()
-            logger.debug(f"Resolved MessageMediaType: {actual_type}")
+
+            if not result["url"]:
+                logger.error(f"Empty file_id for {media_type}: {media_obj}")
+                return {}
+
+            # Логирование для отладки
+            logger.debug(f"Parsed media: type={media_type}, file_id={file_id}")
+
+            # Обработка превью
+            if hasattr(media_obj, "thumbs"):
+                result["thumbnail_file_id"] = self._get_best_thumb(media_obj.thumbs)
             
-            # Special handling for specific types
-            if actual_type == "poll":
-                return {"type": "poll", "url": None}
-            elif actual_type == "web_page":
-                return {"type": "webpage", "url": getattr(media_obj, "url", "")}
-            
-            return {"type": actual_type}
-        elif media_type == "photo":
-            return {
-                "type": "photo",
-                "url": file_id,
-                "size": media_obj.file_size,
-                "thumbnail_file_id": file_id
-            }
-        
-        return {
-            "type": media_type,
-            "url": file_id,
-            "size": getattr(media_obj, "file_size", None),
-            "thumbnail_file_id": thumbnail_file_id
-        }
+            # Дополнительные атрибуты
+            for attr in ["duration", "width", "height", "file_name", "title", "performer"]:
+                if hasattr(media_obj, attr):
+                    result[attr] = getattr(media_obj, attr)
+
+            return result
+        except Exception as e:
+            logger.error(f"Media parse failed: {type(e).__name__} - {str(e)}")
+            return {}
 
     async def _parse_animation(self, animation_obj) -> dict:
         logger.debug(f"Parsing animation: {animation_obj}")
@@ -419,21 +389,6 @@ class TelegramClient:
         return author_str
 
 
-        if message.sender_chat:
-            return {
-                "type": "channel",
-                "title": getattr(message.sender_chat, "title", ""),
-                "username": getattr(message.sender_chat, "username", "")
-            }
-        elif message.from_user:
-            return {
-                "type": "user",
-                "first_name": getattr(message.from_user, "first_name", ""),
-                "last_name": getattr(message.from_user, "last_name", ""),
-                "username": getattr(message.from_user, "username", "")
-            }
-        return {"type": "unknown"}
-
     def _parse_reactions(self, message: Message) -> list:
         if not message.reactions:
             return []
@@ -526,3 +481,35 @@ class TelegramClient:
         except Exception as e:
             logger.error(f"Channel posts error {channel}: {type(e).__name__} - {str(e)}")
             return [] 
+
+    async def _process_media(self, media, media_type) -> dict:
+        try:
+            result = {
+                "type": str(media_type).split('.')[-1].lower(),
+                "file_id": getattr(media, "file_id", ""),
+                "file_unique_id": getattr(media, "file_unique_id", ""),
+                "file_size": getattr(media, "file_size", 0),
+                "mime_type": getattr(media, "mime_type", None),
+            }
+
+            # Handle thumbnails for media types that support them
+            if hasattr(media, "thumbs"):
+                thumbs = getattr(media, "thumbs", [])
+                if thumbs:
+                    result["thumb"] = self._get_best_thumb(thumbs)
+            
+            # Add type-specific fields using safe attribute access
+            if isinstance(media, (Document, Audio, Video, VideoNote)):
+                result.update({
+                    "file_name": getattr(media, "file_name", None),
+                    "duration": getattr(media, "duration", None),
+                    "width": getattr(media, "width", None),
+                    "height": getattr(media, "height", None),
+                    "title": getattr(media, "title", None),
+                    "performer": getattr(media, "performer", None),
+                })
+            
+            return result
+        except Exception as e:
+            logger.error(f"Media processing failed {type(media).__name__}: {type(e).__name__} - {str(e)}")
+            return {} 
