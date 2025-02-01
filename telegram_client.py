@@ -49,7 +49,6 @@ class TelegramClient:
         poll = getattr(message, "poll", None)
         if poll:
             try:
-                question = getattr(poll, "question", "No question text")
                 raw_text += f"\n📊 Poll: {poll.question}\n"
                 if hasattr(poll, "options") and poll.options:
                     for i, option in enumerate(poll.options, 1):
@@ -241,7 +240,7 @@ class TelegramClient:
             }
         elif media_type == "messagemediatype":
             # Handle Telegram's internal media type
-            actual_type = str(media_obj).split('.')[-1].lower()
+            actual_type = str(media_obj).rsplit('.', maxsplit=1)[-1].lower()
             logger.debug(f"Resolved MessageMediaType: {actual_type}")
             return {"type": actual_type}
         elif media_type == "photo":
@@ -301,16 +300,16 @@ class TelegramClient:
     def _generate_title(self, raw_text: str) -> str:
         if not raw_text:
             return ""
-        # Берем первую непустую строку
+        # Get first non-empty line
         first_line = next((line.strip() for line in raw_text.split('\n') if line.strip()), "")
-        # Обрезаем до 50 символов и убираем HTML-теги
+        # Trim to 50 characters and remove HTML tags
         clean_line = re.sub('<[^<]+?>', '', first_line)
         
         max_length = 50
         if len(clean_line) <= max_length:
             return clean_line.strip()
         
-        # Обрезаем до последнего пробела
+        # Cut to last space
         trimmed = clean_line[:max_length]
         last_space = trimmed.rfind(' ')
         if last_space > 0:
@@ -368,14 +367,10 @@ class TelegramClient:
             parsed_messages = [await self._parse_message(msg) for msg in all_messages]
 
             # Combine results
-            # Берем исходный текст из первого сообщения до обработки
-            raw_text = message.text or message.caption or ""
-            title = self._generate_title(raw_text)
-
             combined = {
                 "id": post_id,
                 "date": message.date.isoformat(),
-                "title": title,
+                "title": self._generate_title(message.text or message.caption or ""),
                 "text": "".join([m["text"] for m in parsed_messages if m["text"]]),
                 "views": max(m["views"] for m in parsed_messages),
                 "media_group_id": message.media_group_id,
