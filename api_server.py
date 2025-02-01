@@ -1,22 +1,28 @@
+import logging
+import json
+
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.responses import HTMLResponse
 from telegram_client import TelegramClient
 from config import get_settings
-import logging
-import json
 
 logger = logging.getLogger(__name__)
-app = FastAPI(title="PyroTg Bridge")
 client = TelegramClient()
 settings = get_settings()
 
-@app.on_event("startup")
-async def startup():
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    # Startup
     await client.start()
-
-@app.on_event("shutdown")
-async def shutdown():
+    yield
+    # Shutdown
     await client.stop()
+
+app = FastAPI(
+    title="PyroTg Bridge",
+    lifespan=lifespan
+)
 
 @app.get("/html/{channel}/{post_id}", response_class=HTMLResponse)
 async def get_post_html(channel: str, post_id: int):
@@ -32,7 +38,7 @@ async def get_post_html(channel: str, post_id: int):
         return post["html"]
     except Exception as e:
         logger.error(f"HTML endpoint error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 @app.get("/json/{channel}/{post_id}")
 async def get_post(channel: str, post_id: int):
