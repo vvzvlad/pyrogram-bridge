@@ -130,10 +130,6 @@ class TelegramClient:
                     media.append(parsed_media)
                     logger.debug(f"Parsed media: {parsed_media}")
 
-        #video_count = sum(1 for m in media if m.get("type") == "video")
-        #if video_count > 0:
-        # #   processed_text = f"[{'Video' if video_count == 1 else f'{video_count} Videos'}] {processed_text}" if processed_text else f"[{'Video' if video_count == 1 else f'{video_count} Videos'}]"
-        
         # Always add reactions if present
         reactions_text = ""
         if getattr(message, "reactions", None):
@@ -293,7 +289,18 @@ class TelegramClient:
         first_line = next((line.strip() for line in raw_text.split('\n') if line.strip()), "")
         # Обрезаем до 50 символов и убираем HTML-теги
         clean_line = re.sub('<[^<]+?>', '', first_line)
-        return clean_line[:50].strip()
+        
+        max_length = 50
+        if len(clean_line) <= max_length:
+            return clean_line.strip()
+        
+        # Обрезаем до последнего пробела
+        trimmed = clean_line[:max_length]
+        last_space = trimmed.rfind(' ')
+        if last_space > 0:
+            trimmed = trimmed[:last_space]
+        
+        return f"{trimmed.strip()}..." if trimmed else ""
 
     async def get_post(self, channel: str, post_id: int) -> dict:
         try:
