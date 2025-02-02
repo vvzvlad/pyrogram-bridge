@@ -6,19 +6,6 @@ import os
 import re
 
 
-#tests
-#http://127.0.0.1:8000/html/DragorWW_space/114 — video
-#http://127.0.0.1:8000/html/DragorWW_space/20 - many photos
-#http://127.0.0.1:8000/html/DragorWW_space/58 - photos+video
-#http://127.0.0.1:8000/html/DragorWW_space/44 - poll
-#http://127.0.0.1:8000/html/DragorWW_space/46 - photo
-#http://127.0.0.1:8000/html/DragorWW_space/49, http://127.0.0.1:8000/html/DragorWW_space/63  — webpage
-#http://127.0.0.1:8000/html/deckru/826 - animation
-#http://127.0.0.1:8000/html/DragorWW_space/61 — links
-#http://127.0.0.1:8000/html/theyforcedme/3577 - video note
-#http://127.0.0.1:8000/html/theyforcedme/3572 - audio
-#http://127.0.0.1:8000/html/theyforcedme/3558 audio-note
-
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
@@ -322,6 +309,10 @@ class TelegramClient:
         first_line = next((line.strip() for line in raw_text.split('\n') if line.strip()), "")
         # Trim and remove HTML tags
         clean_line = re.sub('<[^<]+?>', '', first_line)
+        
+        # Check if message contains only reactions
+        if re.match(r'^Reactions: ', clean_line):
+            return "📷 Media post"
         
         max_length = 65
         if len(clean_line) <= max_length:

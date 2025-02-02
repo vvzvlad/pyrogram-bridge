@@ -1,0 +1,283 @@
+import logging
+import copy
+import re
+from datetime import datetime
+from typing import Union, Dict, Any, List, Optional
+from pyrogram.types import Message
+from pyrogram.enums import MessageMediaType
+from config import get_settings
+
+Config = get_settings()
+
+logger = logging.getLogger(__name__)
+
+#tests
+#http://127.0.0.1:8000/post/html/DragorWW_space/114 — video
+#http://127.0.0.1:8000/post/html/DragorWW_space/20 - many photos
+#http://127.0.0.1:8000/post/html/DragorWW_space/58 - photos+video
+#http://127.0.0.1:8000/post/html/DragorWW_space/44 - poll
+#http://127.0.0.1:8000/post/html/DragorWW_space/46 - photo
+#http://127.0.0.1:8000/post/html/DragorWW_space/49, http://127.0.0.1:8000/post/html/DragorWW_space/63  — webpage
+#http://127.0.0.1:8000/post/html/deckru/826 - animation
+#http://127.0.0.1:8000/post/html/DragorWW_space/61 — links
+#http://127.0.0.1:8000/post/html/theyforcedme/3577 - video note
+#http://127.0.0.1:8000/post/html/theyforcedme/3572 - audio
+#http://127.0.0.1:8000/post/html/theyforcedme/3558 audio-note
+#http://127.0.0.1:8000/html/vvzvlad_lytdybr/426 - sticker
+
+class PostParser:
+    def __init__(self, client):
+        self.client = client
+
+    def _debug_message(self, message: Message) -> Message:
+        if Config["debug"]:   
+            debug_message = copy.deepcopy(message)
+            debug_message.sender_chat = None
+            debug_message.caption_entities = None
+            debug_message.reactions = None
+            debug_message.entities = None
+            print(debug_message)
+        return
+
+    async def get_post(self, channel: str, post_id: int, output_type: str = 'json') -> Union[str, Dict[Any, Any]]:
+        try:
+            message = await self.client.get_messages(channel, post_id)
+
+            self._debug_message(message)
+
+            if not message:
+                logger.error(f"post_not_found: channel {channel}, post_id {post_id}")
+                return None
+            
+            if output_type == 'html':
+                return self._format_html(message)
+            elif output_type == 'json':
+                return self._format_json(message)
+            else:
+                logger.error(f"Invalid output type: {output_type}")
+                return None
+            
+        except Exception as e:
+            logger.error(f"post_parsing_error: channel {channel}, post_id {post_id}, error {str(e)}")
+            raise
+
+    def _format_json(self, message: Message, naked: bool = False) -> Dict[Any, Any]:
+        html_content = self._format_html(message, naked=naked)
+        result = {
+            'channel': message.chat.username,
+            'message_id': message.id,
+            'date': datetime.timestamp(message.date),
+            'text': message.text or message.caption or '',
+            'html': html_content,
+            'title': self._generate_title(message),
+            'author': self._get_author_info(message),
+            'views': message.views,
+        }
+        
+        if message.media_group_id:
+            result['media_group_id'] = message.media_group_id
+        
+        return result
+
+    def _get_author_info(self, message: Message) -> str:
+        if message.sender_chat:
+            title = getattr(message.sender_chat, 'title', '').strip()
+            username = getattr(message.sender_chat, 'username', '').strip()
+            return f"{title} by @{username}" if username else title
+        elif message.from_user:
+            first = getattr(message.from_user, 'first_name', '').strip()
+            last = getattr(message.from_user, 'last_name', '').strip()
+            username = getattr(message.from_user, 'username', '').strip()
+            name = ' '.join(filter(None, [first, last]))
+            return f"{name} by @{username}" if username else name
+        return "Unknown author"
+
+    def _generate_title(self, message: Message) -> str:
+        text = message.text or message.caption or ''
+        if not text:
+            if message.media == MessageMediaType.PHOTO: return "📷 Photo"
+            elif message.media == MessageMediaType.VIDEO: return "🎥 Video"
+            elif message.media == MessageMediaType.ANIMATION: return "🎞 GIF"
+            elif message.media == MessageMediaType.AUDIO: return "🎵 Audio"
+            elif message.media == MessageMediaType.VOICE: return "🎤 Voice message"
+            elif message.media == MessageMediaType.VIDEO_NOTE: return "🎥 Video message"
+            elif message.media == MessageMediaType.STICKER: return "🎯 Sticker"
+            return "📷 Media post"
+
+        # Remove URLs
+        text = re.sub(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', '', text)
+        # Remove HTML tags
+        text = re.sub('<[^<]+?>', '', text)
+        # Remove multiple spaces and empty lines
+        text = '\n'.join(line.strip() for line in text.split('\n') if line.strip())
+
+        # Get first non-empty line
+        first_line = text.split('\n')[0] if text else ""
+        
+        max_length = 100
+        if len(first_line) <= max_length:
+            return first_line.strip()
+        
+        # Cut to last space
+        trimmed = first_line[:max_length]
+        last_space = trimmed.rfind(' ')
+        if last_space > 0:
+            trimmed = trimmed[:last_space]
+        
+        return f"{trimmed.strip()}..." if trimmed else ""
+
+    def _format_html(self, message: Message, naked: bool = False) -> str:
+        text = message.text.html if message.text else message.caption.html if message.caption else ''
+        text = text.replace('\n', '<br>')
+        html_content = []
+
+        if poll := getattr(message, "poll", None): # Poll formatting
+            if poll_html := self._format_poll(poll):
+                html_content.append(poll_html)
+                
+        base_url = Config['pyrogram_bridge_url']
+        if message.media:
+            file_id = self._get_file_id(message)
+            if file_id:
+                html_content.append(f'<div class="message-media">')
+                if message.media in [MessageMediaType.PHOTO, MessageMediaType.DOCUMENT]:
+                    html_content.append(f'<img src="{base_url}/media/{file_id}" alt="Media content" style="max-width:600px; max-height:600px; object-fit:contain;">')
+                elif message.media == MessageMediaType.VIDEO:
+                    html_content.append(f'<video controls src="{base_url}/media/{file_id}" style="max-width:600px; max-height:600px;"></video>')
+                elif message.media == MessageMediaType.ANIMATION:
+                    html_content.append(f'<video controls src="{base_url}/media/{file_id}" style="max-width:600px; max-height:600px;"></video>')
+                elif message.media == MessageMediaType.VIDEO_NOTE:
+                    html_content.append(f'<video controls src="{base_url}/media/{file_id}" style="max-width:600px; max-height:600px;"></video>')
+                elif message.media == MessageMediaType.AUDIO:
+                    mime_type = getattr(message.audio, 'mime_type', 'audio/mpeg')
+                    html_content.append(f'<audio controls style="width:100%; max-width:400px;"><source src="{base_url}/media/{file_id}" type="{mime_type}"></audio>')
+                elif message.media == MessageMediaType.VOICE:
+                    mime_type = getattr(message.voice, 'mime_type', 'audio/ogg')
+                    html_content.append(f'<audio controls style="width:100%; max-width:400px;"><source src="{base_url}/media/{file_id}" type="{mime_type}"></audio>')
+                elif message.media == MessageMediaType.STICKER:
+                    emoji = getattr(message.sticker, 'emoji', '')
+                    html_content.append(f'<img src="{base_url}/media/{file_id}" alt="Sticker {emoji}" style="max-width:300px; max-height:300px; object-fit:contain;">')
+                html_content.append('</div>')
+
+        
+        if webpage := getattr(message, "web_page", None): # Web page preview
+            if webpage_html := self._format_webpage(webpage):
+                html_content.append(webpage_html)
+
+        if text: # Message text
+            html_content.append(f'<div class="message-text">{text}</div>')
+
+        if not naked:
+            if reactions_views_html := self._format_reactions_and_views(message): # Add reactions and views
+                html_content.append(reactions_views_html)
+        
+        if not naked:
+            html = self._wrap_html(html_content)
+        else:
+            html = '\n'.join(html_content)
+            
+        return html
+
+    def _format_webpage(self, webpage) -> Union[str, None]:
+        base_url = Config['pyrogram_bridge_url']
+        try:
+            if photo := getattr(webpage, "photo", None):
+                if file_id := getattr(photo, "file_id", None):
+                    return (
+                        f'<div style="margin:5px;">'
+                        f'<a href="{webpage.url}" target="_blank">'
+                        f'<img src="{base_url}/media/{file_id}" style="max-width:600px; max-height:600px; object-fit:contain;"></a>'
+                        f'</div>'
+                    )
+            return None
+        except Exception as e:
+            logger.error(f"webpage_parsing_error: url {getattr(webpage, 'url', 'unknown')}, error {str(e)}")
+            return None
+
+    def _wrap_html(self, html_content: list) -> str:
+        struct  = [
+            '<!DOCTYPE html>', '<html>',
+            '<head>', '<meta charset="UTF-8">', '</head>',
+            '<body>', *html_content, '</body>',
+            '</html>'
+        ]
+        html_content = '\n'.join(struct)
+        return html_content
+
+    def _format_reactions_and_views(self, message: Message) -> Union[str, None]:
+        try:
+            html_parts = []
+            
+            if reactions := getattr(message, "reactions", None):
+                reactions_html = ''
+                for reaction in reactions.reactions:
+                    reactions_html += f'<span class="reaction">{reaction.emoji} {reaction.count}</span> '
+                html_parts.append(reactions_html)
+
+            if views := getattr(message, "views", None):
+                views_html = f'<span class="views">(Views: {views})</span>'
+                html_parts.append(views_html)
+
+            return ' '.join(html_parts) if html_parts else None
+            
+        except Exception as e:
+            logger.error(f"reactions_views_parsing_error: {str(e)}")
+            return None
+
+    def _format_poll(self, poll) -> str:
+        try:
+            poll_text = f"📊 Poll: {poll.question}\n"
+            if hasattr(poll, "options") and poll.options:
+                for i, option in enumerate(poll.options, 1):
+                    poll_text += f"{i}. {getattr(option, 'text', '')}\n"
+            poll_text += "\n→ Vote in Telegram 🔗\n"
+            return f'<div class="message-poll">{poll_text.replace(chr(10), "<br>")}</div>'
+        except Exception as e:
+            logger.error(f"poll_parsing_error: {str(e)}")
+            return '<div class="message-poll">[Error displaying poll]</div>'
+
+    def _get_file_id(self, message: Message) -> Union[str, None]:
+        try:
+            media_mapping = {
+                MessageMediaType.PHOTO: lambda m: m.photo.file_id,
+                MessageMediaType.VIDEO: lambda m: m.video.file_id,
+                MessageMediaType.DOCUMENT: lambda m: m.document.file_id,
+                MessageMediaType.AUDIO: lambda m: m.audio.file_id,
+                MessageMediaType.VOICE: lambda m: m.voice.file_id,
+                MessageMediaType.VIDEO_NOTE: lambda m: m.video_note.file_id,
+                MessageMediaType.ANIMATION: lambda m: m.animation.file_id,
+                MessageMediaType.STICKER: lambda m: m.sticker.file_id
+            }
+            
+            if message.media in media_mapping:
+                return media_mapping[message.media](message)
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"file_id_extraction_error: media_type {message.media}, error {str(e)}")
+            return None 
+
+    async def get_recent_posts(self, channel: str, limit: int = 20) -> List[Dict[Any, Any]]:
+        """
+        Get recent posts from channel
+        """
+        try:
+            messages = []
+            async for message in self.client.get_chat_history(channel, limit=limit):
+                try:
+                    post = await self.get_post(channel, message.id, output_type='json')
+                    if post:
+                        messages.append(post)
+                except Exception as e:
+                    logger.error(f"message_processing_error: channel {channel}, message_id {message.id}, error {str(e)}")
+                    continue
+                    
+            return messages
+            
+        except Exception as e:
+            logger.error(f"recent_posts_error: channel {channel}, error {str(e)}")
+            raise 
+
+    def format_message_for_feed(self, message: Message, naked: bool = False) -> Dict[Any, Any]:
+        return self._format_json(message, naked=naked) 
