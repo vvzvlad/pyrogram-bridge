@@ -542,15 +542,24 @@ class TelegramClient:
                 await self.start()
             
             posts = []
+            channel_title = ""
+            channel_icon = ""
             async for message in self.client.get_chat_history(
                 chat_id=channel,
                 limit=limit
             ):
+                if not channel_title and message.sender_chat:
+                    channel_title = getattr(message.sender_chat, "title", channel)
+                    if hasattr(message.sender_chat, "photo") and message.sender_chat.photo:
+                        channel_icon = message.sender_chat.photo.small_file_id
+                    
                 parsed = await self._parse_message(message)
-                if parsed and parsed.get('html'):  # Skip None and empty
+                if parsed and parsed.get('html'):
                     posts.append({
                         "id": message.id,
                         "date": message.date,
+                        "channel_title": channel_title,
+                        "channel_icon": channel_icon,
                         "title": self._generate_title(parsed.get("raw_text", "")),
                         "html": parsed["html"],
                         "media": parsed.get("media", [])

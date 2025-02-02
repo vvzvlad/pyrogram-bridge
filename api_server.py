@@ -129,10 +129,17 @@ async def get_rss_feed(channel: str):
         
         # Create FeedGenerator
         fg = FeedGenerator()
-        fg.title(channel)
+        channel_title = posts[0].get('channel_title', channel) if posts else channel
+        channel_icon = posts[0].get('channel_icon', '') if posts else ''
+        
+        fg.title(channel_title)
         fg.link(href=f"https://t.me/{channel}", rel='alternate')
         fg.description(f'Telegram channel {channel} RSS feed')
         fg.language('ru-ru')
+        
+        if channel_icon:
+            fg.logo(f"{settings['pyrogram_bridge_url']}/media/{channel_icon}")
+            fg.icon(f"{settings['pyrogram_bridge_url']}/media/{channel_icon}")
         
         # Add channel metadata
         fg.id(f"{settings['pyrogram_bridge_url']}/rss/{channel}")
