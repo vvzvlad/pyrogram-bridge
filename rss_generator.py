@@ -91,6 +91,9 @@ async def generate_channel_rss(channel: str, post_parser: Optional[PostParser] =
             if not group_posts:
                 continue
                 
+            # Sort posts within media group by message_id
+            group_posts.sort(key=lambda x: x['message_id'])
+            
             # Find post with most meaningful title
             main_post = group_posts[0]
             for post in group_posts:
