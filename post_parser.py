@@ -6,6 +6,8 @@ from typing import Union, Dict, Any, List, Optional
 from pyrogram.types import Message
 from pyrogram.enums import MessageMediaType
 from config import get_settings
+import os
+import json
 
 Config = get_settings()
 
@@ -136,6 +138,9 @@ class PostParser:
         
         html_content = []
 
+        # Save media file_ids
+        self._save_media_file_ids(message)
+                
         if poll := getattr(message, "poll", None): # Poll formatting
             if poll_html := self._format_poll(poll):
                 html_content.append(poll_html)
@@ -143,10 +148,11 @@ class PostParser:
         base_url = Config['pyrogram_bridge_url']
         if message.media:
             file_id = self._get_file_id(message)
+            print(file_id)
             if file_id:
                 html_content.append(f'<div class="message-media">')
                 if message.media in [MessageMediaType.PHOTO, MessageMediaType.DOCUMENT]:
-                    html_content.append(f'<img src="{base_url}/media/{file_id}" alt="Media content" style="max-width:600px; max-height:600px; object-fit:contain;">')
+                    html_content.append(f'<img src="{base_url}/media/{file_id}" style="max-width:600px; max-height:600px; object-fit:contain;">')
                 elif message.media == MessageMediaType.VIDEO:
                     html_content.append(f'<video controls src="{base_url}/media/{file_id}" style="max-width:600px; max-height:600px;"></video>')
                 elif message.media == MessageMediaType.ANIMATION:
@@ -215,7 +221,7 @@ class PostParser:
         base_url = Config['pyrogram_bridge_url']
         try:
             if photo := getattr(webpage, "photo", None):
-                if file_id := getattr(photo, "file_id", None):
+                if file_id := getattr(photo, "file_unique_id", None):
                     return (
                         f'<div style="margin:5px;">'
                         f'<a href="{webpage.url}" target="_blank">'
@@ -272,14 +278,14 @@ class PostParser:
     def _get_file_id(self, message: Message) -> Union[str, None]:
         try:
             media_mapping = {
-                MessageMediaType.PHOTO: lambda m: m.photo.file_id,
-                MessageMediaType.VIDEO: lambda m: m.video.file_id,
-                MessageMediaType.DOCUMENT: lambda m: m.document.file_id,
-                MessageMediaType.AUDIO: lambda m: m.audio.file_id,
-                MessageMediaType.VOICE: lambda m: m.voice.file_id,
-                MessageMediaType.VIDEO_NOTE: lambda m: m.video_note.file_id,
-                MessageMediaType.ANIMATION: lambda m: m.animation.file_id,
-                MessageMediaType.STICKER: lambda m: m.sticker.file_id
+                MessageMediaType.PHOTO: lambda m: m.photo.file_unique_id,
+                MessageMediaType.VIDEO: lambda m: m.video.file_unique_id,
+                MessageMediaType.DOCUMENT: lambda m: m.document.file_unique_id,
+                MessageMediaType.AUDIO: lambda m: m.audio.file_unique_id,
+                MessageMediaType.VOICE: lambda m: m.voice.file_unique_id,
+                MessageMediaType.VIDEO_NOTE: lambda m: m.video_note.file_unique_id,
+                MessageMediaType.ANIMATION: lambda m: m.animation.file_unique_id,
+                MessageMediaType.STICKER: lambda m: m.sticker.file_unique_id,
             }
             
             if message.media in media_mapping:
@@ -314,3 +320,51 @@ class PostParser:
 
     def format_message_for_feed(self, message: Message, naked: bool = False) -> Dict[Any, Any]:
         return self._format_json(message, naked=naked) 
+
+    def _save_media_file_ids(self, message: Message) -> None:
+        try:
+            file_data = {
+                'file_id': None,
+            }
+
+            if message.media:
+                if message.photo: file_data['file_id'] = message.photo.file_unique_id
+                elif message.video: file_data['file_id'] = message.video.file_unique_id
+                elif message.document: file_data['file_id'] = message.document.file_unique_id
+                elif message.audio: file_data['file_id'] = message.audio.file_unique_id
+                elif message.voice: file_data['file_id'] = message.voice.file_unique_id
+                elif message.video_note: file_data['file_id'] = message.video_note.file_unique_id
+                elif message.animation: file_data['file_id'] = message.animation.file_unique_id
+                elif message.sticker: file_data['file_id'] = message.sticker.file_unique_id
+                elif message.web_page and message.web_page.photo:
+                    file_data['file_id'] = message.web_page.photo.file_unique_id
+
+            if file_data['file_id']:
+                file_path = 'media_file_ids.json'
+                try:
+                    existing_data = []
+                    if os.path.exists(file_path):
+                        with open(file_path, 'r', encoding='utf-8') as f:
+                            existing_data = json.load(f)
+                    
+                    # Check if file_id already exists
+                    found = False
+                    for item in existing_data:
+                        if item['file_id'] == file_data['file_id']:
+                            item['added'] = datetime.now().timestamp()
+                            found = True
+                            break
+                    
+                    # Add new entry if not found
+                    if not found:
+                        file_data['added'] = datetime.now().timestamp()
+                        existing_data.append(file_data)
+                    
+                    with open(file_path, 'w', encoding='utf-8') as f:
+                        json.dump(existing_data, f, ensure_ascii=False, indent=2)
+
+                except Exception as e:
+                    logger.error(f"file_id_save_error: error writing to {file_path}: {str(e)}")
+
+        except Exception as e:
+            logger.error(f"file_id_collection_error: message_id {message.id}, error {str(e)}") 
