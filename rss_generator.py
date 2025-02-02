@@ -38,7 +38,6 @@ async def generate_channel_rss(channel: str, post_parser: Optional[PostParser] =
         try:
             channel_info = await post_parser.client.get_chat(channel)
             channel_title = channel_info.title or f"Telegram: {channel}"
-            channel_icon = getattr(channel_info.photo, 'small_file_id', None) if channel_info.photo else None
         except Exception as e: # raise error if channel not found
             if "USERNAME_INVALID" in str(e):
                 return create_error_feed(channel, base_url)
@@ -53,9 +52,6 @@ async def generate_channel_rss(channel: str, post_parser: Optional[PostParser] =
         fg.language('ru')
         #fg.dc.dc_creator(f"@{channel}")
         
-        if channel_icon:
-            fg.logo(f"{base_url}/media/{channel_icon}")
-            fg.icon(f"{base_url}/media/{channel_icon}")
         
         fg.id(f"{base_url}/rss/{channel}")
         
@@ -87,7 +83,7 @@ async def generate_channel_rss(channel: str, post_parser: Optional[PostParser] =
                 continue
         
         # Merge media groups
-        for group_id, group_posts in media_groups.items():
+        for _group_id, group_posts in media_groups.items():
             if not group_posts:
                 continue
                 

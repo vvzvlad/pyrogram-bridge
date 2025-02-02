@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 #http://127.0.0.1:8000/post/html/DragorWW_space/61 — links
 #http://127.0.0.1:8000/post/html/theyforcedme/3577 - video note
 #http://127.0.0.1:8000/post/html/theyforcedme/3572 - audio
-#http://127.0.0.1:8000/post/html/theyforcedme/3558 audio-note
+#http://127.0.0.1:8000/post/html/theyforcedme/3558 - audio-note
 #http://127.0.0.1:8000/html/vvzvlad_lytdybr/426 - sticker
 #http://127.0.0.1:8000/html/wrkshprn/634 — links without <a>
 
@@ -65,7 +65,7 @@ class PostParser:
             raise
 
     def _format_json(self, message: Message, naked: bool = False) -> Dict[Any, Any]:
-        html_content = self._format_html(message, naked=naked)
+        html_content = self._format_html(message)
         result = {
             'channel': message.chat.username,
             'message_id': message.id,
@@ -173,7 +173,7 @@ class PostParser:
 
         
         if webpage := getattr(message, "web_page", None): # Web page preview
-            if webpage_html := self._format_webpage(webpage):
+            if webpage_html := self._format_webpage(webpage, message):
                 html_content.append(webpage_html)
 
         if text: # Message text
@@ -218,12 +218,12 @@ class PostParser:
             logger.error(f"url_processing_error: error {str(e)}")
             return text
 
-    def _format_webpage(self, webpage) -> Union[str, None]:
+    def _format_webpage(self, webpage, message) -> Union[str, None]:
         base_url = Config['pyrogram_bridge_url']
         try:
             if photo := getattr(webpage, "photo", None):
                 if file_unique_id := getattr(photo, "file_unique_id", None):
-                    url = f"{base_url}/media/{webpage.chat.username}/{webpage.id}/{file_unique_id}"
+                    url = f"{base_url}/media/{message.chat.username}/{message.id}/{file_unique_id}"
                     return (
                         f'<div style="margin:5px;">'
                         f'<a href="{webpage.url}" target="_blank">'

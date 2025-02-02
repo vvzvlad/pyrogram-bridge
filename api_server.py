@@ -27,6 +27,44 @@ if __name__ == "__main__":
     import uvicorn
     uvicorn.run("api_server:app", host=Config["api_host"], port=Config["api_port"], reload=True)
 
+
+async def find_file_id_in_message(message, file_unique_id: str):
+    """Find file_id by checking all possible media types in message"""
+    if message.photo and message.photo.file_unique_id == file_unique_id:
+        return message.photo.file_id
+    elif message.video and message.video.file_unique_id == file_unique_id:
+        return message.video.file_id
+    elif message.animation and message.animation.file_unique_id == file_unique_id:
+        return message.animation.file_id
+    elif message.video_note and message.video_note.file_unique_id == file_unique_id:
+        return message.video_note.file_id
+    elif message.audio and message.audio.file_unique_id == file_unique_id:
+        return message.audio.file_id
+    elif message.voice and message.voice.file_unique_id == file_unique_id:
+        return message.voice.file_id
+    elif message.sticker and message.sticker.file_unique_id == file_unique_id:
+        return message.sticker.file_id
+    elif message.web_page and message.web_page.photo and message.web_page.photo.file_unique_id == file_unique_id:
+        return message.web_page.photo.file_id
+    elif message.document and message.document.file_unique_id == file_unique_id:
+        return message.document.file_id
+    return None
+
+async def prepare_file_response(file_path: str, background_tasks: BackgroundTasks):
+    """Prepare file response with proper headers and cleanup task"""
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="Temporary file not found")
+    
+    media_type, _ = mimetypes.guess_type(file_path)
+    if not media_type:
+        media_type = "application/octet-stream"
+    
+    background_tasks.add_task(lambda: os.remove(file_path) if os.path.exists(file_path) else None)
+    
+    headers = {"Content-Disposition": f"inline; filename={os.path.basename(file_path)}"}
+    return FileResponse(path=file_path, media_type=media_type, headers=headers)
+
+
 @app.get("/html/{channel}/{post_id}", response_class=HTMLResponse)
 @app.get("/post/html/{channel}/{post_id}", response_class=HTMLResponse)
 async def get_post_html(channel: str, post_id: int):
@@ -74,27 +112,25 @@ async def health_check():
         logger.error(error_message)
         raise HTTPException(status_code=500, detail=error_message) from e
 
-@app.get("/media/{file_id}")
-async def get_media(file_id: str, background_tasks: BackgroundTasks):
+@app.get("/media/{channel}/{post_id}/{file_unique_id}")
+async def get_media(channel: str, post_id: int, file_unique_id: str, background_tasks: BackgroundTasks):
     try:
-        file_path = await client.download_media_file(file_id) 
-        logger.info(f"Downloaded media file {file_id} to {file_path}")
-        if not os.path.exists(file_path): raise HTTPException(status_code=404, detail="Temporary file not found")
-        
-        media_type, _ = mimetypes.guess_type(file_path) # Determine media type from file extension
-        if not media_type: media_type = "application/octet-stream"
-        
-        background_tasks.add_task(lambda: os.remove(file_path) if os.path.exists(file_path) else None)
-        
-        headers = { "Content-Disposition": f"inline; filename={os.path.basename(file_path)}" }
-        return FileResponse( path=file_path, media_type=media_type, headers=headers)
+        message = await client.client.get_messages(channel, post_id)
+        file_id = await find_file_id_in_message(message, file_unique_id)
+                
+        if not file_id:
+            logger.error(f"Media with file_unique_id {file_unique_id} not found in message {post_id}")
+            raise HTTPException(status_code=404, detail="File not found in message")
+        file_path = await client.client.download_media(file_id)
+        logger.info(f"Downloaded media file {file_unique_id} to {file_path}")
+        return await prepare_file_response(file_path, background_tasks)
     except HTTPException:
         raise
     except errors.RPCError as e:
-        logger.error(f"Media request RPC error {file_id}: {type(e).__name__} - {str(e)}")
+        logger.error(f"Media request RPC error for file_unique_id {file_unique_id} in message {post_id}: {type(e).__name__} - {str(e)}")
         raise HTTPException(status_code=404, detail="File not found in Telegram") from e
     except Exception as e:
-        error_message = f"Failed to get media for file_id {file_id}: {str(e)}"
+        error_message = f"Failed to get media for file_unique_id {file_unique_id} in message {post_id}: {str(e)}"
         logger.error(error_message)
         raise HTTPException(status_code=500, detail=error_message) from e
 
