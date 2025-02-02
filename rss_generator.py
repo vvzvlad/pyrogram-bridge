@@ -45,7 +45,7 @@ async def generate_channel_rss(channel: str, post_parser: Optional[PostParser] =
         fg.link(href=f"https://t.me/{channel}", rel='alternate')
         fg.description(f'Telegram channel {channel} RSS feed')
         fg.language('ru')
-        fg.dc.dc_creator(f"@{channel}")
+        #fg.dc.dc_creator(f"@{channel}")
         
         if channel_icon:
             fg.logo(f"{base_url}/media/{channel_icon}")
