@@ -40,11 +40,12 @@ async def generate_channel_rss(channel: str, post_parser: Optional[PostParser] =
         channel_icon = getattr(channel_info.photo, 'small_file_id', None) if channel_info.photo else None
         
         # Set feed metadata
-        fg.title(channel_title)
+        main_name = f"{channel_title} (@{channel})"
+        fg.title(main_name)
         fg.link(href=f"https://t.me/{channel}", rel='alternate')
         fg.description(f'Telegram channel {channel} RSS feed')
         fg.language('ru')
-        fg.dc.dc_creator(f"{channel_title} by {channel}")
+        fg.dc.dc_creator(f"@{channel}")
         
         if channel_icon:
             fg.logo(f"{base_url}/media/{channel_icon}")
@@ -58,11 +59,13 @@ async def generate_channel_rss(channel: str, post_parser: Optional[PostParser] =
         
         async for message in post_parser.client.get_chat_history(channel, limit=limit):
             try:
-                if message.media_group_id:
-                    naked = True
-                else:
-                    naked = False
-                post = post_parser.format_message_for_feed(message, naked=naked)
+                # Skip service messages about pinned posts
+                if message.service and 'PINNED_MESSAGE' in str(message.service):
+                    logger.debug(f"Skipping pinned service message {message.id} in channel {channel}")
+                    continue
+                    
+                naked_html = True if message.media_group_id else False
+                post = post_parser.format_message_for_feed(message, naked=naked_html)
                 if not post:
                     continue
                     
@@ -118,7 +121,7 @@ async def generate_channel_rss(channel: str, post_parser: Optional[PostParser] =
             fe.pubDate(pub_date)
             fe.guid(post_link, permalink=True)
             
-            if post.get('author'):
+            if post.get('author') and post['author'] != channel:
                 fe.author(name="", email=post['author'])
                 
         rss_feed = fg.rss_str(pretty=True)
