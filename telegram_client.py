@@ -52,6 +52,11 @@ class TelegramClient:
             logger.info("Telegram client disconnected")
 
     async def _parse_message(self, message: Message) -> dict:
+        # Skip service messages about pinned posts
+        if getattr(message, 'service', None) == 'MessageServiceType.PINNED_MESSAGE':
+            logger.debug(f"Skipping pinned service message: {message.id}")
+            return None
+
         # Debug raw message structure
         print(f"Raw message object: \n{message}")
 
@@ -546,7 +551,7 @@ class TelegramClient:
                 limit=limit
             ):
                 parsed = await self._parse_message(message)
-                if parsed:
+                if parsed and parsed.get('html'):  # Skip None and empty
                     posts.append({
                         "id": message.id,
                         "date": message.date,
