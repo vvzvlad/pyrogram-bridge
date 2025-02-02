@@ -10,6 +10,7 @@ Config = get_settings()
 
 logger = logging.getLogger(__name__)
 
+
 async def generate_channel_rss(channel: str, post_parser: Optional[PostParser] = None, client = None, limit: int = 20) -> str:
     """
     Generate RSS feed for channel using actual messages
@@ -34,11 +35,16 @@ async def generate_channel_rss(channel: str, post_parser: Optional[PostParser] =
         fg.load_extension('dc')
         base_url = Config['pyrogram_bridge_url']
         
-        # Get channel info
-        channel_info = await post_parser.client.get_chat(channel)
-        channel_title = channel_info.title or f"Telegram: {channel}"
-        channel_icon = getattr(channel_info.photo, 'small_file_id', None) if channel_info.photo else None
-        
+        try:
+            channel_info = await post_parser.client.get_chat(channel)
+            channel_title = channel_info.title or f"Telegram: {channel}"
+            channel_icon = getattr(channel_info.photo, 'small_file_id', None) if channel_info.photo else None
+        except Exception as e: # raise error if channel not found
+            if "USERNAME_INVALID" in str(e):
+                return create_error_feed(channel, base_url)
+            else:
+                raise
+
         # Set feed metadata
         main_name = f"{channel_title} (@{channel})"
         fg.title(main_name)
@@ -132,3 +138,35 @@ async def generate_channel_rss(channel: str, post_parser: Optional[PostParser] =
     except Exception as e:
         logger.error(f"rss_generation_error: channel {channel}, error {str(e)}")
         raise 
+
+
+def create_error_feed(channel: str, base_url: str) -> str:
+    """
+    Create RSS feed with error message when channel is not found
+    Args:
+        channel: Telegram channel name
+        base_url: Base URL for RSS feed
+    Returns:
+        RSS feed as string in XML format
+    """
+    fg = FeedGenerator()
+    
+    fg.title(f"Error: Channel @{channel} not found")
+    fg.link(href=f"https://t.me/{channel}", rel='alternate')
+    fg.description(f'Error: Telegram channel @{channel} does not exist')
+    fg.language('en')
+    fg.id(f"{base_url}/rss/{channel}")
+    
+    fe = fg.add_entry()
+    fe.title("Channel not found")
+    fe.link(href=f"https://t.me/{channel}")
+    error_html = f"<p>The Telegram channel @{channel} does not exist or is not accessible.</p>"
+    fe.description(f"<![CDATA[{error_html}]]>")
+    fe.content(content=error_html, type='CDATA')
+    fe.pubDate(datetime.now(tz=timezone.utc))
+    fe.guid(f"https://t.me/{channel}", permalink=True)
+    
+    rss_feed = fg.rss_str(pretty=True)
+    if isinstance(rss_feed, bytes):
+        return rss_feed.decode('utf-8')
+    return rss_feed
