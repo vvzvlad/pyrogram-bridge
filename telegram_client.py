@@ -152,7 +152,6 @@ class TelegramClient:
                         f"<div style='margin:5px;'>"
                         f"<video controls style='max-width:600px; max-height:600px;'>"
                         f"<source src='{base_url}/media/{file_id}' type='video/mp4'>"
-                        f"Your browser does not support the video tag."
                         f"</video>"
                         f"</div>"
                     )
@@ -162,7 +161,6 @@ class TelegramClient:
                         f"<div style='margin:5px;'>"
                         f"<audio controls style='width:100%; max-width:400px;'>"
                         f"<source src='{base_url}/media/{file_id}' type='{m.get('mime_type', 'audio/mpeg')}'>"
-                        f"Your browser does not support the audio element."
                         f"</audio>"
                         f"</div>"
                     )
@@ -171,7 +169,6 @@ class TelegramClient:
                         f"<div style='margin:5px;'>"
                         f"<audio controls style='width:100%; max-width:400px;'>"
                         f"<source src='{base_url}/media/{file_id}' type='{m.get('mime_type', 'audio/ogg')}'>"
-                        f"Your browser does not support the audio element."
                         f"</audio>"
                         f"</div>"
                     )
@@ -180,7 +177,6 @@ class TelegramClient:
                         f"<div style='margin:5px;'>"
                         f"<video controls style='max-width:600px; max-height:600px;'>"
                         f"<source src='{base_url}/media/{file_id}' type='video/mp4'>"
-                        f"Your browser does not support the video tag."
                         f"</video>"
                         f"</div>"
                     )
@@ -195,7 +191,7 @@ class TelegramClient:
                     # Image preview without type overlay
                     previews.append(
                         f"<div style='position:relative; display:inline-block; margin:5px;'>"
-                        f"<img src='{base_url}/media/{m['url']}' style='max-width:600px; max-height:600px; object-fit: contain;'>"
+                        f"<img src='{base_url}/media/{m['url'].lstrip('/')}' style='max-width:600px; max-height:600px; object-fit: contain;'>"
                         f"</div>"
                     )
 
@@ -293,7 +289,7 @@ class TelegramClient:
                     "url": media_obj.url,
                     "title": getattr(media_obj, "title", ""),
                     "description": getattr(media_obj, "description", ""),
-                    "photo_url": f"{settings['pyrogram_bridge_url'].rstrip('/')}/media/{media_obj.photo.file_id}" if media_obj.photo else None
+                    "photo_url": f"{settings['pyrogram_bridge_url'].rstrip('/')}/media/{media_obj.photo.file_id.lstrip('/')}" if media_obj.photo else None
                 }
 
             return result
