@@ -147,27 +147,28 @@ class PostParser:
                 
         base_url = Config['pyrogram_bridge_url']
         if message.media:
-            file_id = self._get_file_id(message)
-            print(file_id)
-            if file_id:
+            file_unique_id = self._get_file_unique_id(message)
+            print(file_unique_id)
+            if file_unique_id:
+                url = f"{base_url}/media/{message.chat.username}/{message.id}/{file_unique_id}"
                 html_content.append(f'<div class="message-media">')
                 if message.media in [MessageMediaType.PHOTO, MessageMediaType.DOCUMENT]:
-                    html_content.append(f'<img src="{base_url}/media/{file_id}" style="max-width:600px; max-height:600px; object-fit:contain;">')
+                    html_content.append(f'<img src="{url}" style="max-width:600px; max-height:600px; object-fit:contain;">')
                 elif message.media == MessageMediaType.VIDEO:
-                    html_content.append(f'<video controls src="{base_url}/media/{file_id}" style="max-width:600px; max-height:600px;"></video>')
+                    html_content.append(f'<video controls src="{url}" style="max-width:600px; max-height:600px;"></video>')
                 elif message.media == MessageMediaType.ANIMATION:
-                    html_content.append(f'<video controls src="{base_url}/media/{file_id}" style="max-width:600px; max-height:600px;"></video>')
+                    html_content.append(f'<video controls src="{url}" style="max-width:600px; max-height:600px;"></video>')
                 elif message.media == MessageMediaType.VIDEO_NOTE:
-                    html_content.append(f'<video controls src="{base_url}/media/{file_id}" style="max-width:600px; max-height:600px;"></video>')
+                    html_content.append(f'<video controls src="{url}" style="max-width:600px; max-height:600px;"></video>')
                 elif message.media == MessageMediaType.AUDIO:
                     mime_type = getattr(message.audio, 'mime_type', 'audio/mpeg')
-                    html_content.append(f'<audio controls style="width:100%; max-width:400px;"><source src="{base_url}/media/{file_id}" type="{mime_type}"></audio>')
+                    html_content.append(f'<audio controls style="width:100%; max-width:400px;"><source src="{url}" type="{mime_type}"></audio>')
                 elif message.media == MessageMediaType.VOICE:
                     mime_type = getattr(message.voice, 'mime_type', 'audio/ogg')
-                    html_content.append(f'<audio controls style="width:100%; max-width:400px;"><source src="{base_url}/media/{file_id}" type="{mime_type}"></audio>')
+                    html_content.append(f'<audio controls style="width:100%; max-width:400px;"><source src="{url}" type="{mime_type}"></audio>')
                 elif message.media == MessageMediaType.STICKER:
                     emoji = getattr(message.sticker, 'emoji', '')
-                    html_content.append(f'<img src="{base_url}/media/{file_id}" alt="Sticker {emoji}" style="max-width:300px; max-height:300px; object-fit:contain;">')
+                    html_content.append(f'<img src="{url}" alt="Sticker {emoji}" style="max-width:300px; max-height:300px; object-fit:contain;">')
                 html_content.append('</div>')
 
         
@@ -221,11 +222,12 @@ class PostParser:
         base_url = Config['pyrogram_bridge_url']
         try:
             if photo := getattr(webpage, "photo", None):
-                if file_id := getattr(photo, "file_unique_id", None):
+                if file_unique_id := getattr(photo, "file_unique_id", None):
+                    url = f"{base_url}/media/{webpage.chat.username}/{webpage.id}/{file_unique_id}"
                     return (
                         f'<div style="margin:5px;">'
                         f'<a href="{webpage.url}" target="_blank">'
-                        f'<img src="{base_url}/media/{file_id}" style="max-width:600px; max-height:600px; object-fit:contain;"></a>'
+                        f'<img src="{url}" style="max-width:600px; max-height:600px; object-fit:contain;"></a>'
                         f'</div>'
                     )
             return None
@@ -275,7 +277,7 @@ class PostParser:
             logger.error(f"poll_parsing_error: {str(e)}")
             return '<div class="message-poll">[Error displaying poll]</div>'
 
-    def _get_file_id(self, message: Message) -> Union[str, None]:
+    def _get_file_unique_id(self, message: Message) -> Union[str, None]:
         try:
             media_mapping = {
                 MessageMediaType.PHOTO: lambda m: m.photo.file_unique_id,
