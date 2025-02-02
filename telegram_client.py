@@ -1,6 +1,6 @@
 import logging
 from pyrogram import Client, errors
-from pyrogram.types import Message, Document, Audio, Video, VideoNote, Photo
+from pyrogram.types import Message, Document, Audio, Video, VideoNote, Photo, Voice, Animation, WebPage
 from config import get_settings
 import os
 import re
@@ -16,9 +16,8 @@ import re
 #http://127.0.0.1:8000/html/deckru/826 - animation
 #http://127.0.0.1:8000/html/DragorWW_space/61 — links
 #http://127.0.0.1:8000/html/theyforcedme/3577 - video note
-
-#audio http://127.0.0.1:8000/html/theyforcedme/3572
-# https://t.me/theyforcedme/3558 audio-note
+#http://127.0.0.1:8000/html/theyforcedme/3572 - audio
+#http://127.0.0.1:8000/html/theyforcedme/3558 audio-note
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -106,6 +105,12 @@ class TelegramClient:
                     media_obj = message.document
                 elif message.audio:
                     media_obj = message.audio
+                elif message.voice:
+                    media_obj = message.voice
+                elif message.animation:
+                    media_obj = message.animation
+                elif message.web_page:
+                    media_obj = message.web_page
                 
                 if media_obj:
                     parsed_media = await self._parse_media(media_obj)
@@ -146,11 +151,46 @@ class TelegramClient:
                         f"</video>"
                         f"</div>"
                     )
-                elif m.get('thumbnail_file_id'):
+                elif media_type == 'audio' and file_id:
+                    # Audio player
+                    previews.append(
+                        f"<div style='margin:5px;'>"
+                        f"<audio controls style='width:100%; max-width:400px;'>"
+                        f"<source src='{base_url}/media/{file_id}' type='{m.get('mime_type', 'audio/mpeg')}'>"
+                        f"Your browser does not support the audio element."
+                        f"</audio>"
+                        f"</div>"
+                    )
+                elif media_type == 'voice' and file_id:
+                    previews.append(
+                        f"<div style='margin:5px;'>"
+                        f"<audio controls style='width:100%; max-width:400px;'>"
+                        f"<source src='{base_url}/media/{file_id}' type='{m.get('mime_type', 'audio/ogg')}'>"
+                        f"Your browser does not support the audio element."
+                        f"</audio>"
+                        f"</div>"
+                    )
+                elif media_type == 'animation' and file_id:
+                    previews.append(
+                        f"<div style='margin:5px;'>"
+                        f"<video controls style='max-width:600px; max-height:600px;'>"
+                        f"<source src='{base_url}/media/{file_id}' type='video/mp4'>"
+                        f"Your browser does not support the video tag."
+                        f"</video>"
+                        f"</div>"
+                    )
+                elif media_type == 'web_page' and m.get('photo_url'):
+                    previews.append(
+                        f"<div style='margin:5px;'>"
+                        f"<a href='{m.get('url', '#')}' target='_blank'>"
+                        f"<img src='{m['photo_url']}' style='max-width:600px; max-height:600px; object-fit: contain;'></a>"
+                        f"</div>"
+                    )
+                elif m.get('url') and media_type == 'photo':
                     # Image preview without type overlay
                     previews.append(
                         f"<div style='position:relative; display:inline-block; margin:5px;'>"
-                        f"<img src='{base_url}/media/{m['thumbnail_file_id']}' style='max-width:600px; max-height:600px; object-fit: contain;'>"
+                        f"<img src='{base_url}/media/{m['url']}' style='max-width:600px; max-height:600px; object-fit: contain;'>"
                         f"</div>"
                     )
 
@@ -183,12 +223,29 @@ class TelegramClient:
     async def _parse_media(self, media_obj) -> dict:
         try:
             # Для VideoNote используем явное определение типа
+            file_id = ""  # Инициализация по умолчанию
+            media_type = "unknown"
+            
             if isinstance(media_obj, VideoNote):
                 file_id = media_obj.file_id
                 media_type = "video_note"
+            elif isinstance(media_obj, Animation):
+                file_id = media_obj.file_id
+                media_type = "animation"
+            elif isinstance(media_obj, Voice):
+                file_id = media_obj.file_id
+                media_type = "voice"
+            elif isinstance(media_obj, WebPage):
+                media_type = "web_page"
+                if media_obj.photo:
+                    file_id = media_obj.photo.file_id
+                    logger.debug(f"WebPage with photo: {file_id}")
+                else:
+                    logger.warning("WebPage without photo")
             else:
                 file_id = getattr(media_obj, "file_id", "")
                 media_type = media_obj.__class__.__name__.lower()
+                logger.debug(f"Generic media type: {media_type}")
 
             result = {
                 "type": media_type,
@@ -206,12 +263,33 @@ class TelegramClient:
 
             # Обработка превью
             if hasattr(media_obj, "thumbs"):
-                result["thumbnail_file_id"] = self._get_best_thumb(media_obj.thumbs)
+                if result["type"] == "photo":
+                    result["url"] = media_obj.file_id  # Используем оригинальный file_id для фото
+                else:
+                    result["thumbnail_file_id"] = self._get_best_thumb(media_obj.thumbs)
             
             # Дополнительные атрибуты
             for attr in ["duration", "width", "height", "file_name", "title", "performer"]:
                 if hasattr(media_obj, attr):
                     result[attr] = getattr(media_obj, attr)
+
+            if isinstance(media_obj, Voice):
+                return {
+                    "type": "voice",
+                    "url": media_obj.file_id,
+                    "duration": media_obj.duration,
+                    "mime_type": media_obj.mime_type,
+                    "size": media_obj.file_size
+                }
+
+            if isinstance(media_obj, WebPage):
+                return {
+                    "type": "web_page",
+                    "url": media_obj.url,
+                    "title": getattr(media_obj, "title", ""),
+                    "description": getattr(media_obj, "description", ""),
+                    "photo_url": f"{settings['pyrogram_bridge_url'].rstrip('/')}/media/{media_obj.photo.file_id}" if media_obj.photo else None
+                }
 
             return result
         except Exception as e:
