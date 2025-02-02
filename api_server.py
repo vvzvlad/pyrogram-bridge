@@ -152,7 +152,7 @@ async def get_rss_feed(channel: str):
             fe.title(post['title'])
             fe.link(href=f"https://t.me/{channel}/{post['id']}")
             fe.pubDate(post['date'].astimezone(tz=None))
-            fe.description(post['html'])
+            fe.description(f"<![CDATA[{post['html']}]]>")
             fe.content(content=post['html'], type='CDATA')
             
             # Add media enclosures
