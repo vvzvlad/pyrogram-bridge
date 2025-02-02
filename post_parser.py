@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 #http://127.0.0.1:8000/post/html/theyforcedme/3572 - audio
 #http://127.0.0.1:8000/post/html/theyforcedme/3558 audio-note
 #http://127.0.0.1:8000/html/vvzvlad_lytdybr/426 - sticker
+#http://127.0.0.1:8000/html/wrkshprn/634 — links without <a>
 
 class PostParser:
     def __init__(self, client):
@@ -129,6 +130,10 @@ class PostParser:
     def _format_html(self, message: Message, naked: bool = False) -> str:
         text = message.text.html if message.text else message.caption.html if message.caption else ''
         text = text.replace('\n', '<br>')
+        
+        # Add hyperlinks to raw URLs
+        text = self._add_hyperlinks_to_raw_urls(text)
+        
         html_content = []
 
         if poll := getattr(message, "poll", None): # Poll formatting
@@ -177,6 +182,34 @@ class PostParser:
             html = '\n'.join(html_content)
             
         return html
+
+    def _add_hyperlinks_to_raw_urls(self, text: str) -> str:
+        try:
+            # Find all existing <a> tags
+            a_tags = re.finditer(r'<a[^>]*>.*?</a>', text)
+            # Store their positions
+            excluded_ranges = [(m.start(), m.end()) for m in a_tags]
+            
+            # Find all URLs
+            urls = re.finditer(r'https?://[^\s<>"\']+', text)
+            
+            # Build text with replacements
+            result = list(text)
+            for match in urls:
+                start, end = match.span()
+                
+                # Check if URL is inside an <a> tag
+                is_in_tag = any(tag_start <= start and end <= tag_end for tag_start, tag_end in excluded_ranges)
+                if not is_in_tag:
+                    url = match.group()
+                    replacement = f'<a href="{url}" target="_blank">{url}</a>'
+                    result[start:end] = replacement
+            
+            return ''.join(result)
+            
+        except Exception as e:
+            logger.error(f"url_processing_error: error {str(e)}")
+            return text
 
     def _format_webpage(self, webpage) -> Union[str, None]:
         base_url = Config['pyrogram_bridge_url']
