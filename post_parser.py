@@ -112,6 +112,7 @@ class PostParser:
             elif message.media == MessageMediaType.VOICE: return "🎤 Voice message"
             elif message.media == MessageMediaType.VIDEO_NOTE: return "🎥 Video message"
             elif message.media == MessageMediaType.STICKER: return "🎯 Sticker"
+            elif message.media == MessageMediaType.POLL: return "📊 Poll"
             return "📷 Media post"
 
         # Remove URLs
@@ -153,12 +154,11 @@ class PostParser:
                 html_content.append(poll_html)
                 
         base_url = Config['pyrogram_bridge_url']
-        if message.media:
+        if message.media and message.media != "MessageMediaType.POLL":
             file_unique_id = self._get_file_unique_id(message)
             if file_unique_id is None:
-                logger.error(f"File unique id not found for message {message.id}: {message}")
-                return
-            if file_unique_id:
+                logger.debug(f"File unique id not found for message {message.id}")
+            elif file_unique_id:
                 url = f"{base_url}/media/{message.chat.username}/{message.id}/{file_unique_id}"
                 logger.debug(f"Collected media file: {message.chat.username}/{message.id}/{file_unique_id}")
                 html_content.append(f'<div class="message-media">')
