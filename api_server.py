@@ -280,6 +280,36 @@ async def get_post(channel: str, post_id: int):
 async def health_check():
     try:
         me = await client.client.get_me()
+
+        # Compute cache statistics
+        cache_dir = os.path.abspath("./data/cache")
+        if os.path.isdir(cache_dir):
+            files = [f for f in os.listdir(cache_dir) if os.path.isfile(os.path.join(cache_dir, f))]
+            cache_files_count = len(files)
+            cache_total_size_bytes = sum(os.path.getsize(os.path.join(cache_dir, f)) for f in files)
+            cache_total_size_mb = round(cache_total_size_bytes / (1024 * 1024), 2)  # rounded size in MB
+        else:
+            cache_files_count = 0
+            cache_total_size_mb = 0
+
+        # Compute time difference from media_file_ids.json
+        media_file_ids_path = os.path.join(os.path.abspath("./data"), "media_file_ids.json")
+        cache_times = []
+        if os.path.exists(media_file_ids_path):
+            try:
+                with open(media_file_ids_path, "r", encoding="utf-8") as f:
+                    media_files = json.load(f)
+                for entry in media_files:
+                    if "added" in entry:
+                        cache_times.append(entry["added"])
+            except Exception as e:
+                logger.error(f"Error reading media_file_ids.json: {str(e)}")
+        if cache_times:
+            cache_time_diff_seconds = max(cache_times) - min(cache_times)
+            cache_time_diff_days = round(cache_time_diff_seconds / 86400, 2)  # rounded to two decimals
+        else:
+            cache_time_diff_days = 0
+
         return {
             "status": "ok",
             "tg_connected": client.client.is_connected,
@@ -288,6 +318,9 @@ async def health_check():
             "tg_phone": me.phone_number,
             "tg_first_name": me.first_name,
             "tg_last_name": me.last_name,
+            "cache_files_count": cache_files_count,
+            "cache_total_size_mb": cache_total_size_mb,
+            "cache_time_diff_days": cache_time_diff_days
         }
     except Exception as e:
         error_message = f"Failed to get health check: {str(e)}"
