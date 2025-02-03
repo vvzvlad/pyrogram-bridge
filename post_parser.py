@@ -232,14 +232,18 @@ class PostParser:
         base_url = Config['pyrogram_bridge_url']
         try:
             if photo := getattr(webpage, "photo", None):
+                logger.debug(f"Processing webpage with photo: message_id={message.id}, photo={photo}")
                 if file_unique_id := getattr(photo, "file_unique_id", None):
                     url = f"{base_url}/media/{message.chat.username}/{message.id}/{file_unique_id}"
+                    logger.debug(f"Generated media URL: {url}")
                     return (
                         f'<div style="margin:5px;">'
                         f'<a href="{webpage.url}" target="_blank">'
                         f'<img src="{url}" style="max-width:600px; max-height:600px; object-fit:contain;"></a>'
                         f'</div>'
                     )
+                else:
+                    logger.error(f"webpage_photo_error: no file_unique_id found for photo in message {message.id}")
             return None
         except Exception as e:
             logger.error(f"webpage_parsing_error: url {getattr(webpage, 'url', 'unknown')}, error {str(e)}")
@@ -298,6 +302,7 @@ class PostParser:
                 MessageMediaType.VIDEO_NOTE: lambda m: m.video_note.file_unique_id,
                 MessageMediaType.ANIMATION: lambda m: m.animation.file_unique_id,
                 MessageMediaType.STICKER: lambda m: m.sticker.file_unique_id,
+                MessageMediaType.WEB_PAGE: lambda m: m.web_page.photo.file_unique_id if m.web_page and m.web_page.photo else None
             }
             
             if message.media in media_mapping:
@@ -307,7 +312,7 @@ class PostParser:
             
         except Exception as e:
             logger.error(f"file_id_extraction_error: media_type {message.media}, error {str(e)}")
-            return None 
+            return None
 
     async def get_recent_posts(self, channel: str, limit: int = 20) -> List[Dict[Any, Any]]:
         """
