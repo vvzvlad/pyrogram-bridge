@@ -6,12 +6,12 @@ import json
 from datetime import datetime
 
 from contextlib import asynccontextmanager
+from pyrogram import errors
 from fastapi import FastAPI, HTTPException, Response, BackgroundTasks
-from fastapi.responses import HTMLResponse, FileResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, FileResponse
 from telegram_client import TelegramClient
 from config import get_settings
 from rss_generator import generate_channel_rss
-from pyrogram import errors
 from post_parser import PostParser
 
 logger = logging.getLogger(__name__)
@@ -72,7 +72,7 @@ async def find_file_id_in_message(message, file_unique_id: str):
         return message.document.file_id
     return None
 
-async def prepare_file_response(file_path: str, background_tasks: BackgroundTasks):
+async def prepare_file_response(file_path: str):
     """Prepare file response with proper headers"""
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="File not found")
@@ -83,6 +83,143 @@ async def prepare_file_response(file_path: str, background_tasks: BackgroundTask
     
     headers = {"Content-Disposition": f"inline; filename={os.path.basename(file_path)}"}
     return FileResponse(path=file_path, media_type=media_type, headers=headers)
+
+async def download_media_file(channel: str, post_id: int, file_unique_id: str) -> str:
+    """
+    Download media file from Telegram and save to cache
+    Returns path to downloaded file
+    """
+    cache_dir = os.path.abspath("./data/cache")
+    cache_path = os.path.join(cache_dir, f"{channel}-{post_id}-{file_unique_id}")
+    os.makedirs(cache_dir, exist_ok=True)
+
+    if os.path.exists(cache_path):
+        logger.info(f"Found cached media file: {cache_path}")
+        # Update timestamp for existing file
+        file_id = f"{channel}-{post_id}-{file_unique_id}"
+        file_path = os.path.join(os.path.abspath("./data"), 'media_file_ids.json')
+        try:
+            if os.path.exists(file_path):
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    media_files = json.load(f)
+                for file_data in media_files:
+                    if file_data['file_id'] == file_id:
+                        file_data['added'] = datetime.now().timestamp()
+                        break
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    json.dump(media_files, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to update timestamp for {file_id}: {str(e)}")
+        return cache_path
+
+    message = await client.client.get_messages(channel, post_id)
+    file_id = await find_file_id_in_message(message, file_unique_id)
+            
+    if not file_id:
+        logger.error(f"Media with file_unique_id {file_unique_id} not found in message {post_id}")
+        raise HTTPException(status_code=404, detail="File not found in message")
+        
+    file_path = await client.client.download_media(file_id, file_name=cache_path)
+    logger.info(f"Downloaded media file {file_unique_id} to {cache_path}")
+    return file_path
+
+
+async def remove_old_cached_files(media_files: list, cache_dir: str) -> tuple[list, int]:
+    """
+    Remove files that haven't been accessed for more than 20 days
+    Returns tuple of (updated media files list, number of removed files)
+    """
+    current_time = datetime.now().timestamp()
+    updated_media_files = []
+    files_removed = 0
+
+    for file_data in media_files:
+        try:
+            file_id = file_data.get('file_id')
+            if not file_id:
+                continue
+
+            last_access_time = file_data.get('added', 0)
+            days_since_access = (current_time - last_access_time) / (24 * 3600)
+
+            if days_since_access > 20:
+                channel, post_id_str, file_unique_id = file_id.split('-', 2)
+                cache_path = os.path.join(cache_dir, f"{channel}-{post_id_str}-{file_unique_id}")
+                
+                if os.path.exists(cache_path):
+                    try:
+                        os.remove(cache_path)
+                        files_removed += 1
+                        logger.info(f"Removed old cached file: {cache_path}, last access {days_since_access:.1f} days ago")
+                    except Exception as e:
+                        logger.error(f"Failed to remove cached file {cache_path}: {str(e)}")
+                        updated_media_files.append(file_data)
+                continue
+
+            updated_media_files.append(file_data)
+
+        except Exception as e:
+            logger.error(f"Error processing cache entry {file_data}: {str(e)}")
+            continue
+
+    return updated_media_files, files_removed
+
+
+async def download_new_files(media_files: list, cache_dir: str):
+    """
+    Download files that are not in cache yet
+    """
+    for file_data in media_files:
+        try:
+            file_id = file_data['file_id']
+            if not file_id:
+                continue
+
+            channel, post_id_str, file_unique_id = file_id.split('-', 2)
+            post_id = int(post_id_str)
+            cache_path = os.path.join(cache_dir, f"{channel}-{post_id}-{file_unique_id}")
+            
+            if not os.path.exists(cache_path):
+                logger.info(f"Background download started for {file_id}")
+                await download_media_file(channel, post_id, file_unique_id)
+                await asyncio.sleep(1)  # Delay between downloads
+        
+        except Exception as e:
+            logger.error(f"Background download failed for {file_id}: {str(e)}")
+            continue
+
+
+async def cache_media_files():
+    """Background task for cache management: removes old files and downloads new ones"""
+    delay = 60
+    while True:
+        try:
+            file_path = os.path.join(os.path.abspath("./data"), 'media_file_ids.json')
+            if not os.path.exists(file_path):
+                await asyncio.sleep(delay)
+                continue
+
+            with open(file_path, 'r', encoding='utf-8') as f:
+                media_files = json.load(f)
+
+            cache_dir = os.path.abspath("./data/cache")
+            updated_media_files, files_removed = await remove_old_cached_files(media_files, cache_dir)
+
+            if files_removed > 0:
+                try:
+                    with open(file_path, 'w', encoding='utf-8') as f:
+                        json.dump(updated_media_files, f, ensure_ascii=False, indent=2)
+                    logger.info(f"Removed {files_removed} old files from cache")
+                except Exception as e:
+                    logger.error(f"Failed to update media_file_ids.json: {str(e)}")
+
+            await download_new_files(updated_media_files, cache_dir)
+            await asyncio.sleep(delay)  # Check every delay seconds
+            
+        except Exception as e:
+            logger.error(f"Cache media files error: {str(e)}")
+            await asyncio.sleep(delay)
+
 
 
 @app.get("/html/{channel}/{post_id}", response_class=HTMLResponse)
@@ -132,35 +269,11 @@ async def health_check():
         logger.error(error_message)
         raise HTTPException(status_code=500, detail=error_message) from e
 
-async def download_media_file(channel: str, post_id: int, file_unique_id: str) -> str:
-    """
-    Download media file from Telegram and save to cache
-    Returns path to downloaded file
-    """
-    cache_dir = os.path.abspath("./data/cache")
-    cache_path = os.path.join(cache_dir, f"{channel}-{post_id}-{file_unique_id}")
-    os.makedirs(cache_dir, exist_ok=True)
-
-    if os.path.exists(cache_path):
-        logger.info(f"Found cached media file: {cache_path}")
-        return cache_path
-
-    message = await client.client.get_messages(channel, post_id)
-    file_id = await find_file_id_in_message(message, file_unique_id)
-            
-    if not file_id:
-        logger.error(f"Media with file_unique_id {file_unique_id} not found in message {post_id}")
-        raise HTTPException(status_code=404, detail="File not found in message")
-        
-    file_path = await client.client.download_media(file_id, file_name=cache_path)
-    logger.info(f"Downloaded media file {file_unique_id} to {cache_path}")
-    return file_path
-
 @app.get("/media/{channel}/{post_id}/{file_unique_id}")
-async def get_media(channel: str, post_id: int, file_unique_id: str, background_tasks: BackgroundTasks):
+async def get_media(channel: str, post_id: int, file_unique_id: str):
     try:
         file_path = await download_media_file(channel, post_id, file_unique_id)
-        return await prepare_file_response(file_path, background_tasks)
+        return await prepare_file_response(file_path)
     except HTTPException:
         raise
     except errors.RPCError as e:
@@ -184,44 +297,3 @@ async def get_rss_feed(channel: str, limit: int = 20):
         error_message = f"Failed to generate RSS feed for channel {channel}: {str(e)}"
         logger.error(error_message)
         raise HTTPException(status_code=500, detail=error_message) from e 
-
-async def cache_media_files():
-    """Background task to download media files to cache"""
-    while True:
-        try:
-            file_path = os.path.join(os.path.abspath("./data"), 'media_file_ids.json')
-            if not os.path.exists(file_path):
-                await asyncio.sleep(60)
-                continue
-
-            with open(file_path, 'r', encoding='utf-8') as f:
-                media_files = json.load(f)
-
-            for file_data in media_files:
-                try:
-                    file_id = file_data['file_id']
-                    if not file_id:
-                        continue
-
-                    # Parse file_id to get parameters
-                    channel, post_id_str, file_unique_id = file_id.split('-', 2)
-                    post_id = int(post_id_str)  # Convert post_id to integer
-                    
-                    # Check if file already exists in cache
-                    cache_dir = os.path.abspath("./data/cache")
-                    cache_path = os.path.join(cache_dir, f"{channel}-{post_id}-{file_unique_id}")
-                    
-                    if not os.path.exists(cache_path):
-                        logger.info(f"Background download started for {file_id}")
-                        await download_media_file(channel, post_id, file_unique_id)
-                        await asyncio.sleep(1)  # Delay between downloads
-                
-                except Exception as e:
-                    logger.error(f"Background download failed for {file_id}: {str(e)}")
-                    continue
-
-            await asyncio.sleep(60)  # Check every minute
-            
-        except Exception as e:
-            logger.error(f"Cache media files error: {str(e)}")
-            await asyncio.sleep(60) 
