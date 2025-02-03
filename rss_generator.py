@@ -38,8 +38,8 @@ async def generate_channel_rss(channel: str, post_parser: Optional[PostParser] =
         try:
             channel_info = await post_parser.client.get_chat(channel)
             channel_title = channel_info.title or f"Telegram: {channel}"
-        except Exception as e: # raise error if channel not found
-            if "USERNAME_INVALID" in str(e):
+        except Exception as e:  # raise error if channel not found
+            if "USERNAME_INVALID" in str(e) or "USERNAME_NOT_OCCUPIED" in str(e):
                 return create_error_feed(channel, base_url)
             else:
                 raise
@@ -141,12 +141,12 @@ async def generate_channel_rss(channel: str, post_parser: Optional[PostParser] =
 
 def create_error_feed(channel: str, base_url: str) -> str:
     """
-    Create RSS feed with error message when channel is not found
+    Create an empty RSS feed with metadata indicating an error when the channel is not found.
     Args:
         channel: Telegram channel name
         base_url: Base URL for RSS feed
     Returns:
-        RSS feed as string in XML format
+        Empty RSS feed as string in XML format.
     """
     fg = FeedGenerator()
     
@@ -164,7 +164,7 @@ def create_error_feed(channel: str, base_url: str) -> str:
     fe.content(content=error_html, type='CDATA')
     fe.pubDate(datetime.now(tz=timezone.utc))
     fe.guid(f"https://t.me/{channel}", permalink=True)
-    
+
     rss_feed = fg.rss_str(pretty=True)
     if isinstance(rss_feed, bytes):
         return rss_feed.decode('utf-8')
