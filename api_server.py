@@ -53,6 +53,10 @@ if __name__ == "__main__":
 
 async def find_file_id_in_message(message, file_unique_id: str):
     """Find file_id by checking all possible media types in message"""
+    if message.media == "MessageMediaType.POLL":
+        logger.debug(f"Message {message.id} is a poll, skipping media search")
+        return None
+        
     if message.photo and message.photo.file_unique_id == file_unique_id:
         return message.photo.file_id
     elif message.video and message.video.file_unique_id == file_unique_id:
@@ -122,6 +126,9 @@ async def download_media_file(channel: str, post_id: int, file_unique_id: str) -
         return cache_path
 
     message = await client.client.get_messages(channel, post_id)
+    if message.media == "MessageMediaType.POLL":
+        return None
+        
     file_id = await find_file_id_in_message(message, file_unique_id)
             
     if not file_id:
