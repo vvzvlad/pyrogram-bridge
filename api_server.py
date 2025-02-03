@@ -5,6 +5,7 @@ import asyncio
 import json
 import magic
 from datetime import datetime
+import time
 
 from contextlib import asynccontextmanager
 from pyrogram import errors
@@ -14,6 +15,7 @@ from telegram_client import TelegramClient
 from config import get_settings
 from rss_generator import generate_channel_rss
 from post_parser import PostParser
+from starlette.background import BackgroundTask  # imported for background file deletion
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -77,7 +79,21 @@ async def find_file_id_in_message(message, file_unique_id: str):
         return message.document.file_id
     return None
 
-async def prepare_file_response(file_path: str):
+
+def delayed_delete_file(file_path: str, delay: int = 300):
+    """
+    Delete temporary file after a delay to ensure complete file delivery.
+    Delay is set to 5 minutes by default.
+    """
+    time.sleep(delay)
+    try:
+        os.remove(file_path)
+        logger.info(f"Deleted temporary file {file_path} after delay of {delay} seconds")
+    except Exception as e:
+        logger.error(f"Failed to delete temporary file {file_path}: {str(e)}")
+
+
+async def prepare_file_response(file_path: str, delete_after: bool = False):
     """Prepare file response with proper headers"""
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="File not found")
@@ -95,7 +111,10 @@ async def prepare_file_response(file_path: str):
     
     logger.debug(f"Determined media type for {os.path.basename(file_path)}: {media_type}")
     headers = {"Content-Disposition": f"inline; filename={os.path.basename(file_path)}"}
-    return FileResponse(path=file_path, media_type=media_type, headers=headers)
+    if delete_after:
+        return FileResponse(path=file_path, media_type=media_type, headers=headers, background=BackgroundTask(delayed_delete_file, file_path))
+    else:
+        return FileResponse(path=file_path, media_type=media_type, headers=headers)
 
 async def download_media_file(channel: str, post_id: int, file_unique_id: str) -> str:
     """
@@ -103,41 +122,63 @@ async def download_media_file(channel: str, post_id: int, file_unique_id: str) -
     Returns path to downloaded file
     """
     cache_dir = os.path.abspath("./data/cache")
-    cache_path = os.path.join(cache_dir, f"{channel}-{post_id}-{file_unique_id}")
     os.makedirs(cache_dir, exist_ok=True)
+    
+    message = await client.client.get_messages(channel, post_id)
+    if message.media == "MessageMediaType.POLL":
+        return None, False
+    
+    # Check if it is a video and if its size exceeds 100 MB
+    is_large_video = False
+    if message.video:
+        try:
+            if message.video.file_size > 100 * 1024 * 1024:
+                is_large_video = True
+        except Exception as e:
+            logger.error(f"Failed to get video file size for message {post_id}: {str(e)}")
+    
+    if is_large_video:
+        # For large video, download without permanent caching; use a temporary file.
+        temp_file_path = os.path.join(cache_dir, f"temp_{channel}-{post_id}-{file_unique_id}")
+        if os.path.exists(temp_file_path):
+            logger.info(f"Temporary file {temp_file_path} already exists, serving cached large video")
+            return temp_file_path, False
+        file_id = await find_file_id_in_message(message, file_unique_id)
+        if not file_id:
+            logger.error(f"Media with file_unique_id {file_unique_id} not found in message {post_id}")
+            raise HTTPException(status_code=404, detail="File not found in message")
+        logger.info(f"Downloading large video file {file_unique_id} to temporary path {temp_file_path}")
+        file_path = await client.client.download_media(file_id, file_name=temp_file_path)
+        logger.info(f"Downloaded large video file {file_unique_id} to temporary path {temp_file_path}")
+        return file_path, False
 
+    # Normal caching flow
+    cache_path = os.path.join(cache_dir, f"{channel}-{post_id}-{file_unique_id}")
     if os.path.exists(cache_path):
         logger.info(f"Found cached media file: {cache_path}")
-        # Update timestamp for existing file
         file_id = f"{channel}-{post_id}-{file_unique_id}"
-        file_path = os.path.join(os.path.abspath("./data"), 'media_file_ids.json')
+        file_ids_path = os.path.join(os.path.abspath("./data"), 'media_file_ids.json')
         try:
-            if os.path.exists(file_path):
-                with open(file_path, 'r', encoding='utf-8') as f:
+            if os.path.exists(file_ids_path):
+                with open(file_ids_path, 'r', encoding='utf-8') as f:
                     media_files = json.load(f)
                 for file_data in media_files:
                     if file_data['file_id'] == file_id:
                         file_data['added'] = datetime.now().timestamp()
                         break
-                with open(file_path, 'w', encoding='utf-8') as f:
+                with open(file_ids_path, 'w', encoding='utf-8') as f:
                     json.dump(media_files, f, ensure_ascii=False, indent=2)
         except Exception as e:
             logger.error(f"Failed to update timestamp for {file_id}: {str(e)}")
-        return cache_path
+        return cache_path, False
 
-    message = await client.client.get_messages(channel, post_id)
-    if message.media == "MessageMediaType.POLL":
-        return None
-        
     file_id = await find_file_id_in_message(message, file_unique_id)
-            
     if not file_id:
         logger.error(f"Media with file_unique_id {file_unique_id} not found in message {post_id}")
         raise HTTPException(status_code=404, detail="File not found in message")
-        
     file_path = await client.client.download_media(file_id, file_name=cache_path)
     logger.info(f"Downloaded media file {file_unique_id} to {cache_path}")
-    return file_path
+    return file_path, False
 
 
 async def remove_old_cached_files(media_files: list, cache_dir: str) -> tuple[list, int]:
@@ -177,6 +218,20 @@ async def remove_old_cached_files(media_files: list, cache_dir: str) -> tuple[li
         except Exception as e:
             logger.error(f"Error processing cache entry {file_data}: {str(e)}")
             continue
+
+    # Additionally, remove temporary files with prefix "temp_" if they are older than a threshold (1 hour)
+    temp_threshold = 3600  # 1 hour in seconds
+    for file in os.listdir(cache_dir):
+         file_path = os.path.join(cache_dir, file)
+         if os.path.isfile(file_path) and file.startswith("temp_"):
+             try:
+                 file_mod_time = os.path.getmtime(file_path)
+                 if time.time() - file_mod_time > temp_threshold:
+                     os.remove(file_path)
+                     files_removed += 1
+                     logger.info(f"Removed temporary file: {file_path}")
+             except Exception as e:
+                 logger.error(f"Failed to remove temporary file {file_path}: {str(e)}")
 
     return updated_media_files, files_removed
 
@@ -246,6 +301,44 @@ async def cache_media_files():
             await asyncio.sleep(delay)
 
 
+def calculate_cache_stats():
+    """
+    Calculate cache statistics including file count, total size in MB, and time difference in days.
+    Returns a dictionary with keys: 'cache_files_count', 'cache_total_size_mb', 'cache_time_diff_days'.
+    """
+    cache_dir = os.path.abspath("./data/cache")
+    if os.path.isdir(cache_dir):
+        files = [f for f in os.listdir(cache_dir) if os.path.isfile(os.path.join(cache_dir, f))]
+        cache_files_count = len(files)
+        cache_total_size_bytes = sum(os.path.getsize(os.path.join(cache_dir, f)) for f in files)
+        cache_total_size_mb = round(cache_total_size_bytes / (1024 * 1024), 2)  # rounded size in MB
+    else:
+        cache_files_count = 0
+        cache_total_size_mb = 0
+
+    media_file_ids_path = os.path.join(os.path.abspath("./data"), "media_file_ids.json")
+    cache_times = []
+    if os.path.exists(media_file_ids_path):
+        try:
+            with open(media_file_ids_path, "r", encoding="utf-8") as f:
+                media_files = json.load(f)
+            for entry in media_files:
+                if "added" in entry:
+                    cache_times.append(entry["added"])
+        except Exception as e:
+            logger.error(f"Error reading media_file_ids.json: {str(e)}")
+    if cache_times:
+        cache_time_diff_seconds = max(cache_times) - min(cache_times)
+        cache_time_diff_days = round(cache_time_diff_seconds / 86400, 2)  # rounded to two decimals
+    else:
+        cache_time_diff_days = 0
+
+    return {
+        "cache_files_count": cache_files_count,
+        "cache_total_size_mb": cache_total_size_mb,
+        "cache_time_diff_days": cache_time_diff_days
+    }
+
 
 @app.get("/html/{channel}/{post_id}", response_class=HTMLResponse)
 @app.get("/post/html/{channel}/{post_id}", response_class=HTMLResponse)
@@ -276,39 +369,13 @@ async def get_post(channel: str, post_id: int):
         logger.error(error_message)
         raise HTTPException(status_code=500, detail=error_message) from e
 
+
 @app.get("/health")
 async def health_check():
     try:
         me = await client.client.get_me()
 
-        # Compute cache statistics
-        cache_dir = os.path.abspath("./data/cache")
-        if os.path.isdir(cache_dir):
-            files = [f for f in os.listdir(cache_dir) if os.path.isfile(os.path.join(cache_dir, f))]
-            cache_files_count = len(files)
-            cache_total_size_bytes = sum(os.path.getsize(os.path.join(cache_dir, f)) for f in files)
-            cache_total_size_mb = round(cache_total_size_bytes / (1024 * 1024), 2)  # rounded size in MB
-        else:
-            cache_files_count = 0
-            cache_total_size_mb = 0
-
-        # Compute time difference from media_file_ids.json
-        media_file_ids_path = os.path.join(os.path.abspath("./data"), "media_file_ids.json")
-        cache_times = []
-        if os.path.exists(media_file_ids_path):
-            try:
-                with open(media_file_ids_path, "r", encoding="utf-8") as f:
-                    media_files = json.load(f)
-                for entry in media_files:
-                    if "added" in entry:
-                        cache_times.append(entry["added"])
-            except Exception as e:
-                logger.error(f"Error reading media_file_ids.json: {str(e)}")
-        if cache_times:
-            cache_time_diff_seconds = max(cache_times) - min(cache_times)
-            cache_time_diff_days = round(cache_time_diff_seconds / 86400, 2)  # rounded to two decimals
-        else:
-            cache_time_diff_days = 0
+        cache_stats = calculate_cache_stats()
 
         return {
             "status": "ok",
@@ -318,9 +385,7 @@ async def health_check():
             "tg_phone": me.phone_number,
             "tg_first_name": me.first_name,
             "tg_last_name": me.last_name,
-            "cache_files_count": cache_files_count,
-            "cache_total_size_mb": cache_total_size_mb,
-            "cache_time_diff_days": cache_time_diff_days
+            **cache_stats
         }
     except Exception as e:
         error_message = f"Failed to get health check: {str(e)}"
@@ -330,8 +395,8 @@ async def health_check():
 @app.get("/media/{channel}/{post_id}/{file_unique_id}")
 async def get_media(channel: str, post_id: int, file_unique_id: str):
     try:
-        file_path = await download_media_file(channel, post_id, file_unique_id)
-        return await prepare_file_response(file_path)
+        file_path, delete_after = await download_media_file(channel, post_id, file_unique_id)
+        return await prepare_file_response(file_path, delete_after=delete_after)
     except HTTPException:
         raise
     except errors.RPCError as e:

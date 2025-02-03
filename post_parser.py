@@ -34,6 +34,7 @@ if not logger.handlers:
 #http://127.0.0.1:8000/post/html/theyforcedme/3558 - audio-note
 #http://127.0.0.1:8000/html/vvzvlad_lytdybr/426 - sticker
 #http://127.0.0.1:8000/html/wrkshprn/634 — links without <a>
+#http://127.0.0.1:8000/html/ru2ch_ban/26586 - large video
 
 class PostParser:
     def __init__(self, client):
@@ -350,14 +351,29 @@ class PostParser:
                 return
 
             if message.media:
-                if message.photo: file_data['file_id'] = f"{channel_username}-{message.id}-{message.photo.file_unique_id}"
-                elif message.video: file_data['file_id'] = f"{channel_username}-{message.id}-{message.video.file_unique_id}"
-                elif message.document: file_data['file_id'] = f"{channel_username}-{message.id}-{message.document.file_unique_id}"
-                elif message.audio: file_data['file_id'] = f"{channel_username}-{message.id}-{message.audio.file_unique_id}"
-                elif message.voice: file_data['file_id'] = f"{channel_username}-{message.id}-{message.voice.file_unique_id}"
-                elif message.video_note: file_data['file_id'] = f"{channel_username}-{message.id}-{message.video_note.file_unique_id}"
-                elif message.animation: file_data['file_id'] = f"{channel_username}-{message.id}-{message.animation.file_unique_id}"
-                elif message.sticker: file_data['file_id'] = f"{channel_username}-{message.id}-{message.sticker.file_unique_id}"
+                if message.photo:
+                    file_data['file_id'] = f"{channel_username}-{message.id}-{message.photo.file_unique_id}"
+                elif message.video:
+                    try:
+                        if message.video.file_size > 100 * 1024 * 1024:
+                            logger.info(f"Large video file for message {message.id} is not cached due to size limit")
+                        else:
+                            file_data['file_id'] = f"{channel_username}-{message.id}-{message.video.file_unique_id}"
+                    except Exception as e:
+                        logger.error(f"video_file_size_error: failed to get video file size for message {message.id}: {str(e)}")
+                        file_data['file_id'] = f"{channel_username}-{message.id}-{message.video.file_unique_id}"
+                elif message.document:
+                    file_data['file_id'] = f"{channel_username}-{message.id}-{message.document.file_unique_id}"
+                elif message.audio:
+                    file_data['file_id'] = f"{channel_username}-{message.id}-{message.audio.file_unique_id}"
+                elif message.voice:
+                    file_data['file_id'] = f"{channel_username}-{message.id}-{message.voice.file_unique_id}"
+                elif message.video_note:
+                    file_data['file_id'] = f"{channel_username}-{message.id}-{message.video_note.file_unique_id}"
+                elif message.animation:
+                    file_data['file_id'] = f"{channel_username}-{message.id}-{message.animation.file_unique_id}"
+                elif message.sticker:
+                    file_data['file_id'] = f"{channel_username}-{message.id}-{message.sticker.file_unique_id}"
                 elif message.web_page and message.web_page.photo:
                     file_data['file_id'] = f"{channel_username}-{message.id}-{message.web_page.photo.file_unique_id}"
 
