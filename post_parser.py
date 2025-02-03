@@ -344,17 +344,22 @@ class PostParser:
                 'file_id': None,
             }
 
+            channel_username = getattr(message.chat, 'username', None)
+            if not channel_username:
+                logger.error(f"channel_username_error: no username found for chat in message {message.id}")
+                return
+
             if message.media:
-                if message.photo: file_data['file_id'] = f"{message.chat.username}-{message.id}-{message.photo.file_unique_id}"
-                elif message.video: file_data['file_id'] = f"{message.chat.username}-{message.id}-{message.video.file_unique_id}"
-                elif message.document: file_data['file_id'] = f"{message.chat.username}-{message.id}-{message.document.file_unique_id}"
-                elif message.audio: file_data['file_id'] = f"{message.chat.username}-{message.id}-{message.audio.file_unique_id}"
-                elif message.voice: file_data['file_id'] = f"{message.chat.username}-{message.id}-{message.voice.file_unique_id}"
-                elif message.video_note: file_data['file_id'] = f"{message.chat.username}-{message.id}-{message.video_note.file_unique_id}"
-                elif message.animation: file_data['file_id'] = f"{message.chat.username}-{message.id}-{message.animation.file_unique_id}"
-                elif message.sticker: file_data['file_id'] = f"{message.chat.username}-{message.id}-{message.sticker.file_unique_id}"
+                if message.photo: file_data['file_id'] = f"{channel_username}-{message.id}-{message.photo.file_unique_id}"
+                elif message.video: file_data['file_id'] = f"{channel_username}-{message.id}-{message.video.file_unique_id}"
+                elif message.document: file_data['file_id'] = f"{channel_username}-{message.id}-{message.document.file_unique_id}"
+                elif message.audio: file_data['file_id'] = f"{channel_username}-{message.id}-{message.audio.file_unique_id}"
+                elif message.voice: file_data['file_id'] = f"{channel_username}-{message.id}-{message.voice.file_unique_id}"
+                elif message.video_note: file_data['file_id'] = f"{channel_username}-{message.id}-{message.video_note.file_unique_id}"
+                elif message.animation: file_data['file_id'] = f"{channel_username}-{message.id}-{message.animation.file_unique_id}"
+                elif message.sticker: file_data['file_id'] = f"{channel_username}-{message.id}-{message.sticker.file_unique_id}"
                 elif message.web_page and message.web_page.photo:
-                    file_data['file_id'] = f"{message.chat.username}-{message.id}-{message.web_page.photo.file_unique_id}"
+                    file_data['file_id'] = f"{channel_username}-{message.id}-{message.web_page.photo.file_unique_id}"
 
             if file_data['file_id']:
                 file_path = os.path.join(os.path.abspath("./data"), 'media_file_ids.json')
