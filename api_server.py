@@ -178,6 +178,11 @@ async def download_new_files(media_files: list, cache_dir: str):
     """
     Download files that are not in cache yet
     """
+    if not media_files:
+        logger.info("No media files found for download")
+        return
+
+    files_to_download = 0
     for file_data in media_files:
         try:
             file_id = file_data['file_id']
@@ -189,6 +194,7 @@ async def download_new_files(media_files: list, cache_dir: str):
             cache_path = os.path.join(cache_dir, f"{channel}-{post_id}-{file_unique_id}")
             
             if not os.path.exists(cache_path):
+                files_to_download += 1
                 logger.debug(f"Background download started for {file_id}")
                 await download_media_file(channel, post_id, file_unique_id)
                 await asyncio.sleep(1)  # Delay between downloads
@@ -196,6 +202,9 @@ async def download_new_files(media_files: list, cache_dir: str):
         except Exception as e:
             logger.error(f"Background download failed for {file_id}: {str(e)}")
             continue
+
+    if files_to_download == 0:
+        logger.info("All media files are already in cache")
 
 
 async def cache_media_files():
