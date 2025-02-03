@@ -3,6 +3,7 @@ import os
 import mimetypes
 import asyncio
 import json
+import magic
 from datetime import datetime
 
 from contextlib import asynccontextmanager
@@ -77,10 +78,18 @@ async def prepare_file_response(file_path: str):
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="File not found")
     
-    media_type, _ = mimetypes.guess_type(file_path)
-    if not media_type:
-        media_type = "application/octet-stream"
+    # Try to determine MIME type using python-magic first
+    try:
+        mime = magic.Magic(mime=True)
+        media_type = mime.from_file(file_path)
+    except Exception as e:
+        logger.warning(f"Failed to determine MIME type using python-magic: {str(e)}")
+        media_type = None
     
+    if not media_type: media_type, _ = mimetypes.guess_type(file_path) # Fallback to mimetypes if python-magic failed
+    if not media_type: media_type = "application/octet-stream" # Final fallback to octet-stream
+    
+    logger.debug(f"Determined media type for {os.path.basename(file_path)}: {media_type}")
     headers = {"Content-Disposition": f"inline; filename={os.path.basename(file_path)}"}
     return FileResponse(path=file_path, media_type=media_type, headers=headers)
 
@@ -180,7 +189,7 @@ async def download_new_files(media_files: list, cache_dir: str):
             cache_path = os.path.join(cache_dir, f"{channel}-{post_id}-{file_unique_id}")
             
             if not os.path.exists(cache_path):
-                logger.info(f"Background download started for {file_id}")
+                logger.debug(f"Background download started for {file_id}")
                 await download_media_file(channel, post_id, file_unique_id)
                 await asyncio.sleep(1)  # Delay between downloads
         
