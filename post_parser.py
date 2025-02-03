@@ -104,6 +104,9 @@ class PostParser:
         return "Unknown author"
 
     def _generate_title(self, message: Message) -> str:
+        # Check for "channel created" service message
+        if getattr(message, "channel_chat_created", False):
+            return "✨ Channel created"
         text = message.text or message.caption or ''
         if not text:
             if message.media == MessageMediaType.PHOTO: return "📷 Photo"
@@ -139,6 +142,13 @@ class PostParser:
         return f"{trimmed.strip()}..." if trimmed else ""
 
     def _format_html(self, message: Message, naked: bool = False) -> str:
+        # Check for "channel created" service message
+        if getattr(message, "channel_chat_created", False):
+            service_html = '<div class="message-service">Channel created</div>'
+            if not naked:
+                return self._wrap_html([service_html])
+            return service_html
+
         text = message.text.html if message.text else message.caption.html if message.caption else ''
         text = text.replace('\n', '<br>')
         
@@ -263,6 +273,7 @@ class PostParser:
     def _format_reactions_and_views(self, message: Message) -> Union[str, None]:
         try:
             html_parts = []
+            html_parts.append("<br>")
             
             if reactions := getattr(message, "reactions", None):
                 reactions_html = ''
@@ -274,7 +285,8 @@ class PostParser:
                 views_html = f'<span class="views">(Views: {views})</span>'
                 html_parts.append(views_html)
 
-            return ' '.join(html_parts) if html_parts else None
+            html = ' '.join(html_parts) if html_parts else None
+            return html
             
         except Exception as e:
             logger.error(f"reactions_views_parsing_error: {str(e)}")

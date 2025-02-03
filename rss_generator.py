@@ -95,7 +95,7 @@ async def generate_channel_rss(channel: str, post_parser: Optional[PostParser] =
             for post in group_posts:
                 current_title = post.get('title', '')
                 if current_title and current_title not in ['📷 Photo', '📹 Video', '📄 Document']:
-                    main_post = post
+                    main_post = description
                     break
             
             merged_post = main_post.copy()
@@ -119,7 +119,8 @@ async def generate_channel_rss(channel: str, post_parser: Optional[PostParser] =
             fe.link(href=post_link)
             
             html_content = post.get('html', '')
-            fe.description(f"<![CDATA[{html_content}]]>")
+            text_content = post.get('text', '')
+            fe.description(f"{text_content}")
             fe.content(content=html_content, type='CDATA')
             
             pub_date = datetime.fromtimestamp(post['date'], tz=timezone.utc)
@@ -160,7 +161,7 @@ def create_error_feed(channel: str, base_url: str) -> str:
     fe.title("Channel not found")
     fe.link(href=f"https://t.me/{channel}")
     error_html = f"<p>The Telegram channel @{channel} does not exist or is not accessible.</p>"
-    fe.description(f"<![CDATA[{error_html}]]>")
+    fe.description(f"{error_html}")
     fe.content(content=error_html, type='CDATA')
     fe.pubDate(datetime.now(tz=timezone.utc))
     fe.guid(f"https://t.me/{channel}", permalink=True)
