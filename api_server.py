@@ -1,6 +1,9 @@
 import logging
 import os
 import mimetypes
+import asyncio
+import json
+from datetime import datetime
 
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Response, BackgroundTasks
@@ -12,13 +15,32 @@ from pyrogram import errors
 from post_parser import PostParser
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+    logger.addHandler(handler)
+
 client = TelegramClient()
 Config = get_settings()
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     await client.start()
+    
+    # Start background task
+    background_task = asyncio.create_task(cache_media_files())
+    
     yield
+    
+    # Cleanup
+    background_task.cancel()
+    try:
+        await background_task
+    except asyncio.CancelledError:
+        pass
+    
     await client.stop()
 
 app = FastAPI( title="Pyrogram Bridge", lifespan=lifespan)
@@ -51,15 +73,13 @@ async def find_file_id_in_message(message, file_unique_id: str):
     return None
 
 async def prepare_file_response(file_path: str, background_tasks: BackgroundTasks):
-    """Prepare file response with proper headers and cleanup task"""
+    """Prepare file response with proper headers"""
     if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="Temporary file not found")
+        raise HTTPException(status_code=404, detail="File not found")
     
     media_type, _ = mimetypes.guess_type(file_path)
     if not media_type:
         media_type = "application/octet-stream"
-    
-    background_tasks.add_task(lambda: os.remove(file_path) if os.path.exists(file_path) else None)
     
     headers = {"Content-Disposition": f"inline; filename={os.path.basename(file_path)}"}
     return FileResponse(path=file_path, media_type=media_type, headers=headers)
@@ -112,17 +132,34 @@ async def health_check():
         logger.error(error_message)
         raise HTTPException(status_code=500, detail=error_message) from e
 
+async def download_media_file(channel: str, post_id: int, file_unique_id: str) -> str:
+    """
+    Download media file from Telegram and save to cache
+    Returns path to downloaded file
+    """
+    cache_dir = os.path.abspath("./data/cache")
+    cache_path = os.path.join(cache_dir, f"{channel}-{post_id}-{file_unique_id}")
+    os.makedirs(cache_dir, exist_ok=True)
+
+    if os.path.exists(cache_path):
+        logger.info(f"Found cached media file: {cache_path}")
+        return cache_path
+
+    message = await client.client.get_messages(channel, post_id)
+    file_id = await find_file_id_in_message(message, file_unique_id)
+            
+    if not file_id:
+        logger.error(f"Media with file_unique_id {file_unique_id} not found in message {post_id}")
+        raise HTTPException(status_code=404, detail="File not found in message")
+        
+    file_path = await client.client.download_media(file_id, file_name=cache_path)
+    logger.info(f"Downloaded media file {file_unique_id} to {cache_path}")
+    return file_path
+
 @app.get("/media/{channel}/{post_id}/{file_unique_id}")
 async def get_media(channel: str, post_id: int, file_unique_id: str, background_tasks: BackgroundTasks):
     try:
-        message = await client.client.get_messages(channel, post_id)
-        file_id = await find_file_id_in_message(message, file_unique_id)
-                
-        if not file_id:
-            logger.error(f"Media with file_unique_id {file_unique_id} not found in message {post_id}")
-            raise HTTPException(status_code=404, detail="File not found in message")
-        file_path = await client.client.download_media(file_id)
-        logger.info(f"Downloaded media file {file_unique_id} to {file_path}")
+        file_path = await download_media_file(channel, post_id, file_unique_id)
         return await prepare_file_response(file_path, background_tasks)
     except HTTPException:
         raise
@@ -147,3 +184,44 @@ async def get_rss_feed(channel: str, limit: int = 20):
         error_message = f"Failed to generate RSS feed for channel {channel}: {str(e)}"
         logger.error(error_message)
         raise HTTPException(status_code=500, detail=error_message) from e 
+
+async def cache_media_files():
+    """Background task to download media files to cache"""
+    while True:
+        try:
+            file_path = os.path.join(os.path.abspath("./data"), 'media_file_ids.json')
+            if not os.path.exists(file_path):
+                await asyncio.sleep(60)
+                continue
+
+            with open(file_path, 'r', encoding='utf-8') as f:
+                media_files = json.load(f)
+
+            for file_data in media_files:
+                try:
+                    file_id = file_data['file_id']
+                    if not file_id:
+                        continue
+
+                    # Parse file_id to get parameters
+                    channel, post_id_str, file_unique_id = file_id.split('-', 2)
+                    post_id = int(post_id_str)  # Convert post_id to integer
+                    
+                    # Check if file already exists in cache
+                    cache_dir = os.path.abspath("./data/cache")
+                    cache_path = os.path.join(cache_dir, f"{channel}-{post_id}-{file_unique_id}")
+                    
+                    if not os.path.exists(cache_path):
+                        logger.info(f"Background download started for {file_id}")
+                        await download_media_file(channel, post_id, file_unique_id)
+                        await asyncio.sleep(1)  # Delay between downloads
+                
+                except Exception as e:
+                    logger.error(f"Background download failed for {file_id}: {str(e)}")
+                    continue
+
+            await asyncio.sleep(60)  # Check every minute
+            
+        except Exception as e:
+            logger.error(f"Cache media files error: {str(e)}")
+            await asyncio.sleep(60) 

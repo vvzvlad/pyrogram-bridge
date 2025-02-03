@@ -12,6 +12,13 @@ import json
 Config = get_settings()
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+    logger.addHandler(handler)
+
 
 #tests
 #http://127.0.0.1:8000/post/html/DragorWW_space/114 — video
@@ -65,7 +72,7 @@ class PostParser:
             raise
 
     def _format_json(self, message: Message, naked: bool = False) -> Dict[Any, Any]:
-        html_content = self._format_html(message)
+        html_content = self._format_html(message, naked=naked)
         result = {
             'channel': message.chat.username,
             'message_id': message.id,
@@ -148,9 +155,12 @@ class PostParser:
         base_url = Config['pyrogram_bridge_url']
         if message.media:
             file_unique_id = self._get_file_unique_id(message)
-            print(file_unique_id)
+            if file_unique_id is None:
+                logger.error(f"File unique id not found for message {message.id}: {message}")
+                return
             if file_unique_id:
                 url = f"{base_url}/media/{message.chat.username}/{message.id}/{file_unique_id}"
+                logger.debug(f"Collected media file: {message.chat.username}/{message.id}/{file_unique_id}")
                 html_content.append(f'<div class="message-media">')
                 if message.media in [MessageMediaType.PHOTO, MessageMediaType.DOCUMENT]:
                     html_content.append(f'<img src="{url}" style="max-width:600px; max-height:600px; object-fit:contain;">')
@@ -330,19 +340,19 @@ class PostParser:
             }
 
             if message.media:
-                if message.photo: file_data['file_id'] = message.photo.file_unique_id
-                elif message.video: file_data['file_id'] = message.video.file_unique_id
-                elif message.document: file_data['file_id'] = message.document.file_unique_id
-                elif message.audio: file_data['file_id'] = message.audio.file_unique_id
-                elif message.voice: file_data['file_id'] = message.voice.file_unique_id
-                elif message.video_note: file_data['file_id'] = message.video_note.file_unique_id
-                elif message.animation: file_data['file_id'] = message.animation.file_unique_id
-                elif message.sticker: file_data['file_id'] = message.sticker.file_unique_id
+                if message.photo: file_data['file_id'] = f"{message.chat.username}-{message.id}-{message.photo.file_unique_id}"
+                elif message.video: file_data['file_id'] = f"{message.chat.username}-{message.id}-{message.video.file_unique_id}"
+                elif message.document: file_data['file_id'] = f"{message.chat.username}-{message.id}-{message.document.file_unique_id}"
+                elif message.audio: file_data['file_id'] = f"{message.chat.username}-{message.id}-{message.audio.file_unique_id}"
+                elif message.voice: file_data['file_id'] = f"{message.chat.username}-{message.id}-{message.voice.file_unique_id}"
+                elif message.video_note: file_data['file_id'] = f"{message.chat.username}-{message.id}-{message.video_note.file_unique_id}"
+                elif message.animation: file_data['file_id'] = f"{message.chat.username}-{message.id}-{message.animation.file_unique_id}"
+                elif message.sticker: file_data['file_id'] = f"{message.chat.username}-{message.id}-{message.sticker.file_unique_id}"
                 elif message.web_page and message.web_page.photo:
-                    file_data['file_id'] = message.web_page.photo.file_unique_id
+                    file_data['file_id'] = f"{message.chat.username}-{message.id}-{message.web_page.photo.file_unique_id}"
 
             if file_data['file_id']:
-                file_path = 'media_file_ids.json'
+                file_path = os.path.join(os.path.abspath("./data"), 'media_file_ids.json')
                 try:
                     existing_data = []
                     if os.path.exists(file_path):
