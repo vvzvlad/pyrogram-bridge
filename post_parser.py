@@ -33,14 +33,14 @@ if not logger.handlers:
 #http://127.0.0.1:8000/post/html/theyforcedme/3572 - audio
 #http://127.0.0.1:8000/post/html/theyforcedme/3558 - audio-note
 #http://127.0.0.1:8000/html/vvzvlad_lytdybr/426 - sticker
-#http://127.0.0.1:8000/html/wrkshprn/634, http://127.0.0.1:8000/html/ni404head/1278 — links without <a>
+#http://127.0.0.1:8000/html/wrkshprn/634, http://127.0.0.1:8000/html/ni404head/1278, http://127.0.0.1:8000/html/fieryfiles/4840 — links without <a>
 #http://127.0.0.1:8000/html/ru2ch_ban/26586 - large video
 #http://127.0.0.1:8000/html/smallpharm/4828 - forwarded from channel
 #http://127.0.0.1:8000/html/vvzvlad_lytdybr/659 - forwarded from user
 #http://127.0.0.1:8000/html/ufjqk/1070 - reply to
 #http://127.0.0.1:8000/html/tetstststststststffd/4 - forwarded from channel without name
 #http://127.0.0.1:8000/html/tetstststststststffd/14 - forwarded from hidden user
-
+#https://t.me/smallpharm/4802 https://t.me/webstrangler/3987  https://t.me/teslacoilpro/7117 many media + text
 
 class PostParser:
     def __init__(self, client):
@@ -323,8 +323,9 @@ class PostParser:
     def _reactions_views_links(self, message: Message) -> Union[str, None]:
         try:
             parts = []
+            parts.append("<br><br>")
             
-            if reactions := getattr(message, "reactions", None):
+            if reactions := getattr(message, "reactions"):
                 reactions_html = ''
                 for reaction in reactions.reactions:
                     reactions_html += f'<span class="reaction">{reaction.emoji} {reaction.count}</span> '
@@ -340,7 +341,7 @@ class PostParser:
                 links.append(f'<a href="https://t.me/{message.chat.username}/{message.id}">Open in Web</a>')
                 parts.append('&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;'.join(links))
 
-            html = '<br>' + '&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;'.join(parts) if parts else None
+            html = '&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;'.join(parts) if parts else None
             return html
             
         except Exception as e:
