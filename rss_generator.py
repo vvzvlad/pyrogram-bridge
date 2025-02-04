@@ -120,7 +120,7 @@ async def generate_channel_rss(channel: str, post_parser: Optional[PostParser] =
             
             html_content = post.get('html', '')
             text_content = post.get('text', '')
-            fe.description(f"{text_content}")
+            fe.description(text_content.replace('\n', ' '))
             fe.content(content=html_content, type='CDATA')
             
             pub_date = datetime.fromtimestamp(post['date'], tz=timezone.utc)
