@@ -39,6 +39,7 @@ if not logger.handlers:
 #http://127.0.0.1:8000/html/vvzvlad_lytdybr/659 - forwarded from user
 #http://127.0.0.1:8000/html/ufjqk/1070 - reply to
 #http://127.0.0.1:8000/html/tetstststststststffd/4 - forwarded from channel without name
+#http://127.0.0.1:8000/html/tetstststststststffd/14 - forwarded from hidden user
 
 
 class PostParser:
@@ -162,6 +163,9 @@ class PostParser:
                 forward_link = f'<a href="https://t.me/{forward_username}">{forward_name} (@{forward_username})</a>'
                 return f'<div class="message-forward">Forwarded from {forward_link}</div><br>'
             return f'<div class="message-forward">Forwarded from {forward_name}</div><br>'
+        
+        elif forward_sender_name := getattr(message, "forward_sender_name", None):
+            return f'<div class="message-forward">Forwarded from {forward_sender_name}</div><br>'
         
         return None
 
