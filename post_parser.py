@@ -36,6 +36,9 @@ if not logger.handlers:
 #http://127.0.0.1:8000/html/wrkshprn/634 — links without <a>
 #http://127.0.0.1:8000/html/ru2ch_ban/26586 - large video
 
+
+#криво формируется html: http://127.0.0.1:8000/html/ni404head/1278
+
 class PostParser:
     def __init__(self, client):
         self.client = client
@@ -218,12 +221,11 @@ class PostParser:
             # Store their positions
             excluded_ranges = [(m.start(), m.end()) for m in a_tags]
             
-            # Find all URLs
-            urls = re.finditer(r'https?://[^\s<>"\']+', text)
+            # Find all URLs that are not already in HTML tags
+            result = text
+            offset = 0
             
-            # Build text with replacements
-            result = list(text)
-            for match in urls:
+            for match in re.finditer(r'https?://[^\s<>"\']+', text):
                 start, end = match.span()
                 
                 # Check if URL is inside an <a> tag
@@ -231,9 +233,12 @@ class PostParser:
                 if not is_in_tag:
                     url = match.group()
                     replacement = f'<a href="{url}" target="_blank">{url}</a>'
-                    result[start:end] = replacement
+                    
+                    # Apply replacement considering offset
+                    result = result[:start + offset] + replacement + result[end + offset:]
+                    offset += len(replacement) - (end - start)
             
-            return ''.join(result)
+            return result
             
         except Exception as e:
             logger.error(f"url_processing_error: error {str(e)}")
