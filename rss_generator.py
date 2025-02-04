@@ -95,7 +95,7 @@ async def generate_channel_rss(channel: str, post_parser: Optional[PostParser] =
             for post in group_posts:
                 current_title = post.get('title', '')
                 if current_title and current_title not in ['📷 Photo', '📹 Video', '📄 Document']:
-                    main_post = description
+                    main_post = post
                     break
             
             merged_post = main_post.copy()
