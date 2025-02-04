@@ -33,11 +33,9 @@ if not logger.handlers:
 #http://127.0.0.1:8000/post/html/theyforcedme/3572 - audio
 #http://127.0.0.1:8000/post/html/theyforcedme/3558 - audio-note
 #http://127.0.0.1:8000/html/vvzvlad_lytdybr/426 - sticker
-#http://127.0.0.1:8000/html/wrkshprn/634 — links without <a>
+#http://127.0.0.1:8000/html/wrkshprn/634, http://127.0.0.1:8000/html/ni404head/1278 — links without <a>
 #http://127.0.0.1:8000/html/ru2ch_ban/26586 - large video
 
-
-#криво формируется html: http://127.0.0.1:8000/html/ni404head/1278
 
 class PostParser:
     def __init__(self, client):
