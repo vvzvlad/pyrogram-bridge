@@ -204,7 +204,7 @@ class PostParser:
             html_content.append(f'<div class="message-text">{text}</div>')
 
         if not naked:
-            if reactions_views_html := self._format_reactions_and_views(message): # Add reactions and views
+            if reactions_views_html := self._reactions_views_links(message): # Add reactions, views and links
                 html_content.append(reactions_views_html)
         
         if not naked:
@@ -275,20 +275,26 @@ class PostParser:
         html_content = '\n'.join(struct)
         return html_content
 
-    def _format_reactions_and_views(self, message: Message) -> Union[str, None]:
+    def _reactions_views_links(self, message: Message) -> Union[str, None]:
         try:
             html_parts = []
             html_parts.append("<br>")
             
-            if reactions := getattr(message, "reactions", None):
+            if reactions := getattr(message, "reactions", None): #add reactions
                 reactions_html = ''
                 for reaction in reactions.reactions:
                     reactions_html += f'<span class="reaction">{reaction.emoji} {reaction.count}</span> '
                 html_parts.append(reactions_html)
 
-            if views := getattr(message, "views", None):
+            if views := getattr(message, "views", None): #add views
                 views_html = f'<span class="views">(Views: {views})</span>'
                 html_parts.append(views_html)
+
+            if message.chat.username: #add links to telegram and web
+                tg_link = f'<br><a href="tg://resolve?domain={message.chat.username}&post={message.id}">Open in Telegram</a>'
+                html_parts.append(tg_link)
+                tg_web_link = f'<br><a href="https://t.me/{message.chat.username}/{message.id}">Open in Web</a>'
+                html_parts.append(tg_web_link)
 
             html = ' '.join(html_parts) if html_parts else None
             return html
