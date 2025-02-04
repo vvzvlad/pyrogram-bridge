@@ -35,6 +35,10 @@ if not logger.handlers:
 #http://127.0.0.1:8000/html/vvzvlad_lytdybr/426 - sticker
 #http://127.0.0.1:8000/html/wrkshprn/634, http://127.0.0.1:8000/html/ni404head/1278 — links without <a>
 #http://127.0.0.1:8000/html/ru2ch_ban/26586 - large video
+#http://127.0.0.1:8000/html/smallpharm/4828 - forwarded from channel
+#http://127.0.0.1:8000/html/vvzvlad_lytdybr/659 - forwarded from user
+#http://127.0.0.1:8000/html/ufjqk/1070 - reply to
+#http://127.0.0.1:8000/html/tetstststststststffd/4 - forwarded from channel without name
 
 
 class PostParser:
@@ -142,7 +146,48 @@ class PostParser:
         
         return f"{trimmed.strip()}..." if trimmed else ""
 
+    def _format_forward_info(self, message: Message) -> Union[str, None]:
+        if forward_from_chat := getattr(message, "forward_from_chat", None):
+            forward_title = getattr(forward_from_chat, "title", "Unknown channel")
+            forward_username = getattr(forward_from_chat, "username", None)
+            if forward_username:
+                forward_link = f'<a href="https://t.me/{forward_username}">{forward_title} (@{forward_username})</a>'
+                return f'<div class="message-forward">Forwarded from {forward_link}</div><br>'
+            return f'<div class="message-forward">Forwarded from {forward_title}</div><br>'
+        
+        elif forward_from := getattr(message, "forward_from", None):
+            forward_name = f"{getattr(forward_from, 'first_name', '')} {getattr(forward_from, 'last_name', '')}".strip()
+            forward_username = getattr(forward_from, "username", None)
+            if forward_username:
+                forward_link = f'<a href="https://t.me/{forward_username}">{forward_name} (@{forward_username})</a>'
+                return f'<div class="message-forward">Forwarded from {forward_link}</div><br>'
+            return f'<div class="message-forward">Forwarded from {forward_name}</div><br>'
+        
+        return None
+
+    def _format_reply_info(self, message: Message) -> Union[str, None]:
+        if reply_to := getattr(message, "reply_to_message", None):
+            reply_text = reply_to.text or reply_to.caption or ''
+            if len(reply_text) > 100:
+                reply_text = reply_text[:100] + '...'
+            
+            channel_username = getattr(reply_to.chat, "username", None)
+            if channel_username:
+                reply_link = f'<a href="https://t.me/{channel_username}/{reply_to.id}">#{reply_to.id}</a>'
+                return f'<div class="message-reply">Reply to {reply_link}: {reply_text}</div><br>'
+            return f'<div class="message-reply">Reply to #{reply_to.id}: {reply_text}</div><br>'
+        
+        return None
+
     def _format_html(self, message: Message, naked: bool = False) -> str:
+        html_content = []
+        
+        # Add forwarded from or reply info if present
+        if forward_html := self._format_forward_info(message):
+            html_content.append(forward_html)
+        elif reply_html := self._format_reply_info(message):
+            html_content.append(reply_html)
+
         # Check for "channel created" service message
         if getattr(message, "channel_chat_created", False):
             service_html = '<div class="message-service">Channel created</div>'
@@ -156,8 +201,6 @@ class PostParser:
         # Add hyperlinks to raw URLs
         text = self._add_hyperlinks_to_raw_urls(text)
         
-        html_content = []
-
         # Save media file_ids
         self._save_media_file_ids(message)
                 
