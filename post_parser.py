@@ -1,13 +1,15 @@
 import logging
 import copy
 import re
+import os
+import json
+
 from datetime import datetime
-from typing import Union, Dict, Any, List, Optional
+from typing import Union, Dict, Any, List
 from pyrogram.types import Message
 from pyrogram.enums import MessageMediaType
 from config import get_settings
-import os
-import json
+from url_signer import generate_media_digest
 
 Config = get_settings()
 
@@ -218,7 +220,10 @@ class PostParser:
             if file_unique_id is None:
                 logger.debug(f"File unique id not found for message {message.id}")
             elif file_unique_id:
-                url = f"{base_url}/media/{message.chat.username}/{message.id}/{file_unique_id}"
+                file = f"{message.chat.username}/{message.id}/{file_unique_id}"
+                digest = generate_media_digest(file)
+                url = f"{base_url}/media/{file}/{digest}"
+
                 logger.debug(f"Collected media file: {message.chat.username}/{message.id}/{file_unique_id}")
                 html_content.append(f'<div class="message-media">')
                 if message.media in [MessageMediaType.PHOTO, MessageMediaType.DOCUMENT]:

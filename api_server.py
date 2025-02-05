@@ -3,19 +3,20 @@ import os
 import mimetypes
 import asyncio
 import json
-import magic
 from datetime import datetime
 import time
-
 from contextlib import asynccontextmanager
+
+import magic
 from pyrogram import errors
-from fastapi import FastAPI, HTTPException, Response, BackgroundTasks
+from starlette.background import BackgroundTask  # imported for background file deletion
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.responses import HTMLResponse, FileResponse
 from telegram_client import TelegramClient
 from config import get_settings
 from rss_generator import generate_channel_rss
 from post_parser import PostParser
-from starlette.background import BackgroundTask  # imported for background file deletion
+from url_signer import verify_media_digest
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -222,16 +223,16 @@ async def remove_old_cached_files(media_files: list, cache_dir: str) -> tuple[li
     # Additionally, remove temporary files with prefix "temp_" if they are older than a threshold (1 hour)
     temp_threshold = 3600  # 1 hour in seconds
     for file in os.listdir(cache_dir):
-         file_path = os.path.join(cache_dir, file)
-         if os.path.isfile(file_path) and file.startswith("temp_"):
-             try:
-                 file_mod_time = os.path.getmtime(file_path)
-                 if time.time() - file_mod_time > temp_threshold:
-                     os.remove(file_path)
-                     files_removed += 1
-                     logger.info(f"Removed temporary file: {file_path}")
-             except Exception as e:
-                 logger.error(f"Failed to remove temporary file {file_path}: {str(e)}")
+        file_path = os.path.join(cache_dir, file)
+        if os.path.isfile(file_path) and file.startswith("temp_"):
+            try:
+                file_mod_time = os.path.getmtime(file_path)
+                if time.time() - file_mod_time > temp_threshold:
+                    os.remove(file_path)
+                    files_removed += 1
+                    logger.info(f"Removed temporary file: {file_path}")
+            except Exception as e:
+                logger.error(f"Failed to remove temporary file {file_path}: {str(e)}")
 
     return updated_media_files, files_removed
 
@@ -392,9 +393,17 @@ async def health_check():
         logger.error(error_message)
         raise HTTPException(status_code=500, detail=error_message) from e
 
+@app.get("/media/{channel}/{post_id}/{file_unique_id}/{digest}")
 @app.get("/media/{channel}/{post_id}/{file_unique_id}")
-async def get_media(channel: str, post_id: int, file_unique_id: str):
+async def get_media(channel: str, post_id: int, file_unique_id: str, digest: str | None = None):
     try:
+        url = f"{channel}/{post_id}/{file_unique_id}"
+        if not verify_media_digest(url, digest):
+            logger.error(f"Invalid digest for media: url={url}")
+            #raise HTTPException(status_code=403, detail="Invalid URL signature")
+        else:
+            logger.info(f"Valid digest for media: url={url}")   
+            
         file_path, delete_after = await download_media_file(channel, post_id, file_unique_id)
         return await prepare_file_response(file_path, delete_after=delete_after)
     except HTTPException:
