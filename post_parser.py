@@ -328,13 +328,12 @@ class PostParser:
     def _reactions_views_links(self, message: Message) -> Union[str, None]:
         try:
             parts = []
-            parts.append("<br><br>")
             
             if reactions := getattr(message, "reactions"):
                 reactions_html = ''
                 for reaction in reactions.reactions:
-                    reactions_html += f'<span class="reaction">{reaction.emoji} {reaction.count}</span> '
-                parts.append(reactions_html.strip())
+                    reactions_html += f'<span class="reaction">{reaction.emoji} {reaction.count}&nbsp;&nbsp;</span>'
+                parts.append(reactions_html.rstrip())
 
             if views := getattr(message, "views", None):
                 views_html = f'<span class="views">{views} views</span>'
@@ -347,7 +346,7 @@ class PostParser:
                 parts.append('&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;'.join(links))
 
             html = '&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;'.join(parts) if parts else None
-            return html
+            return f"<br>{html}" if html else None
             
         except Exception as e:
             logger.error(f"reactions_views_parsing_error: {str(e)}")
