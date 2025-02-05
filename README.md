@@ -1,6 +1,6 @@
 # Pyrogram Bridge
 
-## Create API ID/HASH:
+## Create API ID/HASH
 
 1)Login at https://my.telegram.org/apps
 
@@ -8,10 +8,11 @@
 
 3)Create new application
 
-4)Copy App api_id and api_hash 
+4)Copy App api_id and api_hash  
 
 
-## Get session:
+## Get session
+
 1)python3 -m venv .venv
 
 2)source .venv/bin/activate
@@ -22,7 +23,7 @@
 
 5)Enter phone number, get code in telegram, enter code, and copy session string:
 
-```
+```text
 Enter phone number or bot token: +7 993 850 5104
 Is "+7 993 850 5104" correct? (y/N): y
 The confirmation code has been sent via Telegram app
@@ -39,7 +40,7 @@ Use session on ENV variable TG_SESSION_STRING in docker-compose.yml
 ```
 6)Set session ENV variable in docker-compose.yml file:
 
-```
+```docker-compose
   pyrogram_bridge:
     image: ghcr.io/vvzvlad/pyrogram-bridge:latest
     container_name: pyrogram-bridge
@@ -47,16 +48,26 @@ Use session on ENV variable TG_SESSION_STRING in docker-compose.yml
       TG_API_ID: 290389758
       TG_API_HASH: c22987sdfnkjjhd37efa5f0
       TG_SESSION_STRING: "AgG7QBoANg0YVmwZTZmqadO4MJQdn............FPEaL8AA"
+      PYROGRAM_BRIDGE_URL: https://pgbridge.example.com
+      API_PORT: 80
       TZ: Europe/Moscow
-    ports:
-      - "8000:8000"
-....
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.pgbridge.rule: Host(`pgbridge.example.com`)
+      traefik.http.services.pgbridge.loadBalancer.server.port: 80
+      traefik.http.routers.pgbridge.entrypoints: websecure
+      traefik.http.routers.pgbridge.tls: true
+      com.centurylinklabs.watchtower.enable: "true"   
 ```
-### Get channel messages:
-```
-curl http://127.0.0.1:8000/html/DragorWW_space/87
-```
-Or
-```
-curl http://127.0.0.1:8000/json/DragorWW_space/87
-```
+
+
+## Get channel rss feed:
+
+``` curl https://pgbridge.example.com/rss/DragorWW_space ```
+
+or
+
+## Get channel messages:
+
+``` curl https://pgbridge.example.com/html/DragorWW_space/87 ```
+``` curl https://pgbridge.example.com/json/DragorWW_space/87 ```
