@@ -88,7 +88,7 @@ class PostParser:
     def _format_json(self, message: Message, naked: bool = False) -> Dict[Any, Any]:
         html_content = self._format_html(message, naked=naked)
         result = {
-            'channel': message.chat.username,
+            'channel': self.get_channel_username(message),
             'message_id': message.id,
             'date': datetime.timestamp(message.date),
             'text': message.text or message.caption or '',
@@ -230,11 +230,12 @@ class PostParser:
             if file_unique_id is None:
                 logger.debug(f"File unique id not found for message {message.id}")
             elif file_unique_id:
-                file = f"{message.chat.username}/{message.id}/{file_unique_id}"
+                channel_username = self.get_channel_username(message)
+                file = f"{channel_username}/{message.id}/{file_unique_id}"
                 digest = generate_media_digest(file)
                 url = f"{base_url}/media/{file}/{digest}"
 
-                logger.debug(f"Collected media file: {message.chat.username}/{message.id}/{file_unique_id}")
+                logger.debug(f"Collected media file: {channel_username}/{message.id}/{file_unique_id}")
                 html_content.append(f'<div class="message-media">')
                 if message.media in [MessageMediaType.PHOTO, MessageMediaType.DOCUMENT]:
                     html_content.append(f'<img src="{url}" style="max-width:600px; max-height:600px; object-fit:contain;">')
@@ -310,7 +311,8 @@ class PostParser:
             if photo := getattr(webpage, "photo", None):
                 logger.debug(f"Processing webpage with photo: message_id={message.id}, photo={photo}")
                 if file_unique_id := getattr(photo, "file_unique_id", None):
-                    url = f"{base_url}/media/{message.chat.username}/{message.id}/{file_unique_id}"
+                    channel_username = self.get_channel_username(message)
+                    url = f"{base_url}/media/{channel_username}/{message.id}/{file_unique_id}"
                     logger.debug(f"Generated media URL: {url}")
                     return (
                         f'<div style="margin:5px;">'
@@ -349,10 +351,11 @@ class PostParser:
                 views_html = f'<span class="views">{views} views</span>'
                 parts.append(views_html)
 
-            if message.chat.username:
+            channel_username = self.get_channel_username(message)
+            if channel_username:
                 links = []
-                links.append(f'<a href="tg://resolve?domain={message.chat.username}&post={message.id}">Open in Telegram</a>')
-                links.append(f'<a href="https://t.me/{message.chat.username}/{message.id}">Open in Web</a>')
+                links.append(f'<a href="tg://resolve?domain={channel_username}&post={message.id}">Open in Telegram</a>')
+                links.append(f'<a href="https://t.me/{channel_username}/{message.id}">Open in Web</a>')
                 parts.append('&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;'.join(links))
 
             html = '&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;'.join(parts) if parts else None
@@ -427,7 +430,7 @@ class PostParser:
                 'file_id': None,
             }
 
-            channel_username = getattr(message.chat, 'username', None)
+            channel_username = self.get_channel_username(message)
             if not channel_username:
                 logger.error(f"channel_username_error: no username found for chat in message {message.id}")
                 return
@@ -491,17 +494,21 @@ class PostParser:
 
     def get_channel_username(self, message):
         """Extract channel username from message"""
-        if not message.chat:
+        chat = message.chat if hasattr(message, 'chat') else message
+        if not chat:
             return None
-        
-        if hasattr(message.chat, 'username'):
-            return message.chat.username
-        elif hasattr(message.chat, 'usernames') and message.chat.usernames:
+            
+        # Check for usernames
+        if hasattr(chat, 'usernames') and chat.usernames:
             # Return first active username from the list
-            active_usernames = [u.username for u in message.chat.usernames if u.active]
+            active_usernames = [u.username for u in chat.usernames if u.active]
             if active_usernames:
                 return active_usernames[0]
-            
+        
+        # Check for single username as fallback
+        if hasattr(chat, 'username') and chat.username:
+            return chat.username
+                
         # If no username found in any form
-        logger.error(f"channel_username_error: no username found for chat in message {message.id}")
+        logger.error(f"channel_username_error: no username found for chat in message {getattr(message, 'id', 'unknown')}")
         return None 

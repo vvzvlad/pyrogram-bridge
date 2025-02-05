@@ -44,6 +44,9 @@ async def generate_channel_rss(channel: str, post_parser: Optional[PostParser] =
         try:
             channel_info = await post_parser.client.get_chat(channel)
             channel_title = channel_info.title or f"Telegram: {channel}"
+            channel_username = post_parser.get_channel_username(channel_info)
+            if not channel_username:
+                return create_error_feed(channel, base_url)
         except Exception as e:  # raise error if channel not found
             if "USERNAME_INVALID" in str(e) or "USERNAME_NOT_OCCUPIED" in str(e):
                 return create_error_feed(channel, base_url)
@@ -51,10 +54,10 @@ async def generate_channel_rss(channel: str, post_parser: Optional[PostParser] =
                 raise
 
         # Set feed metadata
-        main_name = f"{channel_title} (@{channel})"
+        main_name = f"{channel_title} (@{channel_username})"
         fg.title(main_name)
-        fg.link(href=f"https://t.me/{channel}", rel='alternate')
-        fg.description(f'Telegram channel {channel} RSS feed')
+        fg.link(href=f"https://t.me/{channel_username}", rel='alternate')
+        fg.description(f'Telegram channel {channel_username} RSS feed')
         fg.language('ru')
 
         fg.id(f"{base_url}/rss/{channel}")
@@ -119,7 +122,7 @@ async def generate_channel_rss(channel: str, post_parser: Optional[PostParser] =
             fe = fg.add_entry()
             fe.title(post.get('title', 'Untitled post'))
             
-            post_link = f"https://t.me/{channel}/{post['message_id']}"
+            post_link = f"https://t.me/{channel_username}/{post['message_id']}"
             fe.link(href=post_link)
             
             html_content = post.get('html', '')
