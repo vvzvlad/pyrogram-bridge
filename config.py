@@ -10,5 +10,6 @@ def get_settings():
         "session_string": os.getenv("TG_SESSION_STRING", ""),
         "pyrogram_bridge_url": os.getenv("PYROGRAM_BRIDGE_URL", ""),
         "log_level": os.getenv("LOG_LEVEL", "INFO"),
-        "debug": os.getenv("DEBUG", "False") == "True"
+        "debug": os.getenv("DEBUG", "False") == "True",
+        "token": os.getenv("TOKEN", "")
     } 

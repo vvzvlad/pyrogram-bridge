@@ -417,7 +417,12 @@ async def get_media(channel: str, post_id: int, file_unique_id: str, digest: str
         raise HTTPException(status_code=500, detail=error_message) from e
 
 @app.get("/rss/{channel}", response_class=Response)
-async def get_rss_feed(channel: str, limit: int = 20):
+@app.get("/rss/{channel}/{token}", response_class=Response)
+async def get_rss_feed(channel: str, token: str | None = None, limit: int = 20):
+    if Config["token"] and token != Config["token"]:
+        logger.error(f"Invalid token for RSS feed: {token}")
+        #raise HTTPException(status_code=403, detail="Invalid token")
+    
     try:
         rss_content = await generate_channel_rss(channel, client=client.client, limit=limit)
         return Response(content=rss_content, media_type="application/xml")
