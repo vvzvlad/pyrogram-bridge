@@ -3,6 +3,7 @@ import copy
 import re
 import os
 import json
+import bleach
 
 from datetime import datetime
 from typing import Union, Dict, Any, List
@@ -54,6 +55,16 @@ if not logger.handlers:
 class PostParser:
     def __init__(self, client):
         self.client = client
+        self.allowed_tags = ['p', 'a', 'b', 'i', 'strong', 'em', 'ul', 'ol', 'li', 'br', 'div', 'span', 'img', 'video', 'audio', 'source']
+        self.allowed_attributes = {
+            'a': ['href', 'title', 'target'],
+            'img': ['src', 'alt', 'style'],
+            'video': ['controls', 'src', 'style'],
+            'audio': ['controls', 'style'],
+            'source': ['src', 'type'],
+            'div': ['class', 'style'],
+            'span': ['class'],
+        }
 
     def _debug_message(self, message: Message) -> Message:
         if Config["debug"]:   
@@ -66,8 +77,19 @@ class PostParser:
         return
 
     async def get_post(self, channel: str, post_id: int, output_type: str = 'json') -> Union[str, Dict[Any, Any]]:
+        """
+        Get post from channel by username or ID
+        """
         try:
-            message = await self.client.get_messages(channel, post_id)
+            # Handle numeric channel IDs
+            if channel.startswith('-100'):
+                chat_id = int(channel[4:])  # Remove '-100' prefix
+            elif channel.lstrip('-').isdigit():
+                chat_id = int(channel.lstrip('-'))  # Use ID without any prefix
+            else:
+                chat_id = channel
+
+            message = await self.client.get_messages(chat_id, post_id)
 
             self._debug_message(message)
 
@@ -203,6 +225,18 @@ class PostParser:
         return result
     
 
+    def _sanitize_html(self, html: str) -> str:
+        try:
+            return bleach.clean(
+                html,
+                tags=self.allowed_tags,
+                attributes=self.allowed_attributes,
+                strip=True
+            )
+        except Exception as e:
+            logger.error(f"html_sanitization_error: {str(e)}")
+            return html
+
     def _format_html(self, message: Message, top_info: bool = True, bottom_info: bool = True) -> str:
         html_content = []
         
@@ -210,7 +244,7 @@ class PostParser:
         if getattr(message, "channel_chat_created", False):
             html_content.append('<div class="message-service">Channel created</div>')
             html = '\n'.join(html_content)
-            return html
+            return self._sanitize_html(html)
 
         # Add forwarded from or reply info if present
         if top_info:
@@ -218,8 +252,6 @@ class PostParser:
                 html_content.append(forward_html)
             elif reply_html := self._format_reply_info(message):
                 html_content.append(reply_html)
-
-
 
         if message.text:
             text = message.text.html
@@ -281,13 +313,9 @@ class PostParser:
             if reactions_views_html := self._reactions_views_links(message): # Add reactions, views and links
                 html_content.append(reactions_views_html)
         
-        #if not naked:
-        #    html = self._wrap_html(html_content)
-        #else:
-        
         html = '\n'.join(html_content)
             
-        return html
+        return self._sanitize_html(html)
 
     def _add_hyperlinks_to_raw_urls(self, text: str) -> str:
         try:
@@ -365,11 +393,18 @@ class PostParser:
                 views_html = f'<span class="views">{views} views</span>'
                 parts.append(views_html)
 
-            channel_username = self.get_channel_username(message)
-            if channel_username:
+            channel_identifier = self.get_channel_username(message)
+            if channel_identifier:
                 links = []
-                links.append(f'<a href="tg://resolve?domain={channel_username}&post={message.id}">Open in Telegram</a>')
-                links.append(f'<a href="https://t.me/{channel_username}/{message.id}">Open in Web</a>')
+                if channel_identifier.startswith('-100'):
+                    # For channels with only ID
+                    channel_id = channel_identifier[4:]  # Remove '-100' prefix
+                    links.append(f'<a href="tg://resolve?domain=c/{channel_id}&post={message.id}">Open in Telegram</a>')
+                    links.append(f'<a href="https://t.me/c/{channel_id}/{message.id}">Open in Web</a>')
+                else:
+                    # For channels with username
+                    links.append(f'<a href="tg://resolve?domain={channel_identifier}&post={message.id}">Open in Telegram</a>')
+                    links.append(f'<a href="https://t.me/{channel_identifier}/{message.id}">Open in Web</a>')
                 parts.append('&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;'.join(links))
 
             html = '&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;'.join(parts) if parts else None
@@ -416,11 +451,19 @@ class PostParser:
 
     async def get_recent_posts(self, channel: str, limit: int = 20) -> List[Dict[Any, Any]]:
         """
-        Get recent posts from channel
+        Get recent posts from channel by username or ID
         """
         try:
+            # Handle numeric channel IDs
+            if channel.startswith('-100'):
+                chat_id = int(channel[4:])  # Remove '-100' prefix
+            elif channel.lstrip('-').isdigit():
+                chat_id = int(channel.lstrip('-'))  # Use ID without any prefix
+            else:
+                chat_id = channel
+
             messages = []
-            async for message in self.client.get_chat_history(channel, limit=limit):
+            async for message in self.client.get_chat_history(chat_id, limit=limit):
                 try:
                     post = await self.get_post(channel, message.id, output_type='json')
                     if post:
@@ -504,7 +547,7 @@ class PostParser:
             logger.error(f"file_id_collection_error: message_id {message.id}, error {str(e)}") 
 
     def get_channel_username(self, message):
-        """Extract channel username from message"""
+        """Extract channel username or ID from message"""
         chat = message.chat if hasattr(message, 'chat') else message
         if not chat:
             return None
@@ -519,7 +562,11 @@ class PostParser:
         # Check for single username as fallback
         if hasattr(chat, 'username') and chat.username:
             return chat.username
+        
+        # If no username, return chat ID as string
+        if hasattr(chat, 'id'):
+            return str(chat.id)
                 
-        # If no username found in any form
-        logger.error(f"channel_username_error: no username found for chat in message {getattr(message, 'id', 'unknown')}")
+        # If no username or ID found
+        logger.error(f"channel_identifier_error: no username or ID found for chat in message {getattr(message, 'id', 'unknown')}")
         return None 
