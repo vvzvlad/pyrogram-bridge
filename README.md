@@ -38,9 +38,14 @@ AgG7QBoANg0YVmwZTZmqadO4MJQdnaRRnXwSYpbbkGf49aATvTZj-yKcvdH8IsIDbwp00PbWFcbSjzoP
 ========================================
 Use session on ENV variable TG_SESSION_STRING in docker-compose.yml
 ```
+
 6)Set session ENV variable in docker-compose.yml file:
 
 ```docker-compose
+volumes:
+  pyrogram_bridge:
+  
+services:
   pyrogram_bridge:
     image: ghcr.io/vvzvlad/pyrogram-bridge:latest
     container_name: pyrogram-bridge
@@ -50,24 +55,24 @@ Use session on ENV variable TG_SESSION_STRING in docker-compose.yml
       TG_SESSION_STRING: "AgG7QBoANg0YVmwZTZmqadO4MJQdn............FPEaL8AA"
       PYROGRAM_BRIDGE_URL: https://pgbridge.example.com
       API_PORT: 80
-      TZ: Europe/Moscow
+    restart: always
+    volumes:
+      - pyrogram_bridge:/app/data
     labels:
       traefik.enable: "true"
       traefik.http.routers.pgbridge.rule: Host(`pgbridge.example.com`)
       traefik.http.services.pgbridge.loadBalancer.server.port: 80
       traefik.http.routers.pgbridge.entrypoints: websecure
       traefik.http.routers.pgbridge.tls: true
-      com.centurylinklabs.watchtower.enable: "true"   
 ```
 
-
-## Get channel rss feed:
+## Get channel rss feed
 
 ``` curl https://pgbridge.example.com/rss/DragorWW_space ```
 
 or
 
-## Get channel messages:
+## Get channel messages
 
 ``` curl https://pgbridge.example.com/html/DragorWW_space/87 ```
 ``` curl https://pgbridge.example.com/json/DragorWW_space/87 ```
