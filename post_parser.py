@@ -100,13 +100,18 @@ class PostParser:
 
     def _get_author_info(self, message: Message) -> str:
         if message.sender_chat:
-            title = getattr(message.sender_chat, 'title', '').strip()
-            username = getattr(message.sender_chat, 'username', '').strip()
+            title = getattr(message.sender_chat, 'title', None)
+            username = getattr(message.sender_chat, 'username', None)
+            title = title.strip() if title else ''
+            username = username.strip() if username else ''
             return f"{title} (@{username})" if username else title
         elif message.from_user:
-            first = getattr(message.from_user, 'first_name', '').strip()
-            last = getattr(message.from_user, 'last_name', '').strip()
-            username = getattr(message.from_user, 'username', '').strip()
+            first = getattr(message.from_user, 'first_name', None)
+            last = getattr(message.from_user, 'last_name', None)
+            username = getattr(message.from_user, 'username', None)
+            first = first.strip() if first else ''
+            last = last.strip() if last else ''
+            username = username.strip() if username else ''
             name = ' '.join(filter(None, [first, last]))
             return f"{name} (@{username})" if username else name
         return "Unknown author"
