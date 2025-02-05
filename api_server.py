@@ -6,6 +6,7 @@ import json
 from datetime import datetime
 import time
 from contextlib import asynccontextmanager
+import random
 
 import magic
 from pyrogram import errors
@@ -436,8 +437,10 @@ async def get_rss_feed(channel: str, token: str | None = None, limit: int = 20):
             raise HTTPException(status_code=400, detail=error_message) from e
         except errors.FloodWait as e:
             wait_time = e.value
-            logger.warning(f"FloodWait detected for channel {channel}, waiting {wait_time} seconds")
-            await asyncio.sleep(wait_time)
+            random_additional_wait = random.uniform(0, wait_time * 1.5)
+            total_wait_time = wait_time + random_additional_wait
+            logger.warning(f"FloodWait detected for channel {channel}, waiting {total_wait_time:.1f} seconds (base: {wait_time}s, random: {random_additional_wait:.1f}s)")
+            await asyncio.sleep(total_wait_time)
             logger.info(f"FloodWait finished for channel {channel}, retrying RSS feed generation")
             continue
         except Exception as e:
