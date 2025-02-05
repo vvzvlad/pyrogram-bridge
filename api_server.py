@@ -15,7 +15,7 @@ from fastapi import FastAPI, HTTPException, Response
 from fastapi.responses import HTMLResponse, FileResponse
 from telegram_client import TelegramClient
 from config import get_settings
-from rss_generator import generate_channel_rss
+from rss_generator import generate_channel_rss, generate_channel_html
 from post_parser import PostParser
 from url_signer import verify_media_digest
 
@@ -419,7 +419,7 @@ async def get_media(channel: str, post_id: int, file_unique_id: str, digest: str
 
 @app.get("/rss/{channel}", response_class=Response)
 @app.get("/rss/{channel}/{token}", response_class=Response)
-async def get_rss_feed(channel: str, token: str | None = None, limit: int = 20):
+async def get_rss_feed(channel: str, token: str | None = None, limit: int = 20, output_type: str = 'rss'):
     if Config["token"]:
         if token != Config["token"]:
             logger.error(f"Invalid token for RSS feed: {token}, expected: {Config['token']}")
@@ -429,8 +429,12 @@ async def get_rss_feed(channel: str, token: str | None = None, limit: int = 20):
     
     while True:
         try:
-            rss_content = await generate_channel_rss(channel, client=client.client, limit=limit)
-            return Response(content=rss_content, media_type="application/xml")
+            if output_type == 'rss':
+                rss_content = await generate_channel_rss(channel, client=client.client, limit=limit)
+                return Response(content=rss_content, media_type="application/xml")
+            elif output_type == 'html':
+                rss_content = await generate_channel_html(channel, client=client.client, limit=limit)
+                return Response(content=rss_content, media_type="text/html")
         except ValueError as e:
             error_message = f"Invalid parameters for RSS feed generation: {str(e)}"
             logger.error(error_message)

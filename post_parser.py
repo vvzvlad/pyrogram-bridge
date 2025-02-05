@@ -44,10 +44,12 @@ if not logger.handlers:
 #http://127.0.0.1:8000/html/ufjqk/1070 - reply to
 #http://127.0.0.1:8000/html/tetstststststststffd/4 - forwarded from channel without name
 #http://127.0.0.1:8000/html/tetstststststststffd/14 - forwarded from hidden user
-#https://t.me/smallpharm/4802
-# https://t.me/webstrangler/3987
+#https://t.me/smallpharm/4802 many pics and text
+# https://t.me/webstrangler/3987 many pics without text
 # https://t.me/teslacoilpro/7117
 # https://t.me/red_spades/1222 many media + text
+
+#https://t.me/ni404head/1283 file
 
 class PostParser:
     def __init__(self, client):
@@ -84,24 +86,6 @@ class PostParser:
         except Exception as e:
             logger.error(f"post_parsing_error: channel {channel}, post_id {post_id}, error {str(e)}")
             raise
-
-    def _format_json(self, message: Message, naked: bool = False) -> Dict[Any, Any]:
-        html_content = self._format_html(message, naked=naked)
-        result = {
-            'channel': self.get_channel_username(message),
-            'message_id': message.id,
-            'date': datetime.timestamp(message.date),
-            'text': message.text or message.caption or '',
-            'html': html_content,
-            'title': self._generate_title(message),
-            'author': self._get_author_info(message),
-            'views': message.views,
-        }
-        
-        if message.media_group_id:
-            result['media_group_id'] = message.media_group_id
-        
-        return result
 
     def _get_author_info(self, message: Message) -> str:
         if message.sender_chat:
@@ -194,31 +178,60 @@ class PostParser:
             return f'<div class="message-reply">Reply to #{reply_to.id}: {reply_text}</div><br>'
         
         return None
+    
 
-    def _format_html(self, message: Message, naked: bool = False) -> str:
+    def format_message_for_feed(self, message: Message, top_info: bool = True, bottom_info: bool = True) -> Dict[Any, Any]:
+        return self._format_json(message, top_info=top_info, bottom_info=bottom_info) 
+
+    def _format_json(self, message: Message, top_info: bool = True, bottom_info: bool = True) -> Dict[Any, Any]:
+        html_content = self._format_html(message, top_info=top_info, bottom_info=bottom_info)
+        result = {
+            'channel': self.get_channel_username(message),
+            'message_id': message.id,
+            'date': datetime.timestamp(message.date),
+            'date_formatted': message.date.strftime('%Y-%m-%d %H:%M:%S'),
+            'text': message.text or message.caption or '',
+            'html': html_content,
+            'title': self._generate_title(message),
+            'author': self._get_author_info(message),
+            'views': message.views,
+        }
+        
+        if message.media_group_id:
+            result['media_group_id'] = message.media_group_id
+        
+        return result
+    
+
+    def _format_html(self, message: Message, top_info: bool = True, bottom_info: bool = True) -> str:
         html_content = []
         
-        # Add forwarded from or reply info if present
-        if forward_html := self._format_forward_info(message):
-            html_content.append(forward_html)
-        elif reply_html := self._format_reply_info(message):
-            html_content.append(reply_html)
-
-        # Check for "channel created" service message
+        # Create service message for "channel created"
         if getattr(message, "channel_chat_created", False):
-            service_html = '<div class="message-service">Channel created</div>'
-            if not naked:
-                return self._wrap_html([service_html])
-            return service_html
+            html_content.append('<div class="message-service">Channel created</div>')
+            html = '\n'.join(html_content)
+            return html
 
-        text = message.text.html if message.text else message.caption.html if message.caption else ''
-        text = text.replace('\n', '<br>')
+        # Add forwarded from or reply info if present
+        if top_info:
+            if forward_html := self._format_forward_info(message):
+                html_content.append(forward_html)
+            elif reply_html := self._format_reply_info(message):
+                html_content.append(reply_html)
+
+
+
+        if message.text:
+            text = message.text.html
+        elif message.caption:
+            text = message.caption.html
+        else:
+            text = ''
+
+        text = text.replace('\n', '<br>') # Replace newlines with <br>
+        text = self._add_hyperlinks_to_raw_urls(text) # Add hyperlinks to raw URLs
         
-        # Add hyperlinks to raw URLs
-        text = self._add_hyperlinks_to_raw_urls(text)
-        
-        # Save media file_ids
-        self._save_media_file_ids(message)
+        self._save_media_file_ids(message) # Save media file_ids for caching
                 
         if poll := getattr(message, "poll", None): # Poll formatting
             if poll_html := self._format_poll(poll):
@@ -264,14 +277,15 @@ class PostParser:
         if text: # Message text
             html_content.append(f'<div class="message-text">{text}</div>')
 
-        if not naked:
+        if bottom_info:
             if reactions_views_html := self._reactions_views_links(message): # Add reactions, views and links
                 html_content.append(reactions_views_html)
         
-        if not naked:
-            html = self._wrap_html(html_content)
-        else:
-            html = '\n'.join(html_content)
+        #if not naked:
+        #    html = self._wrap_html(html_content)
+        #else:
+        
+        html = '\n'.join(html_content)
             
         return html
 
@@ -420,9 +434,6 @@ class PostParser:
         except Exception as e:
             logger.error(f"recent_posts_error: channel {channel}, error {str(e)}")
             raise 
-
-    def format_message_for_feed(self, message: Message, naked: bool = False) -> Dict[Any, Any]:
-        return self._format_json(message, naked=naked) 
 
     def _save_media_file_ids(self, message: Message) -> None:
         try:

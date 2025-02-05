@@ -4,6 +4,7 @@ from typing import Optional
 from feedgen.feed import FeedGenerator
 from post_parser import PostParser
 from config import get_settings
+from bs4 import BeautifulSoup
 
 Config = get_settings()
 
@@ -15,7 +16,133 @@ if not logger.handlers:
     handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
     logger.addHandler(handler)
 
+def reorganize_post_content(html):
+    """
+    Reorganize post content to move text after all media
+    Args:
+        html: Post HTML content
+    Returns:
+        Reorganized HTML content
+    """
+    soup = BeautifulSoup(html, 'html.parser')
+    
+    # Find all media and text blocks
+    media_blocks = soup.find_all('div', class_='message-media')
+    text_blocks = soup.find_all('div', class_='message-text')
+    
+    if not text_blocks:  # No text to move
+        return html
+        
+    # Create new structure
+    new_content = []
+    
+    # Add all media first
+    for media in media_blocks:
+        media.extract()
+        new_content.append(str(media))
+        new_content.append('<br>')
+        
+    # Add text last
+    for text in text_blocks:
+        text.extract()
+        new_content.append(str(text))
+    
+    # Add remaining elements
+    for element in soup.contents:
+        if isinstance(element, str):
+            new_content.append(element)
+        elif element.name != 'br' and 'message-media' not in element.get('class', []) and 'message-text' not in element.get('class', []):
+            new_content.append(str(element))
+            
+    return ''.join(new_content)
 
+
+
+def merge_posts(posts):
+    """Helper function to merge multiple posts into one"""
+    if not posts:
+        return None
+        
+    # Find post with most meaningful title
+    main_post = posts[0]
+    for post in posts:
+        current_title = post.get('title', '')
+        if current_title and current_title not in ['📷 Photo', '📹 Video', '📄 Document']:
+            main_post = post
+            break
+            
+    merged_post = main_post.copy()
+    merged_html = []
+    for post in posts:
+        merged_html.append(post['html'])
+    
+    merged_post['html'] = '\n<br>\n'.join(merged_html)
+    
+    # Reorganize content after merging
+    merged_post['html'] = reorganize_post_content(merged_post['html'])
+    return merged_post
+
+async def process_messages(messages, post_parser, channel):
+    """
+    Process messages into formatted posts, handling media groups
+    Args:
+        messages: List of raw messages
+        post_parser: PostParser instance
+        channel: Channel name for logging
+    Returns:
+        List of formatted and merged posts
+    """
+    posts = []
+    media_groups = {}
+    
+    # First pass - collect messages and media groups
+    for message in messages:
+        try:
+            # Skip service messages about pinned posts
+            if message.service and 'PINNED_MESSAGE' in str(message.service):
+                logger.debug(f"Skipping pinned service message {message.id} in channel {channel}")
+                continue
+                
+            if message.media_group_id:
+                if message.media_group_id not in media_groups:
+                    media_groups[message.media_group_id] = []
+                media_groups[message.media_group_id].append(message)
+            else:
+                formatted = post_parser.format_message_for_feed(
+                    message,
+                    top_info=True,
+                    bottom_info=True
+                )
+                if formatted:
+                    posts.append(formatted)
+                
+        except Exception as e:
+            logger.error(f"feed_entry_error: channel {channel}, message_id {message.id}, error {str(e)}")
+            continue
+    
+    # Process media groups
+    for _group_id, group_messages in media_groups.items():
+        if not group_messages:
+            continue
+            
+        group_messages.sort(key=lambda x: x.id)
+        formatted_posts = []
+        
+        for i, msg in enumerate(group_messages):
+            formatted = post_parser.format_message_for_feed(
+                msg,
+                top_info=(i == 0),
+                bottom_info=(i == len(group_messages) - 1)
+            )
+            if formatted:
+                formatted_posts.append(formatted)
+                
+        if formatted_posts:
+            posts.append(merge_posts(formatted_posts))
+    
+    # Sort all posts by date
+    posts.sort(key=lambda x: x['date'], reverse=True)
+    return posts
 
 async def generate_channel_rss(channel: str, post_parser: Optional[PostParser] = None, client = None, limit: int = 20) -> str:
     """
@@ -25,6 +152,7 @@ async def generate_channel_rss(channel: str, post_parser: Optional[PostParser] =
         post_parser: Optional PostParser instance. If not provided, will create new one
         client: Telegram client instance
         limit: Maximum number of posts to include in the RSS feed
+        output_type: 'rss' or 'html'
     Returns:
         RSS feed as string in XML format
     """
@@ -47,7 +175,7 @@ async def generate_channel_rss(channel: str, post_parser: Optional[PostParser] =
             channel_username = post_parser.get_channel_username(channel_info)
             if not channel_username:
                 return create_error_feed(channel, base_url)
-        except Exception as e:  # raise error if channel not found
+        except Exception as e:
             if "USERNAME_INVALID" in str(e) or "USERNAME_NOT_OCCUPIED" in str(e):
                 return create_error_feed(channel, base_url)
             else:
@@ -59,66 +187,18 @@ async def generate_channel_rss(channel: str, post_parser: Optional[PostParser] =
         fg.link(href=f"https://t.me/{channel_username}", rel='alternate')
         fg.description(f'Telegram channel {channel_username} RSS feed')
         fg.language('ru')
-
         fg.id(f"{base_url}/rss/{channel}")
         
-        # First collect all posts
-        posts = []
-        media_groups = {}
-        
+        # Collect messages
+        messages = []
         async for message in post_parser.client.get_chat_history(channel, limit=limit):
-            try:
-                # Skip service messages about pinned posts
-                if message.service and 'PINNED_MESSAGE' in str(message.service):
-                    logger.debug(f"Skipping pinned service message {message.id} in channel {channel}")
-                    continue
-                    
-                naked_html = True if message.media_group_id else False
-                post = post_parser.format_message_for_feed(message, naked=naked_html)
-                if not post:
-                    continue
-                    
-                if post.get('media_group_id'):
-                    if post['media_group_id'] not in media_groups:
-                        media_groups[post['media_group_id']] = []
-                    media_groups[post['media_group_id']].append(post)
-                else:
-                    posts.append(post)
-                    
-            except Exception as e:
-                logger.error(f"feed_entry_error: channel {channel}, message_id {message.id}, error {str(e)}")
-                continue
-        
-        # Merge media groups
-        for _group_id, group_posts in media_groups.items():
-            if not group_posts:
-                continue
-                
-            # Sort posts within media group by message_id
-            group_posts.sort(key=lambda x: x['message_id'])
+            messages.append(message)
             
-            # Find post with most meaningful title
-            main_post = group_posts[0]
-            for post in group_posts:
-                current_title = post.get('title', '')
-                if current_title and current_title not in ['📷 Photo', '📹 Video', '📄 Document']:
-                    main_post = post
-                    break
-            
-            merged_post = main_post.copy()
-            merged_html = []
-            
-            for post in group_posts:
-                merged_html.append(post['html'])
-                
-            merged_post['html'] = '\n'.join(merged_html)
-            posts.append(merged_post)
-            
-        # Sort posts by date
-        posts.sort(key=lambda x: x['date'], reverse=True)
+        # Process messages into formatted posts
+        final_posts = await process_messages(messages, post_parser, channel)
         
         # Generate feed entries
-        for post in posts:
+        for post in final_posts:
             fe = fg.add_entry()
             fe.title(post.get('title', 'Untitled post'))
             
@@ -144,8 +224,65 @@ async def generate_channel_rss(channel: str, post_parser: Optional[PostParser] =
         
     except Exception as e:
         logger.error(f"rss_generation_error: channel {channel}, error {str(e)}")
-        raise 
+        raise
 
+
+async def generate_channel_html(channel: str, post_parser: Optional[PostParser] = None, client = None, limit: int = 20) -> str:
+    """
+    Generate HTML feed for channel using actual messages
+    Args:
+        channel: Telegram channel name
+        post_parser: Optional PostParser instance. If not provided, will create new one
+        client: Telegram client instance
+        limit: Maximum number of posts to include in the RSS feed
+    Returns:
+        HTML feed as string
+    """
+    if limit < 1:
+        raise ValueError(f"limit must be positive, got {limit}")
+    if limit > 100:
+        raise ValueError(f"limit cannot exceed 100, got {limit}")
+
+    try:
+        if post_parser is None:
+            post_parser = PostParser(client=client)
+            
+        base_url = Config['pyrogram_bridge_url']
+        
+        try:
+            channel_info = await post_parser.client.get_chat(channel)
+            channel_title = channel_info.title or f"Telegram: {channel}"
+            channel_username = post_parser.get_channel_username(channel_info)
+            if not channel_username:
+                return create_error_feed(channel, base_url)
+        except Exception as e:
+            if "USERNAME_INVALID" in str(e) or "USERNAME_NOT_OCCUPIED" in str(e):
+                return create_error_feed(channel, base_url)
+            else:
+                raise
+
+        # Set feed metadata
+        main_name = f"{channel_title} (@{channel_username})"
+        html_content = f'<h1>{main_name}</h1>'
+        
+        # Collect messages
+        messages = []
+        async for message in post_parser.client.get_chat_history(channel, limit=limit):
+            messages.append(message)
+            
+        # Process messages into formatted posts
+        final_posts = await process_messages(messages, post_parser, channel)
+
+        html_posts = []
+        for post in final_posts:
+            html_content = post.get('html', '')
+            if html_content:
+                html_posts.append(f'<div class="telegram-post">{html_content}</div>')
+        return '\n<hr class="post-divider">\n'.join(html_posts)
+        
+    except Exception as e:
+        logger.error(f"rss_generation_error: channel {channel}, error {str(e)}")
+        raise
 
 def create_error_feed(channel: str, base_url: str) -> str:
     """
