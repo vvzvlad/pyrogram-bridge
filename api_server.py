@@ -426,18 +426,21 @@ async def get_rss_feed(channel: str, token: str | None = None, limit: int = 20):
         else:
             logger.info(f"Valid token for RSS feed: {token}")
     
-    try:
-        rss_content = await generate_channel_rss(channel, client=client.client, limit=limit)
-        return Response(content=rss_content, media_type="application/xml")
-    except ValueError as e:
-        error_message = f"Invalid parameters for RSS feed generation: {str(e)}"
-        logger.error(error_message)
-        raise HTTPException(status_code=400, detail=error_message) from e
-    except errors.FloodWait as e:
-        error_message = f"Too many requests for channel {channel}, wait {e.value} seconds"
-        logger.error(error_message)
-        raise HTTPException(status_code=429, detail=error_message) from e
-    except Exception as e:
-        error_message = f"Failed to generate RSS feed for channel {channel}: {str(e)}"
-        logger.error(error_message)
-        raise HTTPException(status_code=500, detail=error_message) from e 
+    while True:
+        try:
+            rss_content = await generate_channel_rss(channel, client=client.client, limit=limit)
+            return Response(content=rss_content, media_type="application/xml")
+        except ValueError as e:
+            error_message = f"Invalid parameters for RSS feed generation: {str(e)}"
+            logger.error(error_message)
+            raise HTTPException(status_code=400, detail=error_message) from e
+        except errors.FloodWait as e:
+            wait_time = e.value
+            logger.warning(f"FloodWait detected for channel {channel}, waiting {wait_time} seconds")
+            await asyncio.sleep(wait_time)
+            logger.info(f"FloodWait finished for channel {channel}, retrying RSS feed generation")
+            continue
+        except Exception as e:
+            error_message = f"Failed to generate RSS feed for channel {channel}: {str(e)}"
+            logger.error(error_message)
+            raise HTTPException(status_code=500, detail=error_message) from e 
