@@ -50,9 +50,7 @@ async def generate_channel_rss(channel: str, post_parser: Optional[PostParser] =
         fg.link(href=f"https://t.me/{channel}", rel='alternate')
         fg.description(f'Telegram channel {channel} RSS feed')
         fg.language('ru')
-        #fg.dc.dc_creator(f"@{channel}")
-        
-        
+
         fg.id(f"{base_url}/rss/{channel}")
         
         # First collect all posts
@@ -127,7 +125,7 @@ async def generate_channel_rss(channel: str, post_parser: Optional[PostParser] =
             fe.pubDate(pub_date)
             fe.guid(post_link, permalink=True)
             
-            if post.get('author') and post['author'] != channel:
+            if post.get('author') and post['author'] != main_name:
                 fe.author(name="", email=post['author'])
                 
         rss_feed = fg.rss_str(pretty=True)

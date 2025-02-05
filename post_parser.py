@@ -102,13 +102,13 @@ class PostParser:
         if message.sender_chat:
             title = getattr(message.sender_chat, 'title', '').strip()
             username = getattr(message.sender_chat, 'username', '').strip()
-            return f"{title} by @{username}" if username else title
+            return f"{title} (@{username})" if username else title
         elif message.from_user:
             first = getattr(message.from_user, 'first_name', '').strip()
             last = getattr(message.from_user, 'last_name', '').strip()
             username = getattr(message.from_user, 'username', '').strip()
             name = ' '.join(filter(None, [first, last]))
-            return f"{name} by @{username}" if username else name
+            return f"{name} (@{username})" if username else name
         return "Unknown author"
 
     def _generate_title(self, message: Message) -> str:
