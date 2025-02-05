@@ -344,7 +344,16 @@ def calculate_cache_stats():
 
 @app.get("/html/{channel}/{post_id}", response_class=HTMLResponse)
 @app.get("/post/html/{channel}/{post_id}", response_class=HTMLResponse)
-async def get_post_html(channel: str, post_id: int):
+@app.get("/html/{channel}/{post_id}/{token}", response_class=HTMLResponse)  
+@app.get("/post/html/{channel}/{post_id}/{token}", response_class=HTMLResponse)
+async def get_post_html(channel: str, post_id: int, token: str | None = None):
+    if Config["token"]:
+        if token != Config["token"]:
+            logger.error(f"Invalid token for HTML post: {token}, expected: {Config['token']}")
+            raise HTTPException(status_code=403, detail="Invalid token")
+        else:
+            logger.info(f"Valid token for HTML post: {token}")
+            
     try:
         parser = PostParser(client.client)
         html_content = await parser.get_post(channel, post_id, 'html')
@@ -359,7 +368,16 @@ async def get_post_html(channel: str, post_id: int):
 
 @app.get("/json/{channel}/{post_id}")
 @app.get("/post/json/{channel}/{post_id}")
-async def get_post(channel: str, post_id: int):
+@app.get("/json/{channel}/{post_id}/{token}")
+@app.get("/post/json/{channel}/{post_id}/{token}")
+async def get_post(channel: str, post_id: int, token: str | None = None):
+    if Config["token"]:
+        if token != Config["token"]:
+            logger.error(f"Invalid token for JSON post: {token}, expected: {Config['token']}")
+            raise HTTPException(status_code=403, detail="Invalid token")
+        else:
+            logger.info(f"Valid token for JSON post: {token}")
+            
     try:
         parser = PostParser(client.client)
         json_content = await parser.get_post(channel, post_id, 'json')
