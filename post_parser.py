@@ -35,14 +35,19 @@ if not logger.handlers:
 #http://127.0.0.1:8000/post/html/theyforcedme/3572 - audio
 #http://127.0.0.1:8000/post/html/theyforcedme/3558 - audio-note
 #http://127.0.0.1:8000/html/vvzvlad_lytdybr/426 - sticker
-#http://127.0.0.1:8000/html/wrkshprn/634, http://127.0.0.1:8000/html/ni404head/1278, http://127.0.0.1:8000/html/fieryfiles/4840 — links without <a>
+#http://127.0.0.1:8000/html/wrkshprn/634
+# http://127.0.0.1:8000/html/ni404head/1278
+# http://127.0.0.1:8000/html/fieryfiles/4840 — links without <a>
 #http://127.0.0.1:8000/html/ru2ch_ban/26586 - large video
 #http://127.0.0.1:8000/html/smallpharm/4828 - forwarded from channel
 #http://127.0.0.1:8000/html/vvzvlad_lytdybr/659 - forwarded from user
 #http://127.0.0.1:8000/html/ufjqk/1070 - reply to
 #http://127.0.0.1:8000/html/tetstststststststffd/4 - forwarded from channel without name
 #http://127.0.0.1:8000/html/tetstststststststffd/14 - forwarded from hidden user
-#https://t.me/smallpharm/4802 https://t.me/webstrangler/3987  https://t.me/teslacoilpro/7117 many media + text
+#https://t.me/smallpharm/4802
+# https://t.me/webstrangler/3987
+# https://t.me/teslacoilpro/7117
+# https://t.me/red_spades/1222 many media + text
 
 class PostParser:
     def __init__(self, client):
@@ -483,3 +488,20 @@ class PostParser:
 
         except Exception as e:
             logger.error(f"file_id_collection_error: message_id {message.id}, error {str(e)}") 
+
+    def get_channel_username(self, message):
+        """Extract channel username from message"""
+        if not message.chat:
+            return None
+        
+        if hasattr(message.chat, 'username'):
+            return message.chat.username
+        elif hasattr(message.chat, 'usernames') and message.chat.usernames:
+            # Return first active username from the list
+            active_usernames = [u.username for u in message.chat.usernames if u.active]
+            if active_usernames:
+                return active_usernames[0]
+            
+        # If no username found in any form
+        logger.error(f"channel_username_error: no username found for chat in message {message.id}")
+        return None 
