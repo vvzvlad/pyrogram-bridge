@@ -33,19 +33,13 @@ Config = get_settings()
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     await client.start()
-    
-    # Start background task
-    background_task = asyncio.create_task(cache_media_files())
-    
+    background_task = asyncio.create_task(cache_media_files()) # Start background task
     yield
-    
-    # Cleanup
-    background_task.cancel()
+    background_task.cancel() # Cleanup
     try:
         await background_task
     except asyncio.CancelledError:
         pass
-    
     await client.stop()
 
 app = FastAPI( title="Pyrogram Bridge", lifespan=lifespan)
