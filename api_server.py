@@ -433,6 +433,10 @@ async def get_rss_feed(channel: str, token: str | None = None, limit: int = 20):
         error_message = f"Invalid parameters for RSS feed generation: {str(e)}"
         logger.error(error_message)
         raise HTTPException(status_code=400, detail=error_message) from e
+    except errors.FloodWait as e:
+        error_message = f"Too many requests for channel {channel}, wait {e.value} seconds"
+        logger.error(error_message)
+        raise HTTPException(status_code=429, detail=error_message) from e
     except Exception as e:
         error_message = f"Failed to generate RSS feed for channel {channel}: {str(e)}"
         logger.error(error_message)
