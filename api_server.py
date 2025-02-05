@@ -400,10 +400,10 @@ async def get_media(channel: str, post_id: int, file_unique_id: str, digest: str
     try:
         url = f"{channel}/{post_id}/{file_unique_id}"
         if not verify_media_digest(url, digest):
-            logger.error(f"Invalid digest for media: url={url}")
+            logger.error(f"Invalid digest for media {url}: {digest}, expected: {digest}")
             #raise HTTPException(status_code=403, detail="Invalid URL signature")
         else:
-            logger.info(f"Valid digest for media: url={url}")   
+            logger.info(f"Valid digest for media {url}: {digest}")   
             
         file_path, delete_after = await download_media_file(channel, post_id, file_unique_id)
         return await prepare_file_response(file_path, delete_after=delete_after)
@@ -422,7 +422,7 @@ async def get_media(channel: str, post_id: int, file_unique_id: str, digest: str
 async def get_rss_feed(channel: str, token: str | None = None, limit: int = 20):
     if Config["token"]:
         if token != Config["token"]:
-            logger.error(f"Invalid token for RSS feed: {token}")
+            logger.error(f"Invalid token for RSS feed: {token}, expected: {Config['token']}")
             raise HTTPException(status_code=403, detail="Invalid token")
         else:
             logger.info(f"Valid token for RSS feed: {token}")
