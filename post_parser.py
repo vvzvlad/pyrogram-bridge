@@ -77,19 +77,8 @@ class PostParser:
         return
 
     async def get_post(self, channel: str, post_id: int, output_type: str = 'json') -> Union[str, Dict[Any, Any]]:
-        """
-        Get post from channel by username or ID
-        """
         try:
-            # Handle numeric channel IDs
-            if channel.startswith('-100'):
-                chat_id = int(channel[4:])  # Remove '-100' prefix
-            elif channel.lstrip('-').isdigit():
-                chat_id = int(channel.lstrip('-'))  # Use ID without any prefix
-            else:
-                chat_id = channel
-
-            message = await self.client.get_messages(chat_id, post_id)
+            message = await self.client.get_messages(channel, post_id)
 
             self._debug_message(message)
 
@@ -398,7 +387,7 @@ class PostParser:
                 links = []
                 if channel_identifier.startswith('-100'):
                     # For channels with only ID
-                    channel_id = channel_identifier[4:]  # Remove '-100' prefix
+                    channel_id = channel_identifier[4:]  # Remove '-100' prefix for web links
                     links.append(f'<a href="tg://resolve?domain=c/{channel_id}&post={message.id}">Open in Telegram</a>')
                     links.append(f'<a href="https://t.me/c/{channel_id}/{message.id}">Open in Web</a>')
                 else:
@@ -450,20 +439,9 @@ class PostParser:
             return None
 
     async def get_recent_posts(self, channel: str, limit: int = 20) -> List[Dict[Any, Any]]:
-        """
-        Get recent posts from channel by username or ID
-        """
         try:
-            # Handle numeric channel IDs
-            if channel.startswith('-100'):
-                chat_id = int(channel[4:])  # Remove '-100' prefix
-            elif channel.lstrip('-').isdigit():
-                chat_id = int(channel.lstrip('-'))  # Use ID without any prefix
-            else:
-                chat_id = channel
-
             messages = []
-            async for message in self.client.get_chat_history(chat_id, limit=limit):
+            async for message in self.client.get_chat_history(channel, limit=limit):
                 try:
                     post = await self.get_post(channel, message.id, output_type='json')
                     if post:
@@ -476,7 +454,7 @@ class PostParser:
             
         except Exception as e:
             logger.error(f"recent_posts_error: channel {channel}, error {str(e)}")
-            raise 
+            raise
 
     def _save_media_file_ids(self, message: Message) -> None:
         try:
@@ -547,7 +525,7 @@ class PostParser:
             logger.error(f"file_id_collection_error: message_id {message.id}, error {str(e)}") 
 
     def get_channel_username(self, message):
-        """Extract channel username or ID from message"""
+        """Extract channel username from message"""
         chat = message.chat if hasattr(message, 'chat') else message
         if not chat:
             return None
@@ -562,11 +540,7 @@ class PostParser:
         # Check for single username as fallback
         if hasattr(chat, 'username') and chat.username:
             return chat.username
-        
-        # If no username, return chat ID as string
-        if hasattr(chat, 'id'):
-            return str(chat.id)
-                
-        # If no username or ID found
-        logger.error(f"channel_identifier_error: no username or ID found for chat in message {getattr(message, 'id', 'unknown')}")
+            
+        # If no username found
+        logger.error(f"channel_username_error: no username found for chat in message {getattr(message, 'id', 'unknown')}")
         return None 
