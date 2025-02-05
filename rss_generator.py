@@ -1,14 +1,20 @@
 import logging
-from feedgen.feed import FeedGenerator
 from datetime import datetime, timezone
 from typing import Optional
+from feedgen.feed import FeedGenerator
 from post_parser import PostParser
 from config import get_settings
-from pyrogram import Client
 
 Config = get_settings()
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+    logger.addHandler(handler)
+
 
 
 async def generate_channel_rss(channel: str, post_parser: Optional[PostParser] = None, client = None, limit: int = 20) -> str:
