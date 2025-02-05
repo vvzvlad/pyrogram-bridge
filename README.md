@@ -68,8 +68,7 @@ TOKEN - optional, if set, will be used to check if user has access to rss feed. 
 ``` curl https://pgbridge.example.com/rss/DragorWW_space/1234567890 ``` with auth token
 ``` curl https://pgbridge.example.com/rss/DragorWW_space?limit=30 ``` with limit parameter (also, can be used with token)
 
-
-or
+Warning: TG API has rate limit, and bridge will wait time before http response, if catch FloodWait exception. Increase http timeout in your client prevention timeout error. Examply, in miniflux: ENV HTTP_CLIENT_TIMEOUT=200
 
 ## Get channel messages
 
