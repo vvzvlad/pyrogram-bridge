@@ -7,3 +7,4 @@ pillow==11.1.0
 feedgen==1.0.0
 python-dateutil==2.9.0.post0
 python-magic==0.4.27
+beautifulsoup4
