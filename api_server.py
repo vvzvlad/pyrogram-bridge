@@ -389,6 +389,7 @@ async def get_post(channel: str, post_id: int, token: str | None = None):
         raise HTTPException(status_code=500, detail=error_message) from e
 
 
+@app.get("/health")
 @app.get("/health/{token}")
 async def health_check(token: str | None = None):
     if Config["token"]:
