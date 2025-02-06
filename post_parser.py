@@ -226,7 +226,10 @@ class PostParser:
                 html,
                 tags=self.allowed_tags,
                 attributes=self.allowed_attributes,
-                strip=True
+                strip=True,
+                css_sanitizer=bleach.css_sanitizer.CSSSanitizer(
+                    allowed_css_properties=['max-width', 'max-height', 'width', 'height', 'object-fit']
+                )
             )
         except Exception as e:
             logger.error(f"html_sanitization_error: {str(e)}")
