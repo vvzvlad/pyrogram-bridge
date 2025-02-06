@@ -501,7 +501,7 @@ async def get_media(channel: str, post_id: int, file_unique_id: str, digest: str
 
 @app.get("/rss/{channel}", response_class=Response)
 @app.get("/rss/{channel}/{token}", response_class=Response)
-async def get_rss_feed(channel: str, token: str | None = None, limit: int = 20, output_type: str = 'rss'):
+async def get_rss_feed(channel: str, token: str | None = None, limit: int = 50, output_type: str = 'rss'):
     if Config["token"]:
         if token != Config["token"]:
             logger.error(f"Invalid token for RSS feed: {token}, expected: {Config['token']}")
