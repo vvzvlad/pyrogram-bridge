@@ -468,7 +468,10 @@ class PostParser:
     def _save_media_file_ids(self, message: Message) -> None:
         try:
             file_data = {
-                'file_id': None,
+                'channel': None,
+                'post_id': None,
+                'file_unique_id': None,
+                'added': None
             }
 
             channel_username = self.get_channel_username(message)
@@ -478,60 +481,58 @@ class PostParser:
 
             if message.media:
                 if message.photo:
-                    file_data['file_id'] = f"{channel_username}-{message.id}-{message.photo.file_unique_id}"
+                    file_data['file_unique_id'] = message.photo.file_unique_id
                 elif message.video:
-                    try:
-                        if message.video.file_size > 100 * 1024 * 1024:
-                            logger.info(f"Large video file for message {message.id} is not cached due to size limit")
-                        else:
-                            file_data['file_id'] = f"{channel_username}-{message.id}-{message.video.file_unique_id}"
-                    except Exception as e:
-                        logger.error(f"video_file_size_error: failed to get video file size for message {message.id}: {str(e)}")
-                        file_data['file_id'] = f"{channel_username}-{message.id}-{message.video.file_unique_id}"
+                    file_data['file_unique_id'] = message.video.file_unique_id
                 elif message.document:
-                    file_data['file_id'] = f"{channel_username}-{message.id}-{message.document.file_unique_id}"
+                    file_data['file_unique_id'] = message.document.file_unique_id
                 elif message.audio:
-                    file_data['file_id'] = f"{channel_username}-{message.id}-{message.audio.file_unique_id}"
+                    file_data['file_unique_id'] = message.audio.file_unique_id
                 elif message.voice:
-                    file_data['file_id'] = f"{channel_username}-{message.id}-{message.voice.file_unique_id}"
+                    file_data['file_unique_id'] = message.voice.file_unique_id
                 elif message.video_note:
-                    file_data['file_id'] = f"{channel_username}-{message.id}-{message.video_note.file_unique_id}"
+                    file_data['file_unique_id'] = message.video_note.file_unique_id
                 elif message.animation:
-                    file_data['file_id'] = f"{channel_username}-{message.id}-{message.animation.file_unique_id}"
+                    file_data['file_unique_id'] = message.animation.file_unique_id
                 elif message.sticker:
-                    file_data['file_id'] = f"{channel_username}-{message.id}-{message.sticker.file_unique_id}"
+                    file_data['file_unique_id'] = message.sticker.file_unique_id
                 elif message.web_page and message.web_page.photo:
-                    file_data['file_id'] = f"{channel_username}-{message.id}-{message.web_page.photo.file_unique_id}"
+                    file_data['file_unique_id'] = message.web_page.photo.file_unique_id
 
-            if file_data['file_id']:
-                file_path = os.path.join(os.path.abspath("./data"), 'media_file_ids.json')
-                try:
-                    existing_data = []
-                    if os.path.exists(file_path):
-                        with open(file_path, 'r', encoding='utf-8') as f:
-                            existing_data = json.load(f)
-                    
-                    # Check if file_id already exists
-                    found = False
-                    for item in existing_data:
-                        if item['file_id'] == file_data['file_id']:
-                            item['added'] = datetime.now().timestamp()
-                            found = True
-                            break
-                    
-                    # Add new entry if not found
-                    if not found:
-                        file_data['added'] = datetime.now().timestamp()
-                        existing_data.append(file_data)
-                    
-                    with open(file_path, 'w', encoding='utf-8') as f:
-                        json.dump(existing_data, f, ensure_ascii=False, indent=2)
+                if file_data['file_unique_id']:
+                    file_data['channel'] = channel_username
+                    file_data['post_id'] = message.id
+                    file_data['added'] = datetime.now().timestamp()
 
-                except Exception as e:
-                    logger.error(f"file_id_save_error: error writing to {file_path}: {str(e)}")
+                    file_path = os.path.join(os.path.abspath("./data"), 'media_file_ids.json')
+                    try:
+                        existing_data = []
+                        if os.path.exists(file_path):
+                            with open(file_path, 'r', encoding='utf-8') as f:
+                                existing_data = json.load(f)
+                        
+                        # Check if file already exists by all three fields
+                        found = False
+                        for item in existing_data:
+                            if (item.get('channel') == file_data['channel'] and 
+                                item.get('post_id') == file_data['post_id'] and 
+                                item.get('file_unique_id') == file_data['file_unique_id']):
+                                item['added'] = datetime.now().timestamp()
+                                found = True
+                                break
+                        
+                        # Add new entry if not found
+                        if not found:
+                            existing_data.append(file_data)
+                        
+                        with open(file_path, 'w', encoding='utf-8') as f:
+                            json.dump(existing_data, f, ensure_ascii=False, indent=2)
+
+                    except Exception as e:
+                        logger.error(f"file_id_save_error: error writing to {file_path}: {str(e)}")
 
         except Exception as e:
-            logger.error(f"file_id_collection_error: message_id {message.id}, error {str(e)}") 
+            logger.error(f"file_id_collection_error: message_id {message.id}, error {str(e)}")
 
     def get_channel_username(self, message):
         """Extract channel username or ID from message"""

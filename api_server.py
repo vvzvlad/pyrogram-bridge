@@ -32,6 +32,10 @@ Config = get_settings()
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    # Create cache directory
+    base_cache_dir = os.path.abspath("./data/cache")
+    os.makedirs(base_cache_dir, exist_ok=True)
+    
     await client.start()
     background_task = asyncio.create_task(cache_media_files()) # Start background task
     yield
@@ -117,8 +121,12 @@ async def download_media_file(channel: str, post_id: int, file_unique_id: str) -
     Download media file from Telegram and save to cache
     Returns path to downloaded file
     """
-    cache_dir = os.path.abspath("./data/cache")
-    os.makedirs(cache_dir, exist_ok=True)
+    base_cache_dir = os.path.abspath("./data/cache")
+    
+    # Create nested cache structure
+    channel_dir = os.path.join(base_cache_dir, str(channel))
+    post_dir = os.path.join(channel_dir, str(post_id))
+    os.makedirs(post_dir, exist_ok=True)
     
     # Convert numeric channel ID to int if needed
     channel_id = channel
@@ -139,8 +147,8 @@ async def download_media_file(channel: str, post_id: int, file_unique_id: str) -
             logger.error(f"Failed to get video file size for message {post_id}: {str(e)}")
     
     if is_large_video:
-        # For large video, download without permanent caching; use a temporary file.
-        temp_file_path = os.path.join(cache_dir, f"temp_{channel}-{post_id}-{file_unique_id}")
+        # For large video, download without permanent caching; use a temporary file
+        temp_file_path = os.path.join(post_dir, f"temp_{file_unique_id}")
         if os.path.exists(temp_file_path):
             logger.info(f"Temporary file {temp_file_path} already exists, serving cached large video")
             return temp_file_path, False
@@ -154,23 +162,25 @@ async def download_media_file(channel: str, post_id: int, file_unique_id: str) -
         return file_path, False
 
     # Normal caching flow
-    cache_path = os.path.join(cache_dir, f"{channel}-{post_id}-{file_unique_id}")
+    cache_path = os.path.join(post_dir, file_unique_id)
     if os.path.exists(cache_path):
         logger.info(f"Found cached media file: {cache_path}")
-        file_id = f"{channel}-{post_id}-{file_unique_id}"
+        # Update access timestamp in media_file_ids.json
         file_ids_path = os.path.join(os.path.abspath("./data"), 'media_file_ids.json')
         try:
             if os.path.exists(file_ids_path):
                 with open(file_ids_path, 'r', encoding='utf-8') as f:
                     media_files = json.load(f)
                 for file_data in media_files:
-                    if file_data['file_id'] == file_id:
+                    if (file_data.get('channel') == channel and 
+                        file_data.get('post_id') == post_id and 
+                        file_data.get('file_unique_id') == file_unique_id):
                         file_data['added'] = datetime.now().timestamp()
                         break
                 with open(file_ids_path, 'w', encoding='utf-8') as f:
                     json.dump(media_files, f, ensure_ascii=False, indent=2)
         except Exception as e:
-            logger.error(f"Failed to update timestamp for {file_id}: {str(e)}")
+            logger.error(f"Failed to update timestamp for {channel}/{post_id}/{file_unique_id}: {str(e)}")
         return cache_path, False
 
     file_id = await find_file_id_in_message(message, file_unique_id)
@@ -248,29 +258,24 @@ async def download_new_files(media_files: list, cache_dir: str):
     files_to_download = 0
     for file_data in media_files:
         try:
-            file_id = file_data['file_id']
-            if not file_id:
-                continue
-
-            # Split by last two hyphens to handle negative channel IDs correctly
-            last_hyphen_pos = file_id.rindex('-')
-            second_last_hyphen_pos = file_id.rindex('-', 0, last_hyphen_pos)
+            channel = file_data.get('channel')
+            post_id = file_data.get('post_id')
+            file_unique_id = file_data.get('file_unique_id')
             
-            channel = file_id[:second_last_hyphen_pos]
-            post_id_str = file_id[second_last_hyphen_pos + 1:last_hyphen_pos]
-            file_unique_id = file_id[last_hyphen_pos + 1:]
+            if not all([channel, post_id, file_unique_id]):
+                logger.error(f"Invalid file data: {file_data}")
+                continue
                 
-            post_id = int(post_id_str)
-            cache_path = os.path.join(cache_dir, f"{channel}-{post_id}-{file_unique_id}")
+            cache_path = os.path.join(cache_dir, str(channel), str(post_id), file_unique_id)
             
             if not os.path.exists(cache_path):
                 files_to_download += 1
-                logger.debug(f"Background download started for {file_id}")
+                logger.debug(f"Background download started for {channel}/{post_id}/{file_unique_id}")
                 await download_media_file(channel, post_id, file_unique_id)
                 await asyncio.sleep(1)  # Delay between downloads
         
         except Exception as e:
-            logger.error(f"Background download failed for {file_id}: {str(e)}")
+            logger.error(f"Background download failed for {channel}/{post_id}/{file_unique_id}: {str(e)}")
             continue
 
     if files_to_download == 0:
@@ -312,13 +317,38 @@ async def cache_media_files():
 def calculate_cache_stats():
     """
     Calculate cache statistics including file count, total size in MB, and time difference in days.
-    Returns a dictionary with keys: 'cache_files_count', 'cache_total_size_mb', 'cache_time_diff_days'.
+    Returns a dictionary with keys: 'cache_files_count', 'cache_total_size_mb', 'cache_time_diff_days', 'channels'.
     """
-    cache_dir = os.path.abspath("./data/cache")
-    if os.path.isdir(cache_dir):
-        files = [f for f in os.listdir(cache_dir) if os.path.isfile(os.path.join(cache_dir, f))]
-        cache_files_count = len(files)
-        cache_total_size_bytes = sum(os.path.getsize(os.path.join(cache_dir, f)) for f in files)
+    base_cache_dir = os.path.abspath("./data/cache")
+    cache_files_count = 0
+    cache_total_size_bytes = 0
+    channels_stats = {}
+    
+    if os.path.isdir(base_cache_dir):
+        # Recursively walk through all subdirectories
+        for root, _, files in os.walk(base_cache_dir):
+            for f in files:
+                if not f.startswith('temp_'):  # Skip temporary files
+                    file_path = os.path.join(root, f)
+                    file_size = os.path.getsize(file_path)
+                    cache_files_count += 1
+                    cache_total_size_bytes += file_size
+                    
+                    # Calculate per-channel statistics
+                    rel_path = os.path.relpath(root, base_cache_dir)
+                    channel = rel_path.split(os.sep)[0]  # First directory is channel
+                    
+                    if channel not in channels_stats:
+                        channels_stats[channel] = {
+                            'files_count': 0,
+                            'size_mb': 0
+                        }
+                    
+                    channels_stats[channel]['files_count'] += 1
+                    channels_stats[channel]['size_mb'] = round(
+                        channels_stats[channel]['size_mb'] + (file_size / (1024 * 1024)), 2
+                    )
+                    
         cache_total_size_mb = round(cache_total_size_bytes / (1024 * 1024), 2)  # rounded size in MB
     else:
         cache_files_count = 0
@@ -344,7 +374,8 @@ def calculate_cache_stats():
     return {
         "cache_files_count": cache_files_count,
         "cache_total_size_mb": cache_total_size_mb,
-        "cache_time_diff_days": cache_time_diff_days
+        "cache_time_diff_days": cache_time_diff_days,
+        "channels": channels_stats
     }
 
 
