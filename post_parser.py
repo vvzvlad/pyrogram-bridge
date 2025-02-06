@@ -59,12 +59,26 @@ class PostParser:
         self.allowed_tags = ['p', 'a', 'b', 'i', 'strong', 'em', 'ul', 'ol', 'li', 'br', 'div', 'span', 'img', 'video', 'audio', 'source']
         self.allowed_attributes = {
             'a': ['href', 'title', 'target'],
-            'img': ['src', 'alt', 'style'],
-            'video': ['controls', 'src', 'style'],
-            'audio': ['controls', 'style'],
+            'img': {
+                'src': True,
+                'alt': True,
+                'style': ['max-width', 'max-height', 'object-fit']
+            },
+            'video': {
+                'controls': True,
+                'src': True,
+                'style': ['max-width', 'max-height']
+            },
+            'audio': {
+                'controls': True,
+                'style': ['width', 'max-width']
+            },
             'source': ['src', 'type'],
-            'div': ['class', 'style'],
-            'span': ['class'],
+            'div': {
+                'class': True,
+                'style': ['margin']
+            },
+            'span': ['class']
         }
 
     def _debug_message(self, message: Message) -> Message:
@@ -227,9 +241,6 @@ class PostParser:
                 tags=self.allowed_tags,
                 attributes=self.allowed_attributes,
                 strip=True,
-                css_sanitizer=bleach.css_sanitizer.CSSSanitizer(
-                    allowed_css_properties=['max-width', 'max-height', 'width', 'height', 'object-fit']
-                )
             )
         except Exception as e:
             logger.error(f"html_sanitization_error: {str(e)}")

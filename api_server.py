@@ -203,20 +203,30 @@ async def remove_old_cached_files(media_files: list, cache_dir: str) -> tuple[li
 
     for file_data in media_files:
         try:
-            file_id = file_data.get('file_id')
-            if not file_id:
+            channel = file_data.get('channel')
+            post_id = file_data.get('post_id')
+            file_unique_id = file_data.get('file_unique_id')
+            
+            if not all([channel, post_id, file_unique_id]):
                 continue
 
             last_access_time = file_data.get('added', 0)
             days_since_access = (current_time - last_access_time) / (24 * 3600)
 
             if days_since_access > 20:
-                channel, post_id_str, file_unique_id = file_id.split('-', 2)
-                cache_path = os.path.join(cache_dir, f"{channel}-{post_id_str}-{file_unique_id}")
+                cache_path = os.path.join(cache_dir, str(channel), str(post_id), file_unique_id)
                 
                 if os.path.exists(cache_path):
                     try:
                         os.remove(cache_path)
+                        # Попробуем удалить пустые родительские директории
+                        post_dir = os.path.dirname(cache_path)
+                        channel_dir = os.path.dirname(post_dir)
+                        if not os.listdir(post_dir):
+                            os.rmdir(post_dir)
+                        if not os.listdir(channel_dir):
+                            os.rmdir(channel_dir)
+                            
                         files_removed += 1
                         logger.info(f"Removed old cached file: {cache_path}, last access {days_since_access:.1f} days ago")
                     except Exception as e:
@@ -232,17 +242,18 @@ async def remove_old_cached_files(media_files: list, cache_dir: str) -> tuple[li
 
     # Additionally, remove temporary files with prefix "temp_" if they are older than a threshold (1 hour)
     temp_threshold = 3600  # 1 hour in seconds
-    for file in os.listdir(cache_dir):
-        file_path = os.path.join(cache_dir, file)
-        if os.path.isfile(file_path) and file.startswith("temp_"):
-            try:
-                file_mod_time = os.path.getmtime(file_path)
-                if time.time() - file_mod_time > temp_threshold:
-                    os.remove(file_path)
-                    files_removed += 1
-                    logger.info(f"Removed temporary file: {file_path}")
-            except Exception as e:
-                logger.error(f"Failed to remove temporary file {file_path}: {str(e)}")
+    for root, _, files in os.walk(cache_dir):
+        for file in files:
+            if file.startswith("temp_"):
+                file_path = os.path.join(root, file)
+                try:
+                    file_mod_time = os.path.getmtime(file_path)
+                    if time.time() - file_mod_time > temp_threshold:
+                        os.remove(file_path)
+                        files_removed += 1
+                        logger.info(f"Removed temporary file: {file_path}")
+                except Exception as e:
+                    logger.error(f"Failed to remove temporary file {file_path}: {str(e)}")
 
     return updated_media_files, files_removed
 
@@ -266,7 +277,11 @@ async def download_new_files(media_files: list, cache_dir: str):
                 logger.error(f"Invalid file data: {file_data}")
                 continue
                 
-            cache_path = os.path.join(cache_dir, str(channel), str(post_id), file_unique_id)
+            channel_dir = os.path.join(cache_dir, str(channel))
+            post_dir = os.path.join(channel_dir, str(post_id))
+            os.makedirs(post_dir, exist_ok=True)
+            
+            cache_path = os.path.join(post_dir, file_unique_id)
             
             if not os.path.exists(cache_path):
                 files_to_download += 1
