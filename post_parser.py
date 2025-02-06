@@ -534,13 +534,16 @@ class PostParser:
         """Extract channel username or ID from message"""
         chat = message.chat if hasattr(message, 'chat') else message
         if not chat: return None
-        if isinstance(chat.id, int) and str(chat.id).startswith('-100'): return str(chat.id) # Return full ID for channels with numeric ID
+        
+        # First try to get username
         if hasattr(chat, 'usernames') and chat.usernames: # Check many usernames
             active_usernames = [u.username for u in chat.usernames if u.active]
             if active_usernames:
                 return active_usernames[0]
         if hasattr(chat, 'username') and chat.username: return chat.username # Check single username
-        if isinstance(chat.id, int) and str(chat.id).startswith('-100'): return str(chat.id) # Return full ID if no username found
+        
+        # Return numeric ID only if no username found
+        if isinstance(chat.id, int) and str(chat.id).startswith('-100'): return str(chat.id)
         
         logger.error(f"channel_username_error: no username or valid ID found for chat")
         return None 
