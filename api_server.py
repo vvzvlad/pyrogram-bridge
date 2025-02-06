@@ -343,26 +343,25 @@ def calculate_cache_stats():
         # Recursively walk through all subdirectories
         for root, _, files in os.walk(base_cache_dir):
             for f in files:
-                if not f.startswith('temp_'):  # Skip temporary files
-                    file_path = os.path.join(root, f)
-                    file_size = os.path.getsize(file_path)
-                    cache_files_count += 1
-                    cache_total_size_bytes += file_size
-                    
-                    # Calculate per-channel statistics
-                    rel_path = os.path.relpath(root, base_cache_dir)
-                    channel = rel_path.split(os.sep)[0]  # First directory is channel
-                    
-                    if channel not in channels_stats:
-                        channels_stats[channel] = {
-                            'files_count': 0,
-                            'size_mb': 0
-                        }
-                    
-                    channels_stats[channel]['files_count'] += 1
-                    channels_stats[channel]['size_mb'] = round(
-                        channels_stats[channel]['size_mb'] + (file_size / (1024 * 1024)), 2
-                    )
+                file_path = os.path.join(root, f)
+                file_size = os.path.getsize(file_path)
+                cache_files_count += 1
+                cache_total_size_bytes += file_size
+                
+                # Calculate per-channel statistics
+                rel_path = os.path.relpath(root, base_cache_dir)
+                channel = rel_path.split(os.sep, maxsplit=1)[0]  # First directory is channel
+                
+                if channel not in channels_stats:
+                    channels_stats[channel] = {
+                        'files_count': 0,
+                        'size_mb': 0
+                    }
+                
+                channels_stats[channel]['files_count'] += 1
+                channels_stats[channel]['size_mb'] = round(
+                    channels_stats[channel]['size_mb'] + (file_size / (1024 * 1024)), 2
+                )
                     
         cache_total_size_mb = round(cache_total_size_bytes / (1024 * 1024), 2)  # rounded size in MB
     else:
