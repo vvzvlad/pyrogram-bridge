@@ -384,8 +384,15 @@ async def get_post(channel: str, post_id: int, token: str | None = None):
         raise HTTPException(status_code=500, detail=error_message) from e
 
 
-@app.get("/health")
-async def health_check():
+@app.get("/health/{token}")
+async def health_check(token: str | None = None):
+    if Config["token"]:
+        if token != Config["token"]:
+            logger.error(f"Invalid token for health check: {token}, expected: {Config['token']}")
+            raise HTTPException(status_code=403, detail="Invalid token")
+        else:
+            logger.info(f"Valid token for health check: {token}")
+            
     try:
         me = await client.client.get_me()
 
