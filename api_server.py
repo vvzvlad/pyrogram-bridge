@@ -252,7 +252,16 @@ async def download_new_files(media_files: list, cache_dir: str):
             if not file_id:
                 continue
 
+            # Handle negative channel IDs
+            has_minus = file_id.startswith('-')
+            if has_minus:
+                file_id = file_id[1:]  # Remove minus
+                
             channel, post_id_str, file_unique_id = file_id.split('-', 2)
+            
+            if has_minus:
+                channel = f"-{channel}"  # Restore minus
+                
             post_id = int(post_id_str)
             cache_path = os.path.join(cache_dir, f"{channel}-{post_id}-{file_unique_id}")
             
