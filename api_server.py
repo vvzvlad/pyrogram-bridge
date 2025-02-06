@@ -219,7 +219,7 @@ async def remove_old_cached_files(media_files: list, cache_dir: str) -> tuple[li
                 if os.path.exists(cache_path):
                     try:
                         os.remove(cache_path)
-                        # Попробуем удалить пустые родительские директории
+                        # try to remove empty parent directories
                         post_dir = os.path.dirname(cache_path)
                         channel_dir = os.path.dirname(post_dir)
                         if not os.listdir(post_dir):

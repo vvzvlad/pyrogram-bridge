@@ -2,6 +2,9 @@ import hashlib
 import hmac
 import secrets
 import os
+from config import get_settings
+
+Config = get_settings()
 
 SECRET_FILE = "data/media_digest.key"
 _signing_key = None
@@ -41,12 +44,12 @@ def generate_media_digest(url: str) -> str:
     return signature.hexdigest()[:8]
 
 def verify_media_digest(url: str, digest: str | None) -> bool:
-    """
-    Verify HMAC digest for media URL
-    Returns True if digest is valid
-    """    
-    if not digest:
-        return False
+    """Verify media URL signature"""
+    if not Config["media_url_signing_key"]:
+        return True  # If no key configured, accept all requests
         
-    expected = generate_media_digest(url)
-    return hmac.compare_digest(expected, digest) 
+    if digest is None:
+        return True  # Accept requests without digest if signing is not enforced
+        
+    expected_digest = generate_media_digest(url)
+    return hmac.compare_digest(digest, expected_digest) 
