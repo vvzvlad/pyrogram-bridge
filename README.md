@@ -61,14 +61,18 @@ services:
 
 PYROGRAM_BRIDGE_URL - url to rss bridge, used for generate absolute url to media
 TOKEN - optional, if set, will be used to check if user has access to rss feed. If token is set, rss url will be https://pgbridge.example.com/rss/DragorWW_space/1234567890
+Use this if you rss bridge access all world, otherwise your bridge can be used by many people and telegram will inevitably be sanctioned for botting.
 
-## Get channel rss feed
+## Get channel rss feed (use it in your rss reader)
 
-``` curl https://pgbridge.example.com/rss/DragorWW_space ```
-``` curl https://pgbridge.example.com/rss/DragorWW_space/1234567890 ``` with auth token
+``` curl https://pgbridge.example.com/rss/DragorWW_space ``` 
+``` curl https://pgbridge.example.com/rss/DragorWW_space/1234567890 ``` with auth token (if env token is set)
 ``` curl https://pgbridge.example.com/rss/DragorWW_space?limit=30 ``` with limit parameter (also, can be used with token)
 
 Warning: TG API has rate limit, and bridge will wait time before http response, if catch FloodWait exception. Increase http timeout in your client prevention timeout error. Examply, in miniflux: ENV HTTP_CLIENT_TIMEOUT=200
+
+Note: bridge has support for numeric channel ID: use id (e.g. -1002069358234) instead of username (e.g. DragorWW_space) for rss/html/json urls: ``` curl https://pgbridge.example.com/rss/-1002069358234 ```
+Obviously, you must have a closed/hidden channel subscription prior to use, using the same Telegram account you got the token from (see Get session). Bridge doesn't do anything supernatural, it just pretends to be a TG client. If you don't have access to the channel, you can't get anything from it.
 
 ## Get channel messages
 
