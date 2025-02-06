@@ -120,7 +120,12 @@ async def download_media_file(channel: str, post_id: int, file_unique_id: str) -
     cache_dir = os.path.abspath("./data/cache")
     os.makedirs(cache_dir, exist_ok=True)
     
-    message = await client.client.get_messages(channel, post_id)
+    # Convert numeric channel ID to int if needed
+    channel_id = channel
+    if isinstance(channel, str) and channel.startswith('-100'):
+        channel_id = int(channel)
+    
+    message = await client.client.get_messages(channel_id, post_id)
     if message.media == "MessageMediaType.POLL":
         return None, False
     
