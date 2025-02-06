@@ -44,12 +44,12 @@ def generate_media_digest(url: str) -> str:
     return signature.hexdigest()[:8]
 
 def verify_media_digest(url: str, digest: str | None) -> bool:
-    """Verify media URL signature"""
-    if not Config["media_url_signing_key"]:
-        return True  # If no key configured, accept all requests
+    """
+    Verify HMAC digest for media URL
+    Returns True if digest is valid
+    """    
+    if not digest:
+        return False
         
-    if digest is None:
-        return True  # Accept requests without digest if signing is not enforced
-        
-    expected_digest = generate_media_digest(url)
-    return hmac.compare_digest(digest, expected_digest) 
+    expected = generate_media_digest(url)
+    return hmac.compare_digest(expected, digest) 
