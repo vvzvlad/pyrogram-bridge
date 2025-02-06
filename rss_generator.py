@@ -48,12 +48,16 @@ def reorganize_post_content(html):
         new_content.append(str(text))
     
     # Add remaining elements
+    remaining_elements = 0
     for element in soup.contents:
         if isinstance(element, str):
             new_content.append(element)
+            remaining_elements += 1
         elif element.name != 'br' and 'message-media' not in element.get('class', []) and 'message-text' not in element.get('class', []):
             new_content.append(str(element))
-            
+            remaining_elements += 1
+    
+    logger.debug(f"Content reorganized with {remaining_elements} additional elements")
     return ''.join(new_content)
 
 
@@ -61,14 +65,18 @@ def reorganize_post_content(html):
 def merge_posts(posts):
     """Helper function to merge multiple posts into one"""
     if not posts:
+        logger.debug("No posts to merge")
         return None
         
+    logger.debug(f"Merging {len(posts)} posts")
+    
     # Find post with most meaningful title
     main_post = posts[0]
     for post in posts:
         current_title = post.get('title', '')
         if current_title and current_title not in ['📷 Photo', '📹 Video', '📄 Document']:
             main_post = post
+            logger.debug(f"Selected main post with title: {current_title}")
             break
             
     merged_post = main_post.copy()
@@ -80,6 +88,7 @@ def merge_posts(posts):
     
     # Reorganize content after merging
     merged_post['html'] = reorganize_post_content(merged_post['html'])
+    logger.debug(f"Merged {len(posts)} posts successfully")
     return merged_post
 
 async def process_messages(messages, post_parser, channel):
