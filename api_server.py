@@ -479,19 +479,24 @@ async def get_media(channel: str, post_id: int, file_unique_id: str, digest: str
         url = f"{channel}/{post_id}/{file_unique_id}"
         if not verify_media_digest(url, digest):
             logger.error(f"Invalid digest for media {url}: {digest}, expected: {digest}")
-            #raise HTTPException(status_code=403, detail="Invalid URL signature")
+            raise HTTPException(status_code=403, detail="Invalid URL signature")
         else:
             logger.info(f"Valid digest for media {url}: {digest}")   
             
-        file_path, delete_after = await download_media_file(channel, post_id, file_unique_id)
+        # Convert numeric channel ID to int if needed
+        channel_id = channel
+        if isinstance(channel, str) and channel.startswith('-100'):
+            channel_id = int(channel)
+            
+        file_path, delete_after = await download_media_file(channel_id, post_id, file_unique_id)
         return await prepare_file_response(file_path, delete_after=delete_after)
     except HTTPException:
         raise
     except errors.RPCError as e:
-        logger.error(f"Media request RPC error for file_unique_id {file_unique_id} in message {post_id}: {type(e).__name__} - {str(e)}")
+        logger.error(f"Media request RPC error for {channel}/{post_id}/{file_unique_id}: {type(e).__name__} - {str(e)}")
         raise HTTPException(status_code=404, detail="File not found in Telegram") from e
     except Exception as e:
-        error_message = f"Failed to get media for file_unique_id {file_unique_id} in message {post_id}: {str(e)}"
+        error_message = f"Failed to get media for {channel}/{post_id}/{file_unique_id}: {str(e)}"
         logger.error(error_message)
         raise HTTPException(status_code=500, detail=error_message) from e
 
