@@ -51,6 +51,7 @@ if not logger.handlers:
 # https://t.me/red_spades/1222 many media + text
 
 #https://t.me/ni404head/1283 file
+#http://127.0.0.1:8000/rss/-1002069358234 channel with numeric ID
 
 class PostParser:
     def __init__(self, client):
@@ -77,8 +78,13 @@ class PostParser:
         return
 
     async def get_post(self, channel: str, post_id: int, output_type: str = 'json') -> Union[str, Dict[Any, Any]]:
+        print(f"Getting post {channel}, {post_id}")
         try:
-            message = await self.client.get_messages(channel, post_id)
+            channel_id = channel
+            if isinstance(channel, str) and channel.startswith('-100'): # Convert numeric channel ID to int
+                channel_id = int(channel)
+            
+            message = await self.client.get_messages(channel_id, post_id)
 
             self._debug_message(message)
 
@@ -525,22 +531,16 @@ class PostParser:
             logger.error(f"file_id_collection_error: message_id {message.id}, error {str(e)}") 
 
     def get_channel_username(self, message):
-        """Extract channel username from message"""
+        """Extract channel username or ID from message"""
         chat = message.chat if hasattr(message, 'chat') else message
-        if not chat:
-            return None
-            
-        # Check for usernames
-        if hasattr(chat, 'usernames') and chat.usernames:
-            # Return first active username from the list
+        if not chat: return None
+        if isinstance(chat.id, int) and str(chat.id).startswith('-100'): return str(chat.id) # Return full ID for channels with numeric ID
+        if hasattr(chat, 'usernames') and chat.usernames: # Check many usernames
             active_usernames = [u.username for u in chat.usernames if u.active]
             if active_usernames:
                 return active_usernames[0]
+        if hasattr(chat, 'username') and chat.username: return chat.username # Check single username
+        if isinstance(chat.id, int) and str(chat.id).startswith('-100'): return str(chat.id) # Return full ID if no username found
         
-        # Check for single username as fallback
-        if hasattr(chat, 'username') and chat.username:
-            return chat.username
-            
-        # If no username found
-        logger.error(f"channel_username_error: no username found for chat in message {getattr(message, 'id', 'unknown')}")
+        logger.error(f"channel_username_error: no username or valid ID found for chat")
         return None 

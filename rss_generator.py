@@ -179,7 +179,12 @@ async def generate_channel_rss(channel: str, post_parser: Optional[PostParser] =
         base_url = Config['pyrogram_bridge_url']
         
         try:
-            channel_info = await post_parser.client.get_chat(channel)
+            # Преобразуем числовой ID канала обратно в int, если это возможно
+            channel_id = channel
+            if isinstance(channel, str) and channel.startswith('-100'):
+                channel_id = int(channel)
+                
+            channel_info = await post_parser.client.get_chat(channel_id)
             channel_title = channel_info.title or f"Telegram: {channel}"
             channel_username = post_parser.get_channel_username(channel_info)
             if not channel_username:
@@ -200,7 +205,7 @@ async def generate_channel_rss(channel: str, post_parser: Optional[PostParser] =
         
         # Collect messages
         messages = []
-        async for message in post_parser.client.get_chat_history(channel, limit=limit):
+        async for message in post_parser.client.get_chat_history(channel_id, limit=limit):
             messages.append(message)
             
         # Process messages into formatted posts
@@ -259,7 +264,12 @@ async def generate_channel_html(channel: str, post_parser: Optional[PostParser] 
         base_url = Config['pyrogram_bridge_url']
         
         try:
-            channel_info = await post_parser.client.get_chat(channel)
+            # Преобразуем числовой ID канала обратно в int, если это возможно
+            channel_id = channel
+            if isinstance(channel, str) and channel.startswith('-100'):
+                channel_id = int(channel)
+                
+            channel_info = await post_parser.client.get_chat(channel_id)
             channel_title = channel_info.title or f"Telegram: {channel}"
             channel_username = post_parser.get_channel_username(channel_info)
             if not channel_username:
@@ -276,7 +286,7 @@ async def generate_channel_html(channel: str, post_parser: Optional[PostParser] 
         
         # Collect messages
         messages = []
-        async for message in post_parser.client.get_chat_history(channel, limit=limit):
+        async for message in post_parser.client.get_chat_history(channel_id, limit=limit):
             messages.append(message)
             
         # Process messages into formatted posts
