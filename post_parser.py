@@ -491,6 +491,10 @@ class PostParser:
                 return
 
             if message.media:
+                # Skip large videos - they shouldn't be cached permanently
+                if message.video and message.video.file_size > 100 * 1024 * 1024:
+                    return
+                
                 if message.photo:
                     file_data['file_unique_id'] = message.photo.file_unique_id
                 elif message.video:

@@ -249,9 +249,24 @@ async def remove_old_cached_files(media_files: list, cache_dir: str) -> tuple[li
                 try:
                     file_mod_time = os.path.getmtime(file_path)
                     if time.time() - file_mod_time > temp_threshold:
+                        # Get channel/post/file_id from path
+                        rel_path = os.path.relpath(os.path.dirname(file_path), cache_dir)
+                        channel, post_id = rel_path.split(os.sep)
+                        file_unique_id = file[5:]  # Remove 'temp_' prefix
+                        
+                        # Remove file
                         os.remove(file_path)
                         files_removed += 1
                         logger.info(f"Removed temporary file: {file_path}")
+                        
+                        # Also remove entry from media_file_ids.json if exists
+                        updated_media_files = [
+                            f for f in updated_media_files 
+                            if not (f.get('channel') == channel and 
+                                f.get('post_id') == int(post_id) and 
+                                f.get('file_unique_id') == file_unique_id)
+                        ]
+                        
                 except Exception as e:
                     logger.error(f"Failed to remove temporary file {file_path}: {str(e)}")
 
