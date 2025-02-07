@@ -281,8 +281,12 @@ async def download_new_files(media_files: list, cache_dir: str):
             post_dir = os.path.join(channel_dir, str(post_id))
             os.makedirs(post_dir, exist_ok=True)
             
+            # Skip if temp file exists (large videos)
+            temp_path = os.path.join(post_dir, f"temp_{file_unique_id}")
+            if os.path.exists(temp_path):
+                continue
+                
             cache_path = os.path.join(post_dir, file_unique_id)
-            
             if not os.path.exists(cache_path):
                 files_to_download += 1
                 logger.debug(f"Background download started for {channel}/{post_id}/{file_unique_id}")
