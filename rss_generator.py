@@ -61,55 +61,18 @@ def reorganize_post_content(html):
     return ''.join(new_content)
 
 
-
-def merge_posts(posts):
-    """Helper function to merge multiple posts into one"""
-    if not posts:
-        logger.debug("No posts to merge")
-        return None
-        
-    logger.debug(f"Merging {len(posts)} posts")
-    
-    # Find post with most meaningful title
-    main_post = posts[0]
-    for post in posts:
-        current_title = post.get('title', '')
-        if current_title and current_title not in ['📷 Photo', '📹 Video', '📄 Document']:
-            main_post = post
-            logger.debug(f"Selected main post with title: {current_title}")
-            break
-            
-    merged_post = main_post.copy()
-    merged_html = []
-    for post in posts:
-        merged_html.append(post['html'])
-    
-    merged_post['html'] = '\n<br>\n'.join(merged_html)
-    
-    # Reorganize content after merging
-    merged_post['html'] = reorganize_post_content(merged_post['html'])
-    logger.debug(f"Merged {len(posts)} posts successfully")
-    return merged_post
-
-async def process_messages(messages, post_parser, channel):
+async def create_messages_groups(messages):
     """
     Process messages into formatted posts, handling media groups
-    Args:
-        messages: List of raw messages
-        post_parser: PostParser instance
-        channel: Channel name for logging
-    Returns:
-        List of formatted and merged posts
     """
-    posts = []
+    processing_groups = []
     media_groups = {}
     
-    # First pass - collect messages and media groups
+    # First pass - collect messages and organize into processing groups
     for message in messages:
         try:
             # Skip service messages about pinned posts
             if message.service and 'PINNED_MESSAGE' in str(message.service):
-                logger.debug(f"Skipping pinned service message {message.id} in channel {channel}")
                 continue
                 
             if message.media_group_id:
@@ -117,41 +80,94 @@ async def process_messages(messages, post_parser, channel):
                     media_groups[message.media_group_id] = []
                 media_groups[message.media_group_id].append(message)
             else:
-                formatted = post_parser.format_message_for_feed(
-                    message,
-                    top_info=True,
-                    bottom_info=True
-                )
-                if formatted:
-                    posts.append(formatted)
+                # Single message becomes its own processing group
+                processing_groups.append([message])
                 
         except Exception as e:
-            logger.error(f"feed_entry_error: channel {channel}, message_id {message.id}, error {str(e)}")
+            logger.error(f"message_processing_error: channel {message.chat.username}, message_id {message.id}, error {str(e)}")
             continue
     
-    # Process media groups
-    for _group_id, group_messages in media_groups.items():
-        if not group_messages:
-            continue
-            
-        group_messages.sort(key=lambda x: x.id)
-        formatted_posts = []
-        
-        for i, msg in enumerate(group_messages):
-            formatted = post_parser.format_message_for_feed(
-                msg,
-                top_info=(i == 0),
-                bottom_info=(i == len(group_messages) - 1)
-            )
-            if formatted:
-                formatted_posts.append(formatted)
+    # Sort messages within media groups by message ID in descending order
+    for media_group in media_groups.values():
+        media_group.sort(key=lambda x: x.id, reverse=False)
+        processing_groups.append(media_group)
+    
+    # Sort processing groups by date of first message in each group
+    processing_groups.sort(
+        key=lambda group: group[0].date,
+        reverse=True
+    )
+    
+    return processing_groups
+
+async def render_messages_groups(messages_groups, post_parser):
+    """
+    Render message groups into HTML format
+    Args:
+        messages_groups: List of message groups (each group is a list of messages)
+        post_parser: PostParser instance
+    Returns:
+        List of rendered posts
+    """
+    rendered_posts = []
+    
+    for group in messages_groups:
+        try:
+            if len(group) == 1:
+                # Single message - simple case
+                message_data = post_parser.process_message(group[0])
+                html_parts = [
+                    f'<div class="message-header">{message_data["html"]["header"]}</div>',
+                    f'<div class="message-media">{message_data["html"]["media"]}</div>',
+                    f'<div class="message-text">{message_data["html"]["body"]}</div>',
+                    f'<div class="message-footer">{message_data["html"]["footer"]}</div>'
+                ]
+                rendered_posts.append({
+                    'html': '\n'.join(html_parts),
+                    'date': message_data['date'],
+                    'message_id': message_data['message_id'],
+                    'title': message_data['html']['title'],
+                    'text': message_data['text'],
+                    'author': message_data['author']
+                })
+            else:
+                # Multiple messages in group - need to merge
+                processed_messages = [post_parser.process_message(msg) for msg in group]
                 
-        if formatted_posts:
-            posts.append(merge_posts(formatted_posts))
+                # Find main message (one with text)
+                main_message = next(
+                    (msg for msg in processed_messages if msg['text']),
+                    processed_messages[0]  # fallback to first if none has text
+                )
+                
+                # Collect all media sections
+                all_media = [msg['html']['media'] for msg in processed_messages if msg['html']['media']]
+                combined_media = '\n'.join(all_media)
+                
+                # Combine parts
+                html_parts = [
+                    f'<div class="message-header">{main_message["html"]["header"]}</div>',
+                    f'<div class="message-media">{combined_media}</div>',
+                    f'<div class="message-text">{main_message["html"]["body"]}</div>',
+                    f'<div class="message-footer">{main_message["html"]["footer"]}</div>'
+                ]
+                
+                rendered_posts.append({
+                    'html': '\n'.join(html_parts),
+                    'date': main_message['date'],
+                    'message_id': main_message['message_id'],
+                    'title': main_message['html']['title'],
+                    'text': main_message['text'],
+                    'author': main_message['author']
+                })
+                
+        except Exception as e:
+            logger.error(f"message_group_rendering_error: error {str(e)}")
+            continue
     
-    # Sort all posts by date
-    posts.sort(key=lambda x: x['date'], reverse=True)
-    return posts
+    # Sort by date
+    rendered_posts.sort(key=lambda x: x['date'], reverse=True)
+    return rendered_posts
 
 async def generate_channel_rss(channel: str, post_parser: Optional[PostParser] = None, client = None, limit: int = 20) -> str:
     """
@@ -179,12 +195,8 @@ async def generate_channel_rss(channel: str, post_parser: Optional[PostParser] =
         base_url = Config['pyrogram_bridge_url']
         
         try:
-            # Преобразуем числовой ID канала обратно в int, если это возможно
-            channel_id = channel
-            if isinstance(channel, str) and channel.startswith('-100'):
-                channel_id = int(channel)
-                
-            channel_info = await post_parser.client.get_chat(channel_id)
+            channel = post_parser.channel_name_prepare(channel)
+            channel_info = await post_parser.client.get_chat(channel)
             channel_title = channel_info.title or f"Telegram: {channel}"
             channel_username = post_parser.get_channel_username(channel_info)
             if not channel_username:
@@ -205,30 +217,29 @@ async def generate_channel_rss(channel: str, post_parser: Optional[PostParser] =
         
         # Collect messages
         messages = []
-        async for message in post_parser.client.get_chat_history(channel_id, limit=limit):
+        async for message in post_parser.client.get_chat_history(channel, limit=limit):
             messages.append(message)
             
-        # Process messages into formatted posts
-        final_posts = await process_messages(messages, post_parser, channel)
+        # Process messages into groups and render them
+        message_groups = await create_messages_groups(messages)
+        final_posts = await render_messages_groups(message_groups, post_parser)
         
         # Generate feed entries
         for post in final_posts:
             fe = fg.add_entry()
-            fe.title(post.get('title', 'Untitled post'))
+            fe.title(post['title'])
             
             post_link = f"https://t.me/{channel_username}/{post['message_id']}"
             fe.link(href=post_link)
             
-            html_content = post.get('html', '')
-            text_content = post.get('text', '')
-            fe.description(text_content.replace('\n', ' '))
-            fe.content(content=html_content, type='CDATA')
+            fe.description(post['text'].replace('\n', ' '))
+            fe.content(content=post['html'], type='CDATA')
             
             pub_date = datetime.fromtimestamp(post['date'], tz=timezone.utc)
             fe.pubDate(pub_date)
             fe.guid(post_link, permalink=True)
             
-            if post.get('author') and post['author'] != main_name:
+            if post['author'] and post['author'] != main_name:
                 fe.author(name="", email=post['author'])
                 
         rss_feed = fg.rss_str(pretty=True)
@@ -264,7 +275,6 @@ async def generate_channel_html(channel: str, post_parser: Optional[PostParser] 
         base_url = Config['pyrogram_bridge_url']
         
         try:
-            # Преобразуем числовой ID канала обратно в int, если это возможно
             channel_id = channel
             if isinstance(channel, str) and channel.startswith('-100'):
                 channel_id = int(channel)
@@ -289,18 +299,16 @@ async def generate_channel_html(channel: str, post_parser: Optional[PostParser] 
         async for message in post_parser.client.get_chat_history(channel_id, limit=limit):
             messages.append(message)
             
-        # Process messages into formatted posts
-        final_posts = await process_messages(messages, post_parser, channel)
+        # Process messages into groups and render them
+        message_groups = await create_messages_groups(messages)
+        final_posts = await render_messages_groups(message_groups, post_parser)
 
-        html_posts = []
-        for post in final_posts:
-            html_content = post.get('html', '')
-            if html_content:
-                html_posts.append(f'<div class="telegram-post">{html_content}</div>')
+        # Generate HTML content
+        html_posts = [post['html'] for post in final_posts]
         return '\n<hr class="post-divider">\n'.join(html_posts)
         
     except Exception as e:
-        logger.error(f"rss_generation_error: channel {channel}, error {str(e)}")
+        logger.error(f"html_generation_error: channel {channel}, error {str(e)}")
         raise
 
 def create_error_feed(channel: str, base_url: str) -> str:

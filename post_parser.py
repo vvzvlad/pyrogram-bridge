@@ -3,11 +3,12 @@ import copy
 import re
 import os
 import json
-import bleach
 
 from datetime import datetime
 from typing import Union, Dict, Any, List
 from pyrogram.types import Message
+from bleach.css_sanitizer import CSSSanitizer   
+from bleach import clean as HTMLSanitizer
 from pyrogram.enums import MessageMediaType
 from config import get_settings
 from url_signer import generate_media_digest
@@ -56,30 +57,6 @@ if not logger.handlers:
 class PostParser:
     def __init__(self, client):
         self.client = client
-        self.allowed_tags = ['p', 'a', 'b', 'i', 'strong', 'em', 'ul', 'ol', 'li', 'br', 'div', 'span', 'img', 'video', 'audio', 'source']
-        self.allowed_attributes = {
-            'a': ['href', 'title', 'target'],
-            'img': {
-                'src': True,
-                'alt': True,
-                'style': ['max-width', 'max-height', 'object-fit']
-            },
-            'video': {
-                'controls': True,
-                'src': True,
-                'style': ['max-width', 'max-height']
-            },
-            'audio': {
-                'controls': True,
-                'style': ['width', 'max-width']
-            },
-            'source': ['src', 'type'],
-            'div': {
-                'class': True,
-                'style': ['margin']
-            },
-            'span': ['class']
-        }
 
     def _debug_message(self, message: Message) -> Message:
         if Config["debug"]:   
@@ -90,15 +67,19 @@ class PostParser:
             debug_message.entities = None
             print(debug_message)
         return
+    
+    def channel_name_prepare(self, channel: str):
+        if isinstance(channel, str) and channel.startswith('-100'): # Convert numeric channel ID to int
+            channel_id = int(channel)
+            return channel_id
+        else:
+            return channel
 
     async def get_post(self, channel: str, post_id: int, output_type: str = 'json') -> Union[str, Dict[Any, Any]]:
         print(f"Getting post {channel}, {post_id}")
         try:
-            channel_id = channel
-            if isinstance(channel, str) and channel.startswith('-100'): # Convert numeric channel ID to int
-                channel_id = int(channel)
-            
-            message = await self.client.get_messages(channel_id, post_id)
+            channel = self.channel_name_prepare(channel)
+            message = await self.client.get_messages(channel, post_id)
 
             self._debug_message(message)
 
@@ -109,7 +90,7 @@ class PostParser:
             if output_type == 'html':
                 return self._format_html(message)
             elif output_type == 'json':
-                return self._format_json(message)
+                return self.process_message(message)
             else:
                 logger.error(f"Invalid output type: {output_type}")
                 return None
@@ -160,7 +141,7 @@ class PostParser:
         text = '\n'.join(line.strip() for line in text.split('\n') if line.strip())
 
         # Get first non-empty line
-        first_line = text.split('\n')[0] if text else ""
+        first_line = text.split('\n', maxsplit=1)[0] if text else ""
         
         max_length = 100
         if len(first_line) <= max_length:
@@ -210,74 +191,113 @@ class PostParser:
         
         return None
     
+    def _extract_reactions(self, message: Message) -> Union[str, None]:
+        if reactions := getattr(message, 'reactions', None):
+            return {r.emoji: r.count for r in reactions.reactions}
+        return None
 
-    def format_message_for_feed(self, message: Message, top_info: bool = True, bottom_info: bool = True) -> Dict[Any, Any]:
-        return self._format_json(message, top_info=top_info, bottom_info=bottom_info) 
 
-    def _format_json(self, message: Message, top_info: bool = True, bottom_info: bool = True) -> Dict[Any, Any]:
-        html_content = self._format_html(message, top_info=top_info, bottom_info=bottom_info)
+    def _format_html(self, message: Message) -> str:
+        html_content = []
+        data = self.process_message(message)['html']
+
+        html_content.append(f'<div class="message-header">{data["header"]}</div>')
+        html_content.append(f'<div class="message-media">{data["media"]}</div>')
+        html_content.append(f'<div class="message-text">{data["body"]}</div>')
+        html_content.append(f'<div class="message-footer">{data["footer"]}</div>')
+        html_content = '\n'.join(html_content)
+        return html_content
+
+
+    def process_message(self, message: Message) -> Dict[Any, Any]:
         result = {
             'channel': self.get_channel_username(message),
             'message_id': message.id,
             'date': datetime.timestamp(message.date),
             'date_formatted': message.date.strftime('%Y-%m-%d %H:%M:%S'),
             'text': message.text or message.caption or '',
-            'html': html_content,
-            'title': self._generate_title(message),
+            'html': {
+                'title': self._generate_title(message),
+                'header': self._generate_html_header(message),
+                'body': self._generate_html_body(message),
+                'media': self._generate_html_media(message),
+                'footer': self._generate_html_footer(message)
+            },
             'author': self._get_author_info(message),
             'views': message.views,
+            'reactions': self._extract_reactions(message),
+            'media_group_id': message.media_group_id
         }
-        
-        if message.media_group_id:
-            result['media_group_id'] = message.media_group_id
-        
+
         return result
     
 
     def _sanitize_html(self, html: str) -> str:
+        allowed_tags = ['p', 'a', 'b', 'i', 'strong', 'em', 'ul', 'ol', 'li', 'br', 'div', 'span', 'img', 'video', 'audio', 'source']
+        allowed_attributes = {
+            'a': ['href', 'title', 'target'],
+            'img': {'src': True, 'alt': True, 'style': True},
+            'video': {'controls': True, 'src': True, 'style': True},
+            'audio': {'controls': True, 'style': True},
+            'source': ['src', 'type'],
+            'div': {'class': True, 'style': True},
+            'span': ['class']
+        }
+
         try:
-            return bleach.clean(
+            css_sanitizer = CSSSanitizer(
+                allowed_css_properties=["max-width", "max-height", "object-fit", "width", "height"]
+            )
+            sanitized_html = HTMLSanitizer(
                 html,
-                tags=self.allowed_tags,
-                attributes=self.allowed_attributes,
+                tags=allowed_tags,
+                attributes=allowed_attributes,
+                css_sanitizer=css_sanitizer,
                 strip=True,
             )
+            return sanitized_html
         except Exception as e:
             logger.error(f"html_sanitization_error: {str(e)}")
             return html
 
-    def _format_html(self, message: Message, top_info: bool = True, bottom_info: bool = True) -> str:
-        html_content = []
-        
-        # Create service message for "channel created"
-        if getattr(message, "channel_chat_created", False):
-            html_content.append('<div class="message-service">Channel created</div>')
-            html = '\n'.join(html_content)
-            return self._sanitize_html(html)
-
+    def _generate_html_header(self, message: Message) -> str:
+        content_header = []
         # Add forwarded from or reply info if present
-        if top_info:
-            if forward_html := self._format_forward_info(message):
-                html_content.append(forward_html)
-            elif reply_html := self._format_reply_info(message):
-                html_content.append(reply_html)
+        if forward_html := self._format_forward_info(message):
+            content_header.append(forward_html)
+        elif reply_html := self._format_reply_info(message):
+            content_header.append(reply_html)
+        html_header = '\n'.join(content_header)
+        html_header = self._sanitize_html(html_header)
+        return html_header
 
-        if message.text:
-            text = message.text.html
-        elif message.caption:
-            text = message.caption.html
-        else:
-            text = ''
+    def _generate_html_body(self, message: Message) -> str:
+        content_body = []
+        if message.text: text = message.text.html
+        elif message.caption: text = message.caption.html
+        else: text = ''
 
         text = text.replace('\n', '<br>') # Replace newlines with <br>
         text = self._add_hyperlinks_to_raw_urls(text) # Add hyperlinks to raw URLs
         
-        self._save_media_file_ids(message) # Save media file_ids for caching
-                
-        if poll := getattr(message, "poll", None): # Poll formatting
+        if text: # Message text
+            content_body.append(f'<div class="message-text">{text}</div>')
+
+        if poll := getattr(message, "poll", None): # Poll message
             if poll_html := self._format_poll(poll):
-                html_content.append(poll_html)
-                
+                content_body.append(poll_html)
+
+        if getattr(message, "channel_chat_created", False): # Create service message for "channel created"
+            content_body.append('<div class="message-service">Channel created</div>')
+
+        html_body = '\n'.join(content_body)
+        html_body = self._sanitize_html(html_body)
+        return html_body
+
+    def _generate_html_media(self, message: Message) -> str:
+        self._save_media_file_ids(message) # Save media file_ids for caching
+
+        content_media = []
         base_url = Config['pyrogram_bridge_url']
         if message.media and message.media != "MessageMediaType.POLL":
             file_unique_id = self._get_file_unique_id(message)
@@ -290,54 +310,51 @@ class PostParser:
                 url = f"{base_url}/media/{file}/{digest}"
 
                 logger.debug(f"Collected media file: {channel_username}/{message.id}/{file_unique_id}")
-                html_content.append(f'<div class="message-media">')
+                content_media.append(f'<div class="message-media">')
                 if message.media in [MessageMediaType.PHOTO, MessageMediaType.DOCUMENT]:
-                    html_content.append(f'<img src="{url}" style="max-width:600px; max-height:600px; object-fit:contain;">')
+                    content_media.append(f'<img src="{url}" style="max-width:400px; max-height:400px; object-fit:contain;">')
                 elif message.media == MessageMediaType.VIDEO:
-                    html_content.append(f'<video controls src="{url}" style="max-width:600px; max-height:600px;"></video>')
+                    content_media.append(f'<video controls src="{url}" style="max-width:400px; max-height:400px;"></video>')
                 elif message.media == MessageMediaType.ANIMATION:
-                    html_content.append(f'<video controls src="{url}" style="max-width:600px; max-height:600px;"></video>')
+                    content_media.append(f'<video controls src="{url}" style="max-width:400px; max-height:400px;"></video>')
                 elif message.media == MessageMediaType.VIDEO_NOTE:
-                    html_content.append(f'<video controls src="{url}" style="max-width:600px; max-height:600px;"></video>')
+                    content_media.append(f'<video controls src="{url}" style="max-width:400px; max-height:400px;"></video>')
                 elif message.media == MessageMediaType.AUDIO:
                     mime_type = getattr(message.audio, 'mime_type', 'audio/mpeg')
-                    html_content.append(f'<audio controls style="width:100%; max-width:400px;"><source src="{url}" type="{mime_type}"></audio>')
+                    content_media.append(f'<audio controls style="width:100%; max-width:400px;"><source src="{url}" type="{mime_type}"></audio>')
                 elif message.media == MessageMediaType.VOICE:
                     mime_type = getattr(message.voice, 'mime_type', 'audio/ogg')
-                    html_content.append(f'<audio controls style="width:100%; max-width:400px;"><source src="{url}" type="{mime_type}"></audio>')
+                    content_media.append(f'<audio controls style="width:100%; max-width:400px;"><source src="{url}" type="{mime_type}"></audio>')
                 elif message.media == MessageMediaType.STICKER:
                     emoji = getattr(message.sticker, 'emoji', '')
-                    html_content.append(f'<img src="{url}" alt="Sticker {emoji}" style="max-width:300px; max-height:300px; object-fit:contain;">')
-                html_content.append('</div>')
-
+                    content_media.append(f'<img src="{url}" alt="Sticker {emoji}" style="max-width:200px; max-height:200px; object-fit:contain;">')
+                content_media.append('</div>')
         
         if webpage := getattr(message, "web_page", None): # Web page preview
             if webpage_html := self._format_webpage(webpage, message):
-                html_content.append(webpage_html)
+                content_media.append(webpage_html)
 
-        if text: # Message text
-            html_content.append(f'<div class="message-text">{text}</div>')
+        html_media = '\n'.join(content_media)
+        html_media = self._sanitize_html(html_media)
+        return html_media
 
-        if bottom_info:
-            if reactions_views_html := self._reactions_views_links(message): # Add reactions, views and links
-                html_content.append(reactions_views_html)
-        
-        html = '\n'.join(html_content)
-            
-        return self._sanitize_html(html)
+    def _generate_html_footer(self, message: Message) -> str:
+        content_footer = []
+        if reactions_views_html := self._reactions_views_links(message):  # Add reactions, views and links
+            content_footer.append(reactions_views_html)
+        html_footer = '\n'.join(content_footer)
+        html_footer = self._sanitize_html(html_footer)
+        return html_footer
+
 
     def _add_hyperlinks_to_raw_urls(self, text: str) -> str:
         try:
-            # Find all existing <a> tags
-            a_tags = re.finditer(r'<a[^>]*>.*?</a>', text)
-            # Store their positions
-            excluded_ranges = [(m.start(), m.end()) for m in a_tags]
-            
-            # Find all URLs that are not already in HTML tags
+            a_tags = re.finditer(r'<a[^>]*>.*?</a>', text) # Find all existing <a> tags
+            excluded_ranges = [(m.start(), m.end()) for m in a_tags] # Store their positions
             result = text
             offset = 0
             
-            for match in re.finditer(r'https?://[^\s<>"\']+', text):
+            for match in re.finditer(r'https?://[^\s<>"\']+', text): # Find all URLs that are not already in HTML tags
                 start, end = match.span()
                 
                 # Check if URL is inside an <a> tag
@@ -378,16 +395,6 @@ class PostParser:
             logger.error(f"webpage_parsing_error: url {getattr(webpage, 'url', 'unknown')}, error {str(e)}")
             return None
 
-    def _wrap_html(self, html_content: list) -> str:
-        struct  = [
-            '<!DOCTYPE html>', '<html>',
-            '<head>', '<meta charset="UTF-8">', '</head>',
-            '<body>', *html_content, '</body>',
-            '</html>'
-        ]
-        html_content = '\n'.join(struct)
-        return html_content
-
     def _reactions_views_links(self, message: Message) -> Union[str, None]:
         try:
             parts = []
@@ -405,13 +412,11 @@ class PostParser:
             channel_identifier = self.get_channel_username(message)
             if channel_identifier:
                 links = []
-                if channel_identifier.startswith('-100'):
-                    # For channels with only ID
+                if channel_identifier.startswith('-100'):  # For channels with only ID
                     channel_id = channel_identifier[4:]  # Remove '-100' prefix for web links
                     links.append(f'<a href="tg://resolve?domain=c/{channel_id}&post={message.id}">Open in Telegram</a>')
                     links.append(f'<a href="https://t.me/c/{channel_id}/{message.id}">Open in Web</a>')
-                else:
-                    # For channels with username
+                else: # For channels with username
                     links.append(f'<a href="tg://resolve?domain={channel_identifier}&post={message.id}">Open in Telegram</a>')
                     links.append(f'<a href="https://t.me/{channel_identifier}/{message.id}">Open in Web</a>')
                 parts.append('&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;'.join(links))
@@ -495,24 +500,15 @@ class PostParser:
                 if message.video and message.video.file_size > 100 * 1024 * 1024:
                     return
                 
-                if message.photo:
-                    file_data['file_unique_id'] = message.photo.file_unique_id
-                elif message.video:
-                    file_data['file_unique_id'] = message.video.file_unique_id
-                elif message.document:
-                    file_data['file_unique_id'] = message.document.file_unique_id
-                elif message.audio:
-                    file_data['file_unique_id'] = message.audio.file_unique_id
-                elif message.voice:
-                    file_data['file_unique_id'] = message.voice.file_unique_id
-                elif message.video_note:
-                    file_data['file_unique_id'] = message.video_note.file_unique_id
-                elif message.animation:
-                    file_data['file_unique_id'] = message.animation.file_unique_id
-                elif message.sticker:
-                    file_data['file_unique_id'] = message.sticker.file_unique_id
-                elif message.web_page and message.web_page.photo:
-                    file_data['file_unique_id'] = message.web_page.photo.file_unique_id
+                if message.photo: file_data['file_unique_id'] = message.photo.file_unique_id
+                elif message.video: file_data['file_unique_id'] = message.video.file_unique_id
+                elif message.document: file_data['file_unique_id'] = message.document.file_unique_id
+                elif message.audio: file_data['file_unique_id'] = message.audio.file_unique_id
+                elif message.voice: file_data['file_unique_id'] = message.voice.file_unique_id
+                elif message.video_note: file_data['file_unique_id'] = message.video_note.file_unique_id
+                elif message.animation: file_data['file_unique_id'] = message.animation.file_unique_id
+                elif message.sticker: file_data['file_unique_id'] = message.sticker.file_unique_id
+                elif message.web_page and message.web_page.photo: file_data['file_unique_id'] = message.web_page.photo.file_unique_id
 
                 if file_data['file_unique_id']:
                     file_data['channel'] = channel_username
