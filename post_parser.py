@@ -196,6 +196,60 @@ class PostParser:
             return {r.emoji: r.count for r in reactions.reactions}
         return None
 
+    def _extract_flags(self, message: Message) -> List[str]:
+        # Check if there is no text or caption and add all applicable flags.
+        message_text = self._generate_html_body(message)
+        flags = []
+        # Add flag "video" if the message media is VIDEO and the body text is up to 100 characters.
+        if message.media == MessageMediaType.VIDEO and len(message_text.strip()) <= 100:
+            flags.append("video")
+
+        # Check if the message text contains variations of the word "стрим"
+        # (e.g., "стрим", "стримы", etc.) or "livestream" in a case-insensitive manner.
+        if re.search(r'(?i)\b(стрим\w*|livestream)\b', message_text):
+            flags.append("stream")
+
+        # Check if the message text contains the word "донат" in a case-insensitive manner.
+        if re.search(r'(?i)\bдонат\w*\b', message_text):
+            flags.append("donat")
+
+        # Check if the post's reactions contain more than 5 clown emojis (🤡).
+        if getattr(message, "reactions", None):
+            for reaction in message.reactions.reactions:
+                if reaction.emoji == "🤡" and reaction.count >= 30:
+                    flags.append("clown")
+                    break
+
+        # Check if the post's reactions contain more than 5 poo emojis (💩).
+        if getattr(message, "reactions", None):
+            for reaction in message.reactions.reactions:
+                if reaction.emoji == "💩" and reaction.count >= 30:
+                    flags.append("poo")
+                    break
+
+        # Check if the message text contains "#реклама" (advertisement tag) in a case-insensitive manner.
+        if re.search(r'(?i)#реклама', message_text):
+            flags.append("advert")
+
+        # New: Check for t.me links: hidden channel and open (foreign) channel.
+        try:
+            # Find links with a '+' after t.me/ indicating a hidden channel link.
+            hidden_links = re.findall(r'https?://(?:www\.)?t\.me/\+([A-Za-z0-9]+)', message_text)
+            # Find links without a '+' after t.me/ indicating an open (foreign) channel link.
+            open_links = re.findall(r'https?://(?:www\.)?t\.me/(?!\+)([A-Za-z0-9_]+)', message_text)
+            if hidden_links:
+                flags.append("hid_channel")
+
+            current_channel = self.get_channel_username(message)
+            # Add the flag "foreign_channel" if there's an open link that differs from the current channel.
+            for open_link in open_links:
+                if current_channel is None or open_link.lower() != current_channel.lower():
+                    flags.append("foreign_channel")
+                    break
+        except Exception as e:
+            logger.error(f"tme_link_extraction_error: message_id {message.id}, error {str(e)}")
+
+        return flags
 
     def _format_html(self, message: Message) -> str:
         html_content = []
@@ -208,6 +262,11 @@ class PostParser:
         html_content = '\n'.join(html_content)
         return html_content
 
+    def _format_flags(self, message: Message) -> str:
+        flags = self._extract_flags(message)
+        if flags:
+            return f'<div class="message-flags">Flags: {", ".join(flags)}</div>'
+        return ''
 
     def process_message(self, message: Message) -> Dict[Any, Any]:
         result = {
@@ -223,6 +282,7 @@ class PostParser:
                 'media': self._generate_html_media(message),
                 'footer': self._generate_html_footer(message)
             },
+            'flags': self._extract_flags(message),
             'author': self._get_author_info(message),
             'views': message.views,
             'reactions': self._extract_reactions(message),
@@ -342,6 +402,8 @@ class PostParser:
         content_footer = []
         if reactions_views_html := self._reactions_views_links(message):  # Add reactions, views and links
             content_footer.append(reactions_views_html)
+        if flags_html := self._format_flags(message): # Add flags
+            content_footer.append(flags_html)
         html_footer = '\n'.join(content_footer)
         html_footer = self._sanitize_html(html_footer)
         return html_footer
@@ -399,14 +461,22 @@ class PostParser:
         try:
             parts = []
             
-            if reactions := getattr(message, "reactions"):
-                reactions_html = ''
+            reactions_html = ""
+            views_html = ""
+            if reactions := getattr(message, "reactions", None):
                 for reaction in reactions.reactions:
                     reactions_html += f'<span class="reaction">{reaction.emoji} {reaction.count}&nbsp;&nbsp;</span>'
-                parts.append(reactions_html.rstrip())
+                reactions_html = reactions_html.rstrip()
 
             if views := getattr(message, "views", None):
                 views_html = f'<span class="views">{views} views</span>'
+
+            # If both reactions and views exist, insert a line break between them.
+            if reactions_html and views_html:
+                parts.append(reactions_html + "<br>" + views_html)
+            elif reactions_html:
+                parts.append(reactions_html)
+            elif views_html:
                 parts.append(views_html)
 
             channel_identifier = self.get_channel_username(message)

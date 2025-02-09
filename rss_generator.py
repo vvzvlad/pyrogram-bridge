@@ -16,50 +16,6 @@ if not logger.handlers:
     handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
     logger.addHandler(handler)
 
-def reorganize_post_content(html):
-    """
-    Reorganize post content to move text after all media
-    Args:
-        html: Post HTML content
-    Returns:
-        Reorganized HTML content
-    """
-    soup = BeautifulSoup(html, 'html.parser')
-    
-    # Find all media and text blocks
-    media_blocks = soup.find_all('div', class_='message-media')
-    text_blocks = soup.find_all('div', class_='message-text')
-    
-    if not text_blocks:  # No text to move
-        return html
-        
-    # Create new structure
-    new_content = []
-    
-    # Add all media first
-    for media in media_blocks:
-        media.extract()
-        new_content.append(str(media))
-        new_content.append('<br>')
-        
-    # Add text last
-    for text in text_blocks:
-        text.extract()
-        new_content.append(str(text))
-    
-    # Add remaining elements
-    remaining_elements = 0
-    for element in soup.contents:
-        if isinstance(element, str):
-            new_content.append(element)
-            remaining_elements += 1
-        elif element.name != 'br' and 'message-media' not in element.get('class', []) and 'message-text' not in element.get('class', []):
-            new_content.append(str(element))
-            remaining_elements += 1
-    
-    logger.debug(f"Content reorganized with {remaining_elements} additional elements")
-    return ''.join(new_content)
-
 
 async def create_messages_groups(messages):
     """
@@ -100,7 +56,7 @@ async def create_messages_groups(messages):
     
     return processing_groups
 
-async def render_messages_groups(messages_groups, post_parser):
+async def render_messages_groups(messages_groups, post_parser, exclude_flags: str | None = None):
     """
     Render message groups into HTML format
     Args:
@@ -128,7 +84,8 @@ async def render_messages_groups(messages_groups, post_parser):
                     'message_id': message_data['message_id'],
                     'title': message_data['html']['title'],
                     'text': message_data['text'],
-                    'author': message_data['author']
+                    'author': message_data['author'],
+                    'flags': message_data['flags']
                 })
             else:
                 # Multiple messages in group - need to merge
@@ -158,18 +115,33 @@ async def render_messages_groups(messages_groups, post_parser):
                     'message_id': main_message['message_id'],
                     'title': main_message['html']['title'],
                     'text': main_message['text'],
-                    'author': main_message['author']
+                    'author': main_message['author'],
+                    'flags': main_message['flags']
                 })
                 
         except Exception as e:
             logger.error(f"message_group_rendering_error: error {str(e)}")
             continue
+
+    if exclude_flags:
+        # Split comma-separated exclude_flags into a list.
+        exclude_flag_list = [flag.strip() for flag in exclude_flags.split(',')]
+        filtered_posts = []
+        for post in rendered_posts:
+            # If "all" is specified and the post has any flags, exclude the post.
+            if "all" in exclude_flag_list and post['flags']:
+                continue
+            # Exclude post if any flag in the exclude list is present in the post's flags.
+            if any(flag in post['flags'] for flag in exclude_flag_list):
+                continue
+            filtered_posts.append(post)
+        rendered_posts = filtered_posts
     
     # Sort by date
     rendered_posts.sort(key=lambda x: x['date'], reverse=True)
     return rendered_posts
 
-async def generate_channel_rss(channel: str, post_parser: Optional[PostParser] = None, client = None, limit: int = 20) -> str:
+async def generate_channel_rss(channel: str, post_parser: Optional[PostParser] = None, client = None, limit: int = 20, exclude_flags: str | None = None ) -> str:
     """
     Generate RSS feed for channel using actual messages
     Args:
@@ -177,7 +149,7 @@ async def generate_channel_rss(channel: str, post_parser: Optional[PostParser] =
         post_parser: Optional PostParser instance. If not provided, will create new one
         client: Telegram client instance
         limit: Maximum number of posts to include in the RSS feed
-        output_type: 'rss' or 'html'
+        exclude_flags: Flags to exclude from the RSS feed
     Returns:
         RSS feed as string in XML format
     """
@@ -222,7 +194,7 @@ async def generate_channel_rss(channel: str, post_parser: Optional[PostParser] =
             
         # Process messages into groups and render them
         message_groups = await create_messages_groups(messages)
-        final_posts = await render_messages_groups(message_groups, post_parser)
+        final_posts = await render_messages_groups(message_groups, post_parser, exclude_flags)
         
         # Generate feed entries
         for post in final_posts:
@@ -252,7 +224,7 @@ async def generate_channel_rss(channel: str, post_parser: Optional[PostParser] =
         raise
 
 
-async def generate_channel_html(channel: str, post_parser: Optional[PostParser] = None, client = None, limit: int = 20) -> str:
+async def generate_channel_html(channel: str, post_parser: Optional[PostParser] = None, client = None, limit: int = 20, exclude_flags: str | None = None) -> str:
     """
     Generate HTML feed for channel using actual messages
     Args:
@@ -280,7 +252,6 @@ async def generate_channel_html(channel: str, post_parser: Optional[PostParser] 
                 channel_id = int(channel)
                 
             channel_info = await post_parser.client.get_chat(channel_id)
-            channel_title = channel_info.title or f"Telegram: {channel}"
             channel_username = post_parser.get_channel_username(channel_info)
             if not channel_username:
                 return create_error_feed(channel, base_url)
@@ -290,9 +261,6 @@ async def generate_channel_html(channel: str, post_parser: Optional[PostParser] 
             else:
                 raise
 
-        # Set feed metadata
-        main_name = f"{channel_title} (@{channel_username})"
-        html_content = f'<h1>{main_name}</h1>'
         
         # Collect messages
         messages = []
@@ -301,7 +269,7 @@ async def generate_channel_html(channel: str, post_parser: Optional[PostParser] 
             
         # Process messages into groups and render them
         message_groups = await create_messages_groups(messages)
-        final_posts = await render_messages_groups(message_groups, post_parser)
+        final_posts = await render_messages_groups(message_groups, post_parser, exclude_flags)
 
         # Generate HTML content
         html_posts = [post['html'] for post in final_posts]
