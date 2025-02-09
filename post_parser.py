@@ -68,7 +68,7 @@ class PostParser:
             print(debug_message)
         return
     
-    def channel_name_prepare(self, channel: str):
+    def _channel_name_prepare(self, channel: str):
         if isinstance(channel, str) and channel.startswith('-100'): # Convert numeric channel ID to int
             channel_id = int(channel)
             return channel_id
@@ -78,7 +78,7 @@ class PostParser:
     async def get_post(self, channel: str, post_id: int, output_type: str = 'json') -> Union[str, Dict[Any, Any]]:
         print(f"Getting post {channel}, {post_id}")
         try:
-            channel = self.channel_name_prepare(channel)
+            channel = self._channel_name_prepare(channel)
             message = await self.client.get_messages(channel, post_id)
 
             self._debug_message(message)
@@ -123,14 +123,14 @@ class PostParser:
             return "✨ Channel created"
         text = message.text or message.caption or ''
         if not text:
-            if message.media == MessageMediaType.PHOTO: return "📷 Photo"
-            elif message.media == MessageMediaType.VIDEO: return "🎥 Video"
-            elif message.media == MessageMediaType.ANIMATION: return "🎞 GIF"
-            elif message.media == MessageMediaType.AUDIO: return "🎵 Audio"
-            elif message.media == MessageMediaType.VOICE: return "🎤 Voice message"
-            elif message.media == MessageMediaType.VIDEO_NOTE: return "🎥 Video message"
-            elif message.media == MessageMediaType.STICKER: return "🎯 Sticker"
-            elif message.media == MessageMediaType.POLL: return "📊 Poll"
+            if   message.media == MessageMediaType.PHOTO:       return "📷 Photo"
+            elif message.media == MessageMediaType.VIDEO:       return "🎥 Video"
+            elif message.media == MessageMediaType.ANIMATION:   return "🎞 GIF"
+            elif message.media == MessageMediaType.AUDIO:       return "🎵 Audio"
+            elif message.media == MessageMediaType.VOICE:       return "🎤 Voice message"
+            elif message.media == MessageMediaType.VIDEO_NOTE:  return "🎥 Video message"
+            elif message.media == MessageMediaType.STICKER:     return "🎯 Sticker"
+            elif message.media == MessageMediaType.POLL:        return "📊 Poll"
             return "📷 Media post"
 
         # Remove URLs
@@ -213,14 +213,14 @@ class PostParser:
         if re.search(r'(?i)\bдонат\w*\b', message_text):
             flags.append("donat")
 
-        # Check if the post's reactions contain more than 5 clown emojis (🤡).
+        # Check if the post's reactions contain more clown emojis (🤡).
         if getattr(message, "reactions", None):
             for reaction in message.reactions.reactions:
                 if reaction.emoji == "🤡" and reaction.count >= 30:
                     flags.append("clown")
                     break
 
-        # Check if the post's reactions contain more than 5 poo emojis (💩).
+        # Check if the post's reactions contain more poo emojis (💩).
         if getattr(message, "reactions", None):
             for reaction in message.reactions.reactions:
                 if reaction.emoji == "💩" and reaction.count >= 30:
@@ -323,10 +323,8 @@ class PostParser:
     def _generate_html_header(self, message: Message) -> str:
         content_header = []
         # Add forwarded from or reply info if present
-        if forward_html := self._format_forward_info(message):
-            content_header.append(forward_html)
-        elif reply_html := self._format_reply_info(message):
-            content_header.append(reply_html)
+        if forward_html := self._format_forward_info(message): content_header.append(forward_html)
+        elif reply_html := self._format_reply_info(message): content_header.append(reply_html)
         html_header = '\n'.join(content_header)
         html_header = self._sanitize_html(html_header)
         return html_header
@@ -533,24 +531,6 @@ class PostParser:
             logger.error(f"file_id_extraction_error: media_type {message.media}, error {str(e)}")
             return None
 
-    async def get_recent_posts(self, channel: str, limit: int = 20) -> List[Dict[Any, Any]]:
-        try:
-            messages = []
-            async for message in self.client.get_chat_history(channel, limit=limit):
-                try:
-                    post = await self.get_post(channel, message.id, output_type='json')
-                    if post:
-                        messages.append(post)
-                except Exception as e:
-                    logger.error(f"message_processing_error: channel {channel}, message_id {message.id}, error {str(e)}")
-                    continue
-                    
-            return messages
-            
-        except Exception as e:
-            logger.error(f"recent_posts_error: channel {channel}, error {str(e)}")
-            raise
-
     def _save_media_file_ids(self, message: Message) -> None:
         try:
             file_data = {
@@ -567,8 +547,7 @@ class PostParser:
 
             if message.media:
                 # Skip large videos - they shouldn't be cached permanently
-                if message.video and message.video.file_size > 100 * 1024 * 1024:
-                    return
+                if message.video and message.video.file_size > 100 * 1024 * 1024: return
                 
                 if message.photo: file_data['file_unique_id'] = message.photo.file_unique_id
                 elif message.video: file_data['file_unique_id'] = message.video.file_unique_id

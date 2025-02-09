@@ -4,7 +4,6 @@ from typing import Optional
 from feedgen.feed import FeedGenerator
 from post_parser import PostParser
 from config import get_settings
-from bs4 import BeautifulSoup
 
 Config = get_settings()
 
@@ -69,8 +68,7 @@ async def render_messages_groups(messages_groups, post_parser, exclude_flags: st
     
     for group in messages_groups:
         try:
-            if len(group) == 1:
-                # Single message - simple case
+            if len(group) == 1: # Single message - simple case
                 message_data = post_parser.process_message(group[0])
                 html_parts = [
                     f'<div class="message-header">{message_data["html"]["header"]}</div>',
@@ -87,12 +85,9 @@ async def render_messages_groups(messages_groups, post_parser, exclude_flags: st
                     'author': message_data['author'],
                     'flags': message_data['flags']
                 })
-            else:
-                # Multiple messages in group - need to merge
+            else: # Multiple messages in group - need to merge
                 processed_messages = [post_parser.process_message(msg) for msg in group]
-                
-                # Find main message (one with text)
-                main_message = next(
+                main_message = next( # Find main message (one with text)
                     (msg for msg in processed_messages if msg['text']),
                     processed_messages[0]  # fallback to first if none has text
                 )
@@ -247,11 +242,8 @@ async def generate_channel_html(channel: str, post_parser: Optional[PostParser] 
         base_url = Config['pyrogram_bridge_url']
         
         try:
-            channel_id = channel
-            if isinstance(channel, str) and channel.startswith('-100'):
-                channel_id = int(channel)
-                
-            channel_info = await post_parser.client.get_chat(channel_id)
+            channel = post_parser.channel_name_prepare(channel)
+            channel_info = await post_parser.client.get_chat(channel)
             channel_username = post_parser.get_channel_username(channel_info)
             if not channel_username:
                 return create_error_feed(channel, base_url)

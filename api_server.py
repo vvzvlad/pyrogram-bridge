@@ -541,11 +541,13 @@ async def get_rss_feed(channel: str, token: str | None = None, limit: int = 50, 
             raise HTTPException(status_code=400, detail=error_message) from e
         except errors.FloodWait as e:
             wait_time = e.value
-            random_additional_wait = random.uniform(0, wait_time * 1.5)
+            random_additional_wait = random.uniform(0, wait_time * 2.5)
             total_wait_time = wait_time + random_additional_wait
-            logger.warning(f"FloodWait detected for channel {channel}, waiting {total_wait_time:.1f} seconds (base: {wait_time}s, random: {random_additional_wait:.1f}s)")
+            if total_wait_time > 190: total_wait_time = 190
+
+            logger.warning(f"TG FloodWait for channel {channel}, waiting {total_wait_time:.1f} seconds (base: {wait_time}s, random: {random_additional_wait:.1f}s)")
             await asyncio.sleep(total_wait_time)
-            logger.info(f"FloodWait finished for channel {channel}, retrying RSS feed generation")
+            logger.info(f"TG FloodWait finished for channel {channel}, retrying RSS feed generation")
             continue
         except Exception as e:
             error_message = f"Failed to generate RSS feed for channel {channel}: {str(e)}"
