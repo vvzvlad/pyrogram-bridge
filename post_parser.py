@@ -404,9 +404,9 @@ class PostParser:
 
     def _generate_html_footer(self, message: Message) -> str:
         content_footer = []
-        if reactions_views_html := self._reactions_views_links(message):  # Add reactions, views and links
+        if reactions_views_html := self._reactions_views_links(message):  # Add reactions, views, date and links
             content_footer.append(reactions_views_html)
-        if flags_html := self._format_flags(message): # Add flags
+        if flags_html := self._format_flags(message):  # Add flags
             content_footer.append(flags_html)
         html_footer = '\n'.join(content_footer)
         html_footer = self._sanitize_html(html_footer)
@@ -475,14 +475,19 @@ class PostParser:
             if views := getattr(message, "views", None):
                 views_html = f'<span class="views">{views} views</span>'
 
-            # If both reactions and views exist, insert a line break between them.
-            if reactions_html and views_html:
-                parts.append(reactions_html + "<br>" + views_html)
-            elif reactions_html:
-                parts.append(reactions_html)
-            elif views_html:
-                parts.append(views_html)
+            # Combine reactions and views on the same line
+            if reactions_html or views_html:
+                parts.append(f'{reactions_html}&nbsp;&nbsp;{views_html}')
 
+            # Add date and links on the same line
+            second_line_parts = []
+            
+            # Format date as DD/MM/YY, HH:MM:SS
+            if message.date:
+                formatted_date = message.date.strftime("%d/%m/%y, %H:%M:%S")
+                second_line_parts.append(formatted_date)
+
+            # Add links
             channel_identifier = self.get_channel_username(message)
             if channel_identifier:
                 links = []
@@ -490,12 +495,15 @@ class PostParser:
                     channel_id = channel_identifier[4:]  # Remove '-100' prefix for web links
                     links.append(f'<a href="tg://resolve?domain=c/{channel_id}&post={message.id}">Open in Telegram</a>')
                     links.append(f'<a href="https://t.me/c/{channel_id}/{message.id}">Open in Web</a>')
-                else: # For channels with username
+                else:  # For channels with username
                     links.append(f'<a href="tg://resolve?domain={channel_identifier}&post={message.id}">Open in Telegram</a>')
                     links.append(f'<a href="https://t.me/{channel_identifier}/{message.id}">Open in Web</a>')
-                parts.append('&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;'.join(links))
+                second_line_parts.extend(links)
 
-            html = '&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;'.join(parts) if parts else None
+            if second_line_parts:
+                parts.append('&nbsp;&nbsp;&nbsp;&nbsp;'.join(second_line_parts))
+
+            html = '<br>'.join(parts) if parts else None
             return f"<br>{html}" if html else None
             
         except Exception as e:

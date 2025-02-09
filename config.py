@@ -11,5 +11,6 @@ def get_settings():
         "pyrogram_bridge_url": os.getenv("PYROGRAM_BRIDGE_URL", ""),
         "log_level": os.getenv("LOG_LEVEL", "INFO"),
         "debug": os.getenv("DEBUG", "False") == "True",
-        "token": os.getenv("TOKEN", "")
+        "token": os.getenv("TOKEN", ""),
+        "time_based_merge": os.getenv("TIME_BASED_MERGE", "False") == "True",
     } 

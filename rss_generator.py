@@ -16,6 +16,49 @@ if not logger.handlers:
     logger.addHandler(handler)
 
 
+async def create_time_based_media_groups(messages, merge_seconds: int = 5):
+    messages_sorted = sorted(messages, key=lambda x: x.date)
+    cluster = []
+    last_msg_date = None
+    current_media_group_id = None
+
+    for msg in messages_sorted:
+        
+        if not cluster:
+            cluster.append(msg)
+            last_msg_date = msg.date
+            current_media_group_id = getattr(msg, "media_group_id", None)
+            continue
+        
+        time_diff = (msg.date - last_msg_date).total_seconds()
+        
+        msg_media_group_id = getattr(msg, "media_group_id", None)
+        
+        if time_diff <= merge_seconds:
+            if current_media_group_id:
+                msg.media_group_id = current_media_group_id
+            elif msg_media_group_id:
+                current_media_group_id = msg_media_group_id
+                for m in cluster:
+                    m.media_group_id = current_media_group_id
+            cluster.append(msg)
+            last_msg_date = msg.date
+        else:
+            if len(cluster) >= 2 and not current_media_group_id:
+                new_group_id = f"time_{min(m.date for m in cluster)}"
+                for m in cluster:
+                    m.media_group_id = new_group_id
+            cluster = [msg]
+            last_msg_date = msg.date
+            current_media_group_id = msg_media_group_id
+    
+    if len(cluster) >= 2 and not current_media_group_id:
+        new_group_id = f"time_{min(m.date for m in cluster)}"
+        for m in cluster:
+            m.media_group_id = new_group_id
+
+    return messages
+
 async def create_messages_groups(messages):
     """
     Process messages into formatted posts, handling media groups
@@ -96,31 +139,38 @@ async def render_messages_groups(messages_groups, post_parser, exclude_flags: st
                     'author': message_data['author'],
                     'flags': message_data['flags']
                 })
-            else: # Multiple messages in group - need to merge
+            else: # Multiple messages in group - merge media, text and html body
                 processed_messages = [post_parser.process_message(msg) for msg in group]
-                main_message = next( # Find main message (one with text)
+                main_message = next(  # Determine main message for header/footer/title
                     (msg for msg in processed_messages if msg['text']),
-                    processed_messages[0]  # fallback to first if none has text
+                    processed_messages[0]  # fallback if no message contains text
                 )
                 
-                # Collect all media sections
+                # Collect all media sections from all messages in the group
                 all_media = [msg['html']['media'] for msg in processed_messages if msg['html']['media']]
                 combined_media = '\n'.join(all_media)
-                
-                # Combine parts
+
+                # Merge text fields from all messages
+                all_texts = [msg['text'] for msg in processed_messages if msg['text']]
+                combined_text = '\n'.join(all_texts)
+
+                # Merge html body sections from all messages
+                all_html_bodies = [msg['html']['body'] for msg in processed_messages if msg['html']['body']]
+                combined_html_body = '\n'.join(all_html_bodies)
+
                 html_parts = [
                     f'<div class="message-header">{main_message["html"]["header"]}</div>',
                     f'<div class="message-media">{combined_media}</div>',
-                    f'<div class="message-text">{main_message["html"]["body"]}</div>',
+                    f'<div class="message-text">{combined_html_body}</div>',
                     f'<div class="message-footer">{main_message["html"]["footer"]}</div>'
                 ]
-                
+
                 rendered_posts.append({
                     'html': '\n'.join(html_parts),
                     'date': main_message['date'],
                     'message_id': main_message['message_id'],
                     'title': main_message['html']['title'],
-                    'text': main_message['text'],
+                    'text': combined_text,
                     'author': main_message['author'],
                     'flags': main_message['flags']
                 })
@@ -147,7 +197,13 @@ async def render_messages_groups(messages_groups, post_parser, exclude_flags: st
     rendered_posts.sort(key=lambda x: x['date'], reverse=True)
     return rendered_posts
 
-async def generate_channel_rss(channel: str, post_parser: Optional[PostParser] = None, client = None, limit: int = 20, exclude_flags: str | None = None ) -> str:
+async def generate_channel_rss(channel: str, 
+                                post_parser: Optional[PostParser] = None, 
+                                client = None, 
+                                limit: int = 20, 
+                                exclude_flags: str | None = None,
+                                merge_seconds: int = 5
+                                ) -> str:
     """
     Generate RSS feed for channel using actual messages
     Args:
@@ -199,6 +255,8 @@ async def generate_channel_rss(channel: str, post_parser: Optional[PostParser] =
             messages.append(message)
             
         # Process messages into groups and render them
+        if Config['time_based_merge']:
+            messages = await create_time_based_media_groups(messages, merge_seconds)
         message_groups = await create_messages_groups(messages)
         message_groups = await trim_messages_groups(message_groups, limit)
         final_posts = await render_messages_groups(message_groups, post_parser, exclude_flags)
@@ -231,7 +289,13 @@ async def generate_channel_rss(channel: str, post_parser: Optional[PostParser] =
         raise
 
 
-async def generate_channel_html(channel: str, post_parser: Optional[PostParser] = None, client = None, limit: int = 20, exclude_flags: str | None = None) -> str:
+async def generate_channel_html(channel: str, 
+                                post_parser: Optional[PostParser] = None, 
+                                client = None, 
+                                limit: int = 20, 
+                                exclude_flags: str | None = None,
+                                merge_seconds: int = 5
+                                ) -> str:
     """
     Generate HTML feed for channel using actual messages
     Args:
@@ -272,6 +336,8 @@ async def generate_channel_html(channel: str, post_parser: Optional[PostParser] 
             messages.append(message)
             
         # Process messages into groups and render them
+        if Config['time_based_merge']:
+            messages = await create_time_based_media_groups(messages, merge_seconds)
         message_groups = await create_messages_groups(messages)
         message_groups = await trim_messages_groups(message_groups, limit)
         final_posts = await render_messages_groups(message_groups, post_parser, exclude_flags)

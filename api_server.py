@@ -520,7 +520,13 @@ async def get_media(channel: str, post_id: int, file_unique_id: str, digest: str
 
 @app.get("/rss/{channel}", response_class=Response)
 @app.get("/rss/{channel}/{token}", response_class=Response)
-async def get_rss_feed(channel: str, token: str | None = None, limit: int = 50, output_type: str = 'rss', exclude_flags: str | None = None):
+async def get_rss_feed(channel: str, 
+                        token: str | None = None, 
+                        limit: int = 50, 
+                        output_type: str = 'rss', 
+                        exclude_flags: str | None = None,
+                        merge_seconds: int = 5
+                        ):
     if Config["token"]:
         if token != Config["token"]:
             logger.error(f"Invalid token for RSS feed: {token}, expected: {Config['token']}")
@@ -530,10 +536,18 @@ async def get_rss_feed(channel: str, token: str | None = None, limit: int = 50, 
     while True:
         try:
             if output_type == 'rss':
-                rss_content = await generate_channel_rss(channel, client=client.client, limit=limit, exclude_flags=exclude_flags)
+                rss_content = await generate_channel_rss(channel,
+                                                        client=client.client, 
+                                                        limit=limit, 
+                                                        exclude_flags=exclude_flags,
+                                                        merge_seconds=merge_seconds)
                 return Response(content=rss_content, media_type="application/xml")
             elif output_type == 'html':
-                rss_content = await generate_channel_html(channel, client=client.client, limit=limit, exclude_flags=exclude_flags)
+                rss_content = await generate_channel_html(channel,
+                                                        client=client.client, 
+                                                        limit=limit, 
+                                                        exclude_flags=exclude_flags,
+                                                        merge_seconds=merge_seconds)
                 return Response(content=rss_content, media_type="text/html")
         except ValueError as e:
             error_message = f"Invalid parameters for RSS feed generation: {str(e)}"
