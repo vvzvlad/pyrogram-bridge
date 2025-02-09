@@ -48,13 +48,20 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI( title="Pyrogram Bridge", lifespan=lifespan)
 
+def mask_sensitive_value(value: str) -> str:
+    """Mask middle part of sensitive value, showing only first and last 4 characters"""
+    if not value or len(value) < 8:
+        return '***'
+    visible_chars = 4
+    return f"{value[:visible_chars]}{'*' * (len(value) - visible_chars * 2)}{value[-visible_chars:]}"
+
 if __name__ == "__main__":
     import uvicorn
     
     logger.info("Starting server with configuration:")
     for key, value in Config.items():
         if any(sensitive in key.lower() for sensitive in ['token', 'api_id', 'api_hash', 'session']):
-            masked_value = '***' if value else None
+            masked_value = mask_sensitive_value(str(value)) if value else None
             logger.info(f"    {key}: {masked_value}")
         else:
             logger.info(f"    {key}: {value}")
@@ -483,6 +490,13 @@ async def health_check(token: str | None = None):
         me = await client.client.get_me()
 
         cache_stats = calculate_cache_stats()
+        
+        config_info = {}
+        for key, value in Config.items():
+            if any(sensitive in key.lower() for sensitive in ['token', 'api_id', 'api_hash', 'session']):
+                config_info[key] = mask_sensitive_value(str(value)) if value else None
+            else:
+                config_info[key] = value
 
         return {
             "status": "ok",
@@ -492,6 +506,7 @@ async def health_check(token: str | None = None):
             "tg_phone": me.phone_number,
             "tg_first_name": me.first_name,
             "tg_last_name": me.last_name,
+            "config": config_info,
             **cache_stats
         }
     except Exception as e:
