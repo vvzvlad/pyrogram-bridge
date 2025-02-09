@@ -68,7 +68,7 @@ class PostParser:
             print(debug_message)
         return
     
-    def _channel_name_prepare(self, channel: str):
+    def channel_name_prepare(self, channel: str):
         if isinstance(channel, str) and channel.startswith('-100'): # Convert numeric channel ID to int
             channel_id = int(channel)
             return channel_id
@@ -78,7 +78,7 @@ class PostParser:
     async def get_post(self, channel: str, post_id: int, output_type: str = 'json') -> Union[str, Dict[Any, Any]]:
         print(f"Getting post {channel}, {post_id}")
         try:
-            channel = self._channel_name_prepare(channel)
+            channel = self.channel_name_prepare(channel)
             message = await self.client.get_messages(channel, post_id)
 
             self._debug_message(message)
