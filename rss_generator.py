@@ -55,6 +55,17 @@ async def create_messages_groups(messages):
     
     return processing_groups
 
+async def trim_messages_groups(messages_groups, limit):
+    # Remove the oldest group (the one with the lowest message id based on the first message's date)
+    if messages_groups:
+        _removed_group = messages_groups.pop()
+    
+    # Trim groups if they exceed the specified limit
+    if len(messages_groups) > limit:
+        messages_groups = messages_groups[:limit]
+    
+    return messages_groups
+
 async def render_messages_groups(messages_groups, post_parser, exclude_flags: str | None = None):
     """
     Render message groups into HTML format
@@ -184,11 +195,12 @@ async def generate_channel_rss(channel: str, post_parser: Optional[PostParser] =
         
         # Collect messages
         messages = []
-        async for message in post_parser.client.get_chat_history(channel, limit=limit):
+        async for message in post_parser.client.get_chat_history(channel, limit=limit*2):
             messages.append(message)
             
         # Process messages into groups and render them
         message_groups = await create_messages_groups(messages)
+        message_groups = await trim_messages_groups(message_groups, limit)
         final_posts = await render_messages_groups(message_groups, post_parser, exclude_flags)
         
         # Generate feed entries
@@ -261,6 +273,7 @@ async def generate_channel_html(channel: str, post_parser: Optional[PostParser] 
             
         # Process messages into groups and render them
         message_groups = await create_messages_groups(messages)
+        message_groups = await trim_messages_groups(message_groups, limit)
         final_posts = await render_messages_groups(message_groups, post_parser, exclude_flags)
 
         # Generate HTML content
