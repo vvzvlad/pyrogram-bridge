@@ -256,7 +256,7 @@ async def generate_channel_html(channel: str, post_parser: Optional[PostParser] 
         
         # Collect messages
         messages = []
-        async for message in post_parser.client.get_chat_history(channel_id, limit=limit):
+        async for message in post_parser.client.get_chat_history(channel, limit=limit):
             messages.append(message)
             
         # Process messages into groups and render them
