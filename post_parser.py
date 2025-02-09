@@ -443,19 +443,17 @@ class PostParser:
         base_url = Config['pyrogram_bridge_url']
         try:
             if photo := getattr(webpage, "photo", None):
-                logger.debug(f"Processing webpage with photo: message_id={message.id}, photo={photo}")
                 if file_unique_id := getattr(photo, "file_unique_id", None):
                     channel_username = self.get_channel_username(message)
-                    url = f"{base_url}/media/{channel_username}/{message.id}/{file_unique_id}"
-                    logger.debug(f"Generated media URL: {url}")
+                    file = f"{channel_username}/{message.id}/{file_unique_id}"
+                    digest = generate_media_digest(file)
+                    url = f"{base_url}/media/{file}/{digest}"
                     return (
                         f'<div style="margin:5px;">'
                         f'<a href="{webpage.url}" target="_blank">'
                         f'<img src="{url}" style="max-width:600px; max-height:600px; object-fit:contain;"></a>'
                         f'</div>'
                     )
-                else:
-                    logger.error(f"webpage_photo_error: no file_unique_id found for photo in message {message.id}")
             return None
         except Exception as e:
             logger.error(f"webpage_parsing_error: url {getattr(webpage, 'url', 'unknown')}, error {str(e)}")
