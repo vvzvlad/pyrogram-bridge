@@ -12,5 +12,5 @@ def get_settings():
         "log_level": os.getenv("LOG_LEVEL", "INFO"),
         "debug": os.getenv("DEBUG", "False") == "True",
         "token": os.getenv("TOKEN", ""),
-        "time_based_merge": os.getenv("TIME_BASED_MERGE", "False") == "True",
+        "time_based_merge": os.getenv("TIME_BASED_MERGE", "False").strip() in ["True", "true"],
     } 
