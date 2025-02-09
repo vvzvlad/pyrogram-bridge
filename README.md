@@ -77,6 +77,10 @@ Obviously, you must have a closed/hidden channel subscription prior to use, usin
 For known id channel, you can use bot @userinfobot: forward message from channel to bot, and get id from bot response: "Id: -1002069358234".  
 Or, use my https://github.com/vvzvlad/miniflux-tg-add-bot to add channel to miniflux: after forward message from channel to bot, subscribition automatically added to miniflux.
 
+"Limit" parameter can work somewhat unintuitively: this will be noticeable on groups that post multiple sets of pictures.  
+The thing is that in Telegram each picture is a separate message and they are grouped later, on the client. The maximum number of pictures in one message is 10, so in order to guarantee 10 posts with 10 pictures with a limit of 10 posts, we would need to request 10*10=100 messages each time.  
+This creates an unnecessary load, so we do something else: we request limit*2 and delete the last group of media files for fear that it might be incomplete (because to find out for sure, we have to go further down the history and find the next group). So don't expect the limit parameter to give you exactly as many posts as it specifies, they may be a) much less b)the number of posts may not change when the limit is changed, because incomplete groups at the end of the feed are deleted automatically
+
 ## Get channel messages
 
 ``` curl https://pgbridge.example.com/html/DragorWW_space/87 ```
