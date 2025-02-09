@@ -89,15 +89,15 @@ Exclusion flags are a way to filter channel content based on pre-defined (by me)
 There are several flags:  
 video - presence of video and small text in the post  
 stream, donat - words like "стрим", "донат"  
-clown, poo - emoticons in post reactions (>30) 
-advert - tag #реклама  
-hid_channel, foreign_channel - links to closed tg channels (https://t.me/+S0OfKyMDRi) and to open channels (https://t.me/suprechannel) that do not equal the name of the current channel. 
+clown, poo - emoticons in post reactions (>30)  
+advert - "#реклама" tag  
+hid_channel, foreign_channel - links to closed tg channels (https://t.me/+S0OfKyMDRi) and to open channels (https://t.me/superchannel) that do not equal the name of the current channel. 
 
-You can use exclude_flags parameter in rss/html/json urls to exclude posts with certain flags. For example, to exclude all posts with the "video" flag, you can use:
+You can use exclude_flags parameter in rss/html/json urls to exclude posts with certain flags. For example, to exclude all posts with the flags "video", "stream", "donat", "clown", you can use:
 
 ``` curl https://pgbridge.example.com/rss/DragorWW_space?exclude_flags=video,stream,donat,clown ```
 
-Or use meta-flag "all" to exclude all posts:
+Or use meta-flag "all" to exclude all flags in posts:
 
 ``` curl https://pgbridge.example.com/rss/DragorWW_space?exclude_flags=all ```
 
