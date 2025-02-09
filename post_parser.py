@@ -197,9 +197,15 @@ class PostParser:
         return None
 
     def _extract_flags(self, message: Message) -> List[str]:
-        # Check if there is no text or caption and add all applicable flags.
         message_text = self._generate_html_body(message)
         flags = []
+
+        # Add "fwd" flag for forwarded messages
+        if (getattr(message, "forward_from_chat", None) or 
+            getattr(message, "forward_from", None) or 
+            getattr(message, "forward_sender_name", None)):
+            flags.append("fwd")
+
         # Add flag "video" if the message media is VIDEO and the body text is up to 100 characters.
         if message.media == MessageMediaType.VIDEO and len(message_text.strip()) <= 100:
             flags.append("video")
@@ -231,7 +237,6 @@ class PostParser:
         if re.search(r'(?i)#реклама', message_text):
             flags.append("advert")
 
-        # New: Check for t.me links: hidden channel and open (foreign) channel.
         try:
             # Find links with a '+' after t.me/ indicating a hidden channel link.
             hidden_links = re.findall(r'https?://(?:www\.)?t\.me/\+([A-Za-z0-9]+)', message_text)
