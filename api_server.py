@@ -50,6 +50,15 @@ app = FastAPI( title="Pyrogram Bridge", lifespan=lifespan)
 
 if __name__ == "__main__":
     import uvicorn
+    
+    logger.info("Starting server with configuration:")
+    for key, value in Config.items():
+        if any(sensitive in key.lower() for sensitive in ['token', 'api_id', 'api_hash', 'session']):
+            masked_value = '***' if value else None
+            logger.info(f"    {key}: {masked_value}")
+        else:
+            logger.info(f"    {key}: {value}")
+            
     uvicorn.run("api_server:app", host=Config["api_host"], port=Config["api_port"], reload=True)
 
 
