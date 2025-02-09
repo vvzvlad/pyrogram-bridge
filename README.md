@@ -91,11 +91,15 @@ This creates an unnecessary load, so we do something else: we request limit*2 an
 Exclusion flags are a way to filter channel content based on pre-defined (by me) criteria. It's not a universal regexp-based filtering engine, for example, but it does 99% of my tasks of filtering the content of some toxic tg channels (mostly with fresh memes).  
 
 There are several flags:  
-video - presence of video and small text in the post  
-stream, donat - words like "стрим", "донат"  
-clown, poo - emoticons in post reactions (>30)  
-advert - "#реклама" tag  
-hid_channel, foreign_channel - links to closed tg channels (https://t.me/+S0OfKyMDRi) and to open channels (https://t.me/superchannel) that do not equal the name of the current channel. 
+- video - presence of video and small text in the post  
+- stream - words like "стрим", "livestream"  
+- donat - word "донат" and its variations  
+- clown - clown emoticon (🤡) in post reactions (>30)  
+- poo - poo emoticon (💩) in post reactions (>30)  
+- advert - "#реклама" tag, "Партнерский пост" or "по промокоду" phrases  
+- fwd - forwarded messages from channels, users or hidden users  
+- hid_channel - links to closed tg channels (https://t.me/+S0OfKyMDRi)  
+- foreign_channel - links to open channels (https://t.me/superchannel) that do not equal the name of the current channel
 
 You can use exclude_flags parameter in rss/html/json urls to exclude posts with certain flags. For example, to exclude all posts with the flags "video", "stream", "donat", "clown", you can use:
 
