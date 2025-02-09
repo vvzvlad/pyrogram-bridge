@@ -317,6 +317,7 @@ class PostParser:
                 html,
                 tags=allowed_tags,
                 attributes=allowed_attributes,
+                protocols=['http', 'https', 'tg'],
                 css_sanitizer=css_sanitizer,
                 strip=True,
             )
