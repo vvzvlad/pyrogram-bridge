@@ -234,7 +234,7 @@ class PostParser:
                     break
 
         # Check if the message text contains "#реклама", "Партнерский пост" or "по промокоду" in a case-insensitive manner.
-        if re.search(r'(?i)(#реклама|партнерский\s+пост|по\s+промокоду)', message_text):
+        if re.search(r'(?i)(#реклама|партнерский\s+пост|по\s+промокоду|erid)', message_text):
             flags.append("advert")
 
         try:
