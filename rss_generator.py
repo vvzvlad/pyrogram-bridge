@@ -17,6 +17,9 @@ if not logger.handlers:
 
 
 async def _create_time_based_media_groups(messages, merge_seconds: int = 5):
+    """
+    Create media groups based on time difference between messages
+    """
     messages_sorted = sorted(messages, key=lambda x: x.date)
     cluster = []
     last_msg_date = None
@@ -94,6 +97,9 @@ async def _create_messages_groups(messages):
     return processing_groups
 
 async def _trim_messages_groups(messages_groups, limit):
+    """
+    Trim messages groups to limit
+    """
     if messages_groups: # Remove the oldest group (the one with the lowest message id based on the first message's date)
         messages_groups.pop()
     
@@ -337,7 +343,8 @@ async def generate_channel_html(channel: str,
 
         # Generate HTML content
         html_posts = [post['html'] for post in final_posts]
-        return '\n<hr class="post-divider">\n'.join(html_posts)
+        html = '\n<hr class="post-divider">\n'.join(html_posts)
+        return html
         
     except Exception as e:
         logger.error(f"html_generation_error: channel {channel}, error {str(e)}")
