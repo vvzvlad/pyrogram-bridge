@@ -1,16 +1,10 @@
 # Pyrogram Bridge
 
-## Create API ID/HASH
+## First start
 
-1)Login at https://my.telegram.org/apps  
-2)API development tools  
-3)Create new application  
-4)Copy App api_id and api_hash  
+1)Login at https://my.telegram.org/apps, API development tools - create new application, copy api_id and api_hash
 
-
-## Get session
-
-1) Сreate docker-compose.yml (or, recommended, create stack in portainer) with full configuration and mount the same data directory:
+1) Сreate docker-compose.yml (or, recommended, create stack in portainer):
 
 ```docker-compose
 volumes:
@@ -37,7 +31,7 @@ services:
       traefik.http.routers.pgbridge.tls: true
 ```
 
-2) Run docker-compose up -d or start stack in portainer
+2) Run ```docker-compose up -d``` or start stack in portainer
 
 3) Enter in container:
 
@@ -51,7 +45,7 @@ docker exec -it pyrogram-bridge /bin/bash
 python3 api_server.py
 ```
 
-5) Enter phone number, get code in telegram, enter code, and copy session string. The session file will be saved in your local ./data directory.
+5) Enter phone number, get code in telegram, enter code, and copy session string. 
 
 ```text
 Enter phone number or bot token: +7 993 850 5104
@@ -63,7 +57,7 @@ Password hint: None
 Enter password (empty to recover): Passport-Vegan-Scale6
 ```
 
-Session file will be saved in your data directory, in docker compose case — /var/lib/docker/volumes/pyrogram_bridge/_data/pyro_bridge.session. 
+Wait until show message "INFO:     Application startup complete.", then exit from container.
 
 6) Restart bridge container:
 
@@ -71,20 +65,17 @@ Session file will be saved in your data directory, in docker compose case — /v
 docker restart pyrogram-bridge
 ```
 
+Session file will be saved in your data directory, in docker compose case — /var/lib/docker/volumes/pyrogram_bridge/_data/pyro_bridge.session.  
 
+## ENV Settings 
 
-
-
-
-
-
-
-
-
-
+TG_API_ID - telegram api id
+TG_API_HASH - telegram api hash
+API_PORT - port to run http server
 PYROGRAM_BRIDGE_URL - url to rss bridge, used for generate absolute url to media
 TOKEN - optional, if set, will be used to check if user has access to rss feed. If token is set, rss url will be https://pgbridge.example.com/rss/DragorWW_space/1234567890
 Use this if you rss bridge access all world, otherwise your bridge can be used by many people and telegram will inevitably be sanctioned for botting.
+TIME_BASED_MERGE - optional, if set to true, will merge posts by time. Merge time is 5 seconds, use &merge_seconds=XX in rss url for tuning.
 
 ## Get channel rss feed (use it in your rss reader)
 
