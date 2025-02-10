@@ -6,37 +6,35 @@ from config import get_settings
 
 Config = get_settings()
 
-SECRET_FILE = "data/media_digest.key"
-_signing_key = None
+class KeyManager:
+    SECRET_FILE = "data/media_digest.key"
+    signing_key = None
 
-def get_or_create_signing_key() -> str:
-    """
-    Get existing signing key from memory, secret file or generate a new one
-    """
-    global _signing_key
-    
-    if _signing_key is not None:
-        return _signing_key
+    @classmethod
+    def get_or_create_signing_key(cls) -> str:
+        """
+        Get existing signing key from memory, secret file or generate a new one
+        """
+        if cls.signing_key is not None:
+            return cls.signing_key
         
-    if os.path.exists(SECRET_FILE):
-        with open(SECRET_FILE, 'r', encoding='utf-8') as f:
-            _signing_key = f.read().strip()
-            return _signing_key
-    
-    # Generate new key if file doesn't exist
-    _signing_key = secrets.token_hex(32)
-    
-    # Save to file
-    with open(SECRET_FILE, 'w', encoding='utf-8') as f:
-        f.write(_signing_key)
+        if os.path.exists(cls.SECRET_FILE):
+            with open(cls.SECRET_FILE, 'r', encoding='utf-8') as f:
+                cls.signing_key = f.read().strip()
+                return cls.signing_key
         
-    return _signing_key
+        cls.signing_key = secrets.token_hex(32)         # Generate new key if file doesn't exist
+        
+        with open(cls.SECRET_FILE, 'w', encoding='utf-8') as f:
+            f.write(cls.signing_key)         # Save to file
+        
+        return cls.signing_key
 
 def generate_media_digest(url: str) -> str:
     """
     Generate short HMAC digest (first 8 chars) for media URL using SHA1
     """
-    signing_key = get_or_create_signing_key()
+    signing_key = KeyManager.get_or_create_signing_key()
     message = url.encode('utf-8')
     key = signing_key.encode('utf-8')
     
