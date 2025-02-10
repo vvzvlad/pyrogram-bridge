@@ -69,19 +69,21 @@ Session file will be saved in your data directory, in docker compose case — /v
 
 ## ENV Settings 
 
-TG_API_ID - telegram api id
-TG_API_HASH - telegram api hash
-API_PORT - port to run http server
-PYROGRAM_BRIDGE_URL - url to rss bridge, used for generate absolute url to media
-TOKEN - optional, if set, will be used to check if user has access to rss feed. If token is set, rss url will be https://pgbridge.example.com/rss/DragorWW_space/1234567890
-Use this if you rss bridge access all world, otherwise your bridge can be used by many people and telegram will inevitably be sanctioned for botting.
-TIME_BASED_MERGE - optional, if set to true, will merge posts by time. Merge time is 5 seconds, use &merge_seconds=XX in rss url for tuning.
+TG_API_ID - telegram api id  
+TG_API_HASH - telegram api hash  
+API_PORT - port to run http server  
+PYROGRAM_BRIDGE_URL - url to rss bridge, used for generate absolute url to media  
+TOKEN - optional, if set, will be used to check if user has access to rss feed. If token is set, rss url will be https://pgbridge.example.com/rss/DragorWW_space/1234567890  
+Use this if you rss bridge access all world, otherwise your bridge can be used by many people and telegram will inevitably be sanctioned for botting.  
+TIME_BASED_MERGE - optional, if set to true, will merge posts by time. Merge time is 5 seconds, use &merge_seconds=XX in rss url for tuning.  
 
 ## Get channel rss feed (use it in your rss reader)
 
-``` curl https://pgbridge.example.com/rss/DragorWW_space ``` 
-``` curl https://pgbridge.example.com/rss/DragorWW_space/1234567890 ``` with auth token (if env token is set)
-``` curl https://pgbridge.example.com/rss/DragorWW_space?limit=30 ``` with limit parameter (also, can be used with token)
+``` curl https://pgbridge.example.com/rss/DragorWW_space ```  
+``` curl https://pgbridge.example.com/rss/DragorWW_space/1234567890 ``` with auth token (if env token is set)  
+``` curl https://pgbridge.example.com/rss/DragorWW_space?limit=30 ``` with limit parameter (also, can be used with token)  
+``` curl https://pgbridge.example.com/rss/DragorWW_space?merge_seconds=10 ``` with merge_seconds parameter  
+``` curl https://pgbridge.example.com/rss/DragorWW_space?exclude_flags=video,stream,donat,clown ``` with exclude_flags parameter  
 
 Warning: TG API has rate limit, and bridge will wait time before http response, if catch FloodWait exception. Increase http timeout in your client prevention timeout error. Examply, in miniflux: ENV HTTP_CLIENT_TIMEOUT=200  
 
@@ -92,13 +94,8 @@ For known id channel, you can use bot @userinfobot: forward message from channel
 Or, use my https://github.com/vvzvlad/miniflux-tg-add-bot to add channel to miniflux: after forward message from channel to bot, subscribition automatically added to miniflux.
 
 "Limit" parameter can work somewhat unintuitively: this will be noticeable on groups that post multiple sets of pictures.  
-The thing is that in Telegram each picture is a separate message and they are grouped later, on the client. The maximum number of pictures in one message is 10, so in order to guarantee 10 posts with 10 pictures with a limit of 10 posts, we would need to request 10*10=100 messages each time.  
-This creates an unnecessary load, so we do something else: we request limit*2 and delete the last group of media files for fear that it might be incomplete (because to find out for sure, we have to go further down the history and find the next group). So don't expect the limit parameter to give you exactly as many posts as it specifies, they may be a) much less b)the number of posts may not change when the limit is changed, because incomplete groups at the end of the feed are deleted automatically
-
-## Get channel messages
-
-``` curl https://pgbridge.example.com/html/DragorWW_space/87 ```
-``` curl https://pgbridge.example.com/json/DragorWW_space/87 ```
+The thing is that in Telegram each picture is a separate message and they are grouped later, on the client. The maximum number of pictures in one message is 10, so in order to guarantee 10 posts with 10 pictures with a limit of 10 posts, we would need to request 10х10=100 messages each time.  
+This creates an unnecessary load, so we do something else: we request limit х2 and delete the last group of media files for fear that it might be incomplete (because to find out for sure, we have to go further down the history and find the next group). So don't expect the limit parameter to give you exactly as many posts as it specifies, they may be a) much less b)the number of posts may not change when the limit is changed, because incomplete groups at the end of the feed are deleted automatically
 
 ## Exclude flags
 
