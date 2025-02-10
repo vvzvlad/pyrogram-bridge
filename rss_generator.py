@@ -83,7 +83,7 @@ async def _create_messages_groups(messages):
                 processing_groups.append([message]) # Single message becomes its own processing group
                 
         except Exception as e:
-            logger.error(f"message_processing_error: channel {message.chat.username}, message_id {message.id}, error {str(e)}")
+            logger.error(f"_create_messages_groups: channel {message.chat.username}, message_id {message.id}, error {str(e)}")
             continue
     
     # Sort messages within media groups by message ID in descending order
@@ -284,7 +284,7 @@ async def generate_channel_rss(channel: str,
         return rss_feed
         
     except Exception as e:
-        logger.error(f"rss_generation_error: channel {channel}, error {str(e)}")
+        logger.error(f"generate_channel_rss: channel {channel}, error {str(e)}")
         raise
 
 
@@ -307,8 +307,8 @@ async def generate_channel_html(channel: str,
     """
     if limit < 1:
         raise ValueError(f"limit must be positive, got {limit}")
-    if limit > 100:
-        raise ValueError(f"limit cannot exceed 100, got {limit}")
+    if limit > 200:
+        raise ValueError(f"limit cannot exceed 200, got {limit}")
 
     try:
         if post_parser is None:
