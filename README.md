@@ -10,28 +10,7 @@
 
 ## Get session
 
-1)```python3 -m venv .venv && source .venv/bin/activate```
-2)```pip install pyrogram```
-3)Run ```TG_API_ID=290389758 TG_API_HASH=c22987sdfnkjjhd37efa5f0 python3 session_generator.py```  
-4)Enter phone number, get code in telegram, enter code, and copy session string:  
-
-```text
-Enter phone number or bot token: +7 993 850 5104
-Is "+7 993 850 5104" correct? (y/N): y
-The confirmation code has been sent via Telegram app
-Enter confirmation code: 69267
-The two-step verification is enabled and a password is required
-Password hint: None
-Enter password (empty to recover): Passport-Vegan-Scale6
-
-Your session string:
-========================================
-AgG7QBoANg0YVmwZTZmqadO4MJQdnaRRnXwSYpbbkGf49aATvTZj-yKcvdH8IsIDbwp00PbWFcbSjzoPsmiUK8BF80yVmML7iEQptBZrRTLsnoxmeglD-I1dqcAB2ufkxQDM_40y5KAHiFvzAzXhVngQo8W7u3ZPQXb_DTcfogXXePPBQAyV20cuwGrsArv-R39ssSWnFueGnB21Y_cTXTQAAAAFPEaL8AA
-========================================
-Use session on ENV variable TG_SESSION_STRING in docker-compose.yml
-```
-
-6)Set session ENV variable in docker-compose.yml file:
+1) Сreate docker-compose.yml (or, recommended, create stack in portainer) with full configuration and mount the same data directory:
 
 ```docker-compose
 volumes:
@@ -44,7 +23,6 @@ services:
     environment:
       TG_API_ID: 290389758
       TG_API_HASH: c22987sdfnkjjhd37efa5f0
-      TG_SESSION_STRING: "AgG7QBoANg0YVmwZTZmqadO4MJQdn............FPEaL8AA"
       PYROGRAM_BRIDGE_URL: https://pgbridge.example.com
       API_PORT: 80
       TOKEN: "1234567890"
@@ -58,6 +36,51 @@ services:
       traefik.http.routers.pgbridge.entrypoints: websecure
       traefik.http.routers.pgbridge.tls: true
 ```
+
+2) Run docker-compose up -d or start stack in portainer
+
+3) Enter in container:
+
+```bash
+docker exec -it pyrogram-bridge /bin/bash
+```
+
+4) Run bridge in interactive mode:
+
+```bash
+python3 api_server.py
+```
+
+5) Enter phone number, get code in telegram, enter code, and copy session string. The session file will be saved in your local ./data directory.
+
+```text
+Enter phone number or bot token: +7 993 850 5104
+Is "+7 993 850 5104" correct? (y/N): y
+The confirmation code has been sent via Telegram app
+Enter confirmation code: 69267
+The two-step verification is enabled and a password is required
+Password hint: None
+Enter password (empty to recover): Passport-Vegan-Scale6
+```
+
+Session file will be saved in your data directory, in docker compose case — /var/lib/docker/volumes/pyrogram_bridge/_data/pyro_bridge.session. 
+
+6) Restart bridge container:
+
+```bash
+docker restart pyrogram-bridge
+```
+
+
+
+
+
+
+
+
+
+
+
 
 PYROGRAM_BRIDGE_URL - url to rss bridge, used for generate absolute url to media
 TOKEN - optional, if set, will be used to check if user has access to rss feed. If token is set, rss url will be https://pgbridge.example.com/rss/DragorWW_space/1234567890
@@ -91,6 +114,7 @@ This creates an unnecessary load, so we do something else: we request limit*2 an
 Exclusion flags are a way to filter channel content based on pre-defined (by me) criteria. It's not a universal regexp-based filtering engine, for example, but it does 99% of my tasks of filtering the content of some toxic tg channels (mostly with fresh memes).  
 
 There are several flags:  
+
 - video - presence of video and small text in the post  
 - stream - words like "стрим", "livestream"  
 - donat - word "донат" and its variations  

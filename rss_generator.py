@@ -16,7 +16,7 @@ if not logger.handlers:
     logger.addHandler(handler)
 
 
-async def create_time_based_media_groups(messages, merge_seconds: int = 5):
+async def _create_time_based_media_groups(messages, merge_seconds: int = 5):
     messages_sorted = sorted(messages, key=lambda x: x.date)
     cluster = []
     last_msg_date = None
@@ -59,7 +59,7 @@ async def create_time_based_media_groups(messages, merge_seconds: int = 5):
 
     return messages
 
-async def create_messages_groups(messages):
+async def _create_messages_groups(messages):
     """
     Process messages into formatted posts, handling media groups
     """
@@ -70,16 +70,14 @@ async def create_messages_groups(messages):
     for message in messages:
         try:
             # Skip service messages about pinned posts
-            if message.service and 'PINNED_MESSAGE' in str(message.service):
-                continue
+            if message.service and 'PINNED_MESSAGE' in str(message.service): continue
                 
             if message.media_group_id:
                 if message.media_group_id not in media_groups:
                     media_groups[message.media_group_id] = []
                 media_groups[message.media_group_id].append(message)
             else:
-                # Single message becomes its own processing group
-                processing_groups.append([message])
+                processing_groups.append([message]) # Single message becomes its own processing group
                 
         except Exception as e:
             logger.error(f"message_processing_error: channel {message.chat.username}, message_id {message.id}, error {str(e)}")
@@ -91,25 +89,20 @@ async def create_messages_groups(messages):
         processing_groups.append(media_group)
     
     # Sort processing groups by date of first message in each group
-    processing_groups.sort(
-        key=lambda group: group[0].date,
-        reverse=True
-    )
+    processing_groups.sort( key=lambda group: group[0].date, reverse=True )
     
     return processing_groups
 
-async def trim_messages_groups(messages_groups, limit):
-    # Remove the oldest group (the one with the lowest message id based on the first message's date)
-    if messages_groups:
-        _removed_group = messages_groups.pop()
+async def _trim_messages_groups(messages_groups, limit):
+    if messages_groups: # Remove the oldest group (the one with the lowest message id based on the first message's date)
+        messages_groups.pop()
     
-    # Trim groups if they exceed the specified limit
-    if len(messages_groups) > limit:
+    if len(messages_groups) > limit: # Trim groups if they exceed the specified limit
         messages_groups = messages_groups[:limit]
     
     return messages_groups
 
-async def render_messages_groups(messages_groups, post_parser, exclude_flags: str | None = None):
+async def _render_messages_groups(messages_groups, post_parser, exclude_flags: str | None = None):
     """
     Render message groups into HTML format
     Args:
@@ -256,10 +249,10 @@ async def generate_channel_rss(channel: str,
             
         # Process messages into groups and render them
         if Config['time_based_merge']:
-            messages = await create_time_based_media_groups(messages, merge_seconds)
-        message_groups = await create_messages_groups(messages)
-        message_groups = await trim_messages_groups(message_groups, limit)
-        final_posts = await render_messages_groups(message_groups, post_parser, exclude_flags)
+            messages = await _create_time_based_media_groups(messages, merge_seconds)
+        message_groups = await _create_messages_groups(messages)
+        message_groups = await _trim_messages_groups(message_groups, limit)
+        final_posts = await _render_messages_groups(message_groups, post_parser, exclude_flags)
         
         # Generate feed entries
         for post in final_posts:
@@ -337,10 +330,10 @@ async def generate_channel_html(channel: str,
             
         # Process messages into groups and render them
         if Config['time_based_merge']:
-            messages = await create_time_based_media_groups(messages, merge_seconds)
-        message_groups = await create_messages_groups(messages)
-        message_groups = await trim_messages_groups(message_groups, limit)
-        final_posts = await render_messages_groups(message_groups, post_parser, exclude_flags)
+            messages = await _create_time_based_media_groups(messages, merge_seconds)
+        message_groups = await _create_messages_groups(messages)
+        message_groups = await _trim_messages_groups(message_groups, limit)
+        final_posts = await _render_messages_groups(message_groups, post_parser, exclude_flags)
 
         # Generate HTML content
         html_posts = [post['html'] for post in final_posts]
