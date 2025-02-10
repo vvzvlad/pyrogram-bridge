@@ -10,7 +10,7 @@ import random
 
 import magic
 from pyrogram import errors
-from starlette.background import BackgroundTask  # imported for background file deletion
+from starlette.background import BackgroundTask
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.responses import HTMLResponse, FileResponse
 from telegram_client import TelegramClient
@@ -32,9 +32,8 @@ Config = get_settings()
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    # Create cache directory
     base_cache_dir = os.path.abspath("./data/cache")
-    os.makedirs(base_cache_dir, exist_ok=True)
+    os.makedirs(base_cache_dir, exist_ok=True) # Create cache directory
     
     await client.start()
     background_task = asyncio.create_task(cache_media_files()) # Start background task
@@ -48,26 +47,25 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI( title="Pyrogram Bridge", lifespan=lifespan)
 
-def mask_sensitive_value(value: str) -> str:
+def mask_sensitive_value(input_str: str) -> str:
     """Mask middle part of sensitive value, showing only first and last 4 characters"""
-    if not value or len(value) < 8:
+    if not input_str or len(input_str) < 8:
         return '***'
     visible_chars = 4
-    return f"{value[:visible_chars]}{'*' * (len(value) - visible_chars * 2)}{value[-visible_chars:]}"
+    return f"{input_str[:visible_chars]}{'*' * (len(input_str) - visible_chars * 2)}{input_str[-visible_chars:]}"
+
 
 if __name__ == "__main__":
     import uvicorn
     
     logger.info("Starting server with configuration:")
     for key, value in Config.items():
-        if any(sensitive in key.lower() for sensitive in ['token', 'api_id', 'api_hash', 'session']):
-            masked_value = mask_sensitive_value(str(value)) if value else None
-            logger.info(f"    {key}: {masked_value}")
+        if any(sensitive in key.lower() for sensitive in ['token', 'tg_api_id', 'tg_api_hash']):
+            logger.info(f"    {key}: {mask_sensitive_value(str(value))}")
         else:
             logger.info(f"    {key}: {value}")
             
     uvicorn.run("api_server:app", host=Config["api_host"], port=Config["api_port"], reload=True)
-
 
 async def find_file_id_in_message(message, file_unique_id: str):
     """Find file_id by checking all possible media types in message"""
@@ -111,12 +109,10 @@ def delayed_delete_file(file_path: str, delay: int = 300):
 
 async def prepare_file_response(file_path: str, delete_after: bool = False):
     """Prepare file response with proper headers"""
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="File not found")
+    if not os.path.exists(file_path): raise HTTPException(status_code=404, detail="File not found")
     
-    # Try to determine MIME type using python-magic first
     try:
-        mime = magic.Magic(mime=True)
+        mime = magic.Magic(mime=True) # Try to determine MIME type using python-magic first
         media_type = mime.from_file(file_path)
     except Exception as e:
         logger.warning(f"Failed to determine MIME type using python-magic: {str(e)}")
@@ -491,12 +487,12 @@ async def health_check(token: str | None = None):
 
         cache_stats = calculate_cache_stats()
         
-        config_info = {}
-        for key, value in Config.items():
-            if any(sensitive in key.lower() for sensitive in ['token', 'api_id', 'api_hash', 'session']):
-                config_info[key] = mask_sensitive_value(str(value)) if value else None
+        config_info = {}    
+        for config_key, config_value in Config.items():
+            if any(sensitive in config_key.lower() for sensitive in ['token', 'tg_api_id', 'tg_api_hash']):
+                config_info[config_key] = mask_sensitive_value(str(config_value)) if config_value else None
             else:
-                config_info[key] = value
+                config_info[config_key] = config_value
 
         return {
             "status": "ok",
