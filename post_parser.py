@@ -214,6 +214,10 @@ class PostParser:
         # (e.g., "стрим", "стримы", etc.) or "livestream" in a case-insensitive manner.
         if re.search(r'(?i)\b(стрим\w*|livestream)\b', message_text):
             flags.append("stream")
+        
+        # Check if the message text contains variations of the word "вебинар" in a case-insensitive manner.
+        if re.search(r'(?i)\bвебинар\w*\b', message_text):
+            flags.append("vebinar")
 
         # Check if the message text contains the word "донат" in a case-insensitive manner.
         if re.search(r'(?i)\bдонат\w*\b', message_text):
@@ -234,7 +238,7 @@ class PostParser:
                     break
 
         # Check if the message text contains "#реклама", "Партнерский пост" or "по промокоду" in a case-insensitive manner.
-        if re.search(r'(?i)(#реклама|партнерский\s+пост|по\s+промокоду|erid)', message_text):
+        if re.search(r'(?i)(#реклама|#промо|О\s+рекламодателе|партнерский\s+пост|по\s+промокоду|erid)', message_text):
             flags.append("advert")
 
         try:
