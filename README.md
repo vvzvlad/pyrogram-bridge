@@ -112,6 +112,9 @@ There are several flags:
 - fwd - forwarded messages from channels, users or hidden users  
 - hid_channel - links to closed tg channels (https://t.me/+S0OfKyMDRi)  
 - foreign_channel - links to open channels (https://t.me/superchannel) that do not equal the name of the current channel
+- link - presence of any http/https links in the post
+- mention - presence of @username mentions in the post
+- vebinar - words like "вебинар" and its variations
 
 You can use exclude_flags parameter in rss/html/json urls to exclude posts with certain flags. For example, to exclude all posts with the flags "video", "stream", "donat", "clown", you can use:
 
