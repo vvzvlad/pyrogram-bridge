@@ -84,6 +84,8 @@ TIME_BASED_MERGE - optional, if set to true, will merge posts by time. Merge tim
 ``` curl https://pgbridge.example.com/rss/DragorWW_space?limit=30 ``` with limit parameter (also, can be used with token)  
 ``` curl https://pgbridge.example.com/rss/DragorWW_space?merge_seconds=10 ``` with merge_seconds parameter  
 ``` curl https://pgbridge.example.com/rss/DragorWW_space?exclude_flags=video,stream,donat,clown ``` with exclude_flags parameter  
+``` curl https://pgbridge.example.com/rss/DragorWW_space?exclude_text=реклама,акция ``` with exclude_text parameter  
+``` curl https://pgbridge.example.com/rss/DragorWW_space?exclude_text="специальное предложение",акция ``` with exclude_text parameter containing phrases with spaces  
 
 Warning: TG API has rate limit, and bridge will wait time before http response, if catch FloodWait exception. Increase http timeout in your client prevention timeout error. Examply, in miniflux: ENV HTTP_CLIENT_TIMEOUT=200  
 
@@ -123,4 +125,16 @@ You can use exclude_flags parameter in rss/html/json urls to exclude posts with 
 Or use meta-flag "all" to exclude all flags in posts:
 
 ``` curl https://pgbridge.example.com/rss/DragorWW_space?exclude_flags=all ```
+
+## Exclude text
+
+You can filter out posts containing specific words or phrases using the `exclude_text` parameter. This allows for more flexible content filtering beyond the predefined flags.
+
+For simple words without spaces:
+``` curl https://pgbridge.example.com/rss/DragorWW_space?exclude_text=реклама,промо,акция ```
+
+For phrases containing spaces, use quotes:
+``` curl https://pgbridge.example.com/rss/DragorWW_space?exclude_text="специальное предложение","только сегодня",акция ```
+
+The filtering is case-insensitive and will exclude any post containing any of the specified words or phrases.
 
