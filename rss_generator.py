@@ -108,12 +108,14 @@ async def _trim_messages_groups(messages_groups, limit):
     
     return messages_groups
 
-async def _render_messages_groups(messages_groups, post_parser, exclude_flags: str | None = None):
+async def _render_messages_groups(messages_groups, post_parser, exclude_flags: str | None = None, exclude_text: str | None = None):
     """
     Render message groups into HTML format
     Args:
         messages_groups: List of message groups (each group is a list of messages)
         post_parser: PostParser instance
+        exclude_flags: Comma-separated list of flags to exclude
+        exclude_text: Text to exclude from posts (comma-separated phrases)
     Returns:
         List of rendered posts
     """
@@ -178,6 +180,7 @@ async def _render_messages_groups(messages_groups, post_parser, exclude_flags: s
             logger.error(f"message_group_rendering_error: error {str(e)}")
             continue
 
+    # Filter posts by exclude_flags
     if exclude_flags:
         # Split comma-separated exclude_flags into a list.
         exclude_flag_list = [flag.strip() for flag in exclude_flags.split(',')]
@@ -192,6 +195,46 @@ async def _render_messages_groups(messages_groups, post_parser, exclude_flags: s
             filtered_posts.append(post)
         rendered_posts = filtered_posts
     
+    # Filter posts by exclude_text
+    if exclude_text:
+        # Split by comma, but preserve commas inside quotes
+        exclude_text_list = []
+        current_phrase = ""
+        in_quotes = False
+        
+        for char in exclude_text:
+            if char == '"' and (not current_phrase.endswith('\\') or current_phrase.endswith('\\\\')):
+                in_quotes = not in_quotes
+                current_phrase += char
+            elif char == ',' and not in_quotes:
+                if current_phrase:
+                    # Remove surrounding quotes if present
+                    if current_phrase.startswith('"') and current_phrase.endswith('"'):
+                        current_phrase = current_phrase[1:-1]
+                    exclude_text_list.append(current_phrase.strip().lower())
+                    current_phrase = ""
+            else:
+                current_phrase += char
+        
+        # Add the last phrase if any
+        if current_phrase:
+            if current_phrase.startswith('"') and current_phrase.endswith('"'):
+                current_phrase = current_phrase[1:-1]
+            exclude_text_list.append(current_phrase.strip().lower())
+        
+        logger.debug(f"Parsed exclude_text into phrases: {exclude_text_list}")
+        
+        filtered_posts = []
+        for post in rendered_posts:
+            post_text = post['text'].lower()
+            # Check if any of the exclude_text items is in the post text (case-insensitive)
+            if not any(text in post_text for text in exclude_text_list):
+                filtered_posts.append(post)
+            else:
+                matching_phrases = [text for text in exclude_text_list if text in post_text]
+                logger.debug(f"Excluded post {post['message_id']} containing phrases: {matching_phrases}")
+        rendered_posts = filtered_posts
+    
     # Sort by date
     rendered_posts.sort(key=lambda x: x['date'], reverse=True)
     return rendered_posts
@@ -201,6 +244,7 @@ async def generate_channel_rss(channel: str,
                                 client = None, 
                                 limit: int = 20, 
                                 exclude_flags: str | None = None,
+                                exclude_text: str | None = None,
                                 merge_seconds: int = 5
                                 ) -> str:
     """
@@ -211,6 +255,7 @@ async def generate_channel_rss(channel: str,
         client: Telegram client instance
         limit: Maximum number of posts to include in the RSS feed
         exclude_flags: Flags to exclude from the RSS feed
+        exclude_text: Text to exclude from posts
     Returns:
         RSS feed as string in XML format
     """
@@ -258,7 +303,7 @@ async def generate_channel_rss(channel: str,
             messages = await _create_time_based_media_groups(messages, merge_seconds)
         message_groups = await _create_messages_groups(messages)
         message_groups = await _trim_messages_groups(message_groups, limit)
-        final_posts = await _render_messages_groups(message_groups, post_parser, exclude_flags)
+        final_posts = await _render_messages_groups(message_groups, post_parser, exclude_flags, exclude_text)
         
         # Generate feed entries
         for post in final_posts:
@@ -293,6 +338,7 @@ async def generate_channel_html(channel: str,
                                 client = None, 
                                 limit: int = 20, 
                                 exclude_flags: str | None = None,
+                                exclude_text: str | None = None,
                                 merge_seconds: int = 5
                                 ) -> str:
     """
@@ -302,6 +348,8 @@ async def generate_channel_html(channel: str,
         post_parser: Optional PostParser instance. If not provided, will create new one
         client: Telegram client instance
         limit: Maximum number of posts to include in the RSS feed
+        exclude_flags: Flags to exclude from the RSS feed
+        exclude_text: Text to exclude from posts
     Returns:
         HTML feed as string
     """
@@ -339,7 +387,7 @@ async def generate_channel_html(channel: str,
             messages = await _create_time_based_media_groups(messages, merge_seconds)
         message_groups = await _create_messages_groups(messages)
         message_groups = await _trim_messages_groups(message_groups, limit)
-        final_posts = await _render_messages_groups(message_groups, post_parser, exclude_flags)
+        final_posts = await _render_messages_groups(message_groups, post_parser, exclude_flags, exclude_text)
 
         # Generate HTML content
         html_posts = [post['html'] for post in final_posts]

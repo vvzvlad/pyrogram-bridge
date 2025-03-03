@@ -545,14 +545,15 @@ async def get_rss_feed(channel: str,
                         limit: int = 50, 
                         output_type: str = 'rss', 
                         exclude_flags: str | None = None,
+                        exclude_text: str | None = None,
                         merge_seconds: int = 5
                         ):
     if Config["token"]:
         if token != Config["token"]:
-            logger.error(f"Invalid token for RSS feed: {token}, expected: {Config['token']}")
+            logger.error(f"invalid_token_error: token {token}, expected {Config['token']}")
             raise HTTPException(status_code=403, detail="Invalid token")
         else:
-            logger.info(f"Valid token for RSS feed: {token}")
+            logger.info(f"valid_token: token {token}")
     while True:
         try:
             if output_type == 'rss':
@@ -560,6 +561,7 @@ async def get_rss_feed(channel: str,
                                                         client=client.client, 
                                                         limit=limit, 
                                                         exclude_flags=exclude_flags,
+                                                        exclude_text=exclude_text,
                                                         merge_seconds=merge_seconds)
                 return Response(content=rss_content, media_type="application/xml")
             elif output_type == 'html':
@@ -567,10 +569,11 @@ async def get_rss_feed(channel: str,
                                                         client=client.client, 
                                                         limit=limit, 
                                                         exclude_flags=exclude_flags,
+                                                        exclude_text=exclude_text,
                                                         merge_seconds=merge_seconds)
                 return Response(content=rss_content, media_type="text/html")
         except ValueError as e:
-            error_message = f"Invalid parameters for RSS feed generation: {str(e)}"
+            error_message = f"invalid_parameters_error: {str(e)}"
             logger.error(error_message)
             raise HTTPException(status_code=400, detail=error_message) from e
         except errors.FloodWait as e:
@@ -579,11 +582,11 @@ async def get_rss_feed(channel: str,
             total_wait_time = wait_time + random_additional_wait
             if total_wait_time > 190: total_wait_time = 190
 
-            logger.warning(f"TG FloodWait for channel {channel}, waiting {total_wait_time:.1f} seconds (base: {wait_time}s, random: {random_additional_wait:.1f}s)")
+            logger.warning(f"flood_wait_error: channel {channel}, waiting {total_wait_time:.1f} seconds (base: {wait_time}s, random: {random_additional_wait:.1f}s)")
             await asyncio.sleep(total_wait_time)
-            logger.info(f"TG FloodWait finished for channel {channel}, retrying RSS feed generation")
+            logger.info(f"flood_wait_retry: channel {channel}")
             continue
         except Exception as e:
-            error_message = f"Failed to generate RSS feed for channel {channel}: {str(e)}"
+            error_message = f"rss_generation_error: channel {channel}, error {str(e)}"
             logger.error(error_message)
             raise HTTPException(status_code=500, detail=error_message) from e 
