@@ -245,6 +245,10 @@ class PostParser:
         if re.search(r'https?://[^\s<>"\']+', message_text) or re.search(r'href=["\']https?://[^"\']+["\']', message_text):
             flags.append("link")
 
+        # Check if the message contains channel mentions in the format @name
+        if re.search(r'@[a-zA-Z][a-zA-Z0-9_]{3,}', message_text):
+            flags.append("mention")
+
         try:
             # Find links with a '+' after t.me/ indicating a hidden channel link.
             hidden_links = re.findall(r'https?://(?:www\.)?t\.me/\+([A-Za-z0-9]+)', message_text)
