@@ -241,6 +241,10 @@ class PostParser:
         if re.search(r'(?i)(#реклама|#промо|О\s+рекламодателе|партнерский\s+пост|по\s+промокоду|erid)', message_text):
             flags.append("advert")
 
+        # Check if the message contains any http/https links in text or href attributes
+        if re.search(r'https?://[^\s<>"\']+', message_text) or re.search(r'href=["\']https?://[^"\']+["\']', message_text):
+            flags.append("link")
+
         try:
             # Find links with a '+' after t.me/ indicating a hidden channel link.
             hidden_links = re.findall(r'https?://(?:www\.)?t\.me/\+([A-Za-z0-9]+)', message_text)
