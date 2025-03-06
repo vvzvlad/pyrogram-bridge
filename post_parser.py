@@ -388,13 +388,13 @@ class PostParser:
                 logger.debug(f"Collected media file: {channel_username}/{message.id}/{file_unique_id}")
                 content_media.append(f'<div class="message-media">')
                 if message.media in [MessageMediaType.PHOTO, MessageMediaType.DOCUMENT]:
-                    content_media.append(f'<img src="{url}" style="max-width:400px; max-height:400px; object-fit:contain;">')
+                    content_media.append(f'<img src="{url}" style="max-width:100%; width:auto; height:auto; max-height:400px; object-fit:contain;">')
                 elif message.media == MessageMediaType.VIDEO:
-                    content_media.append(f'<video controls src="{url}" style="max-width:400px; max-height:400px;"></video>')
+                    content_media.append(f'<video controls src="{url}" style="max-width:100%; width:auto; height:auto; max-height:400px;"></video>')
                 elif message.media == MessageMediaType.ANIMATION:
-                    content_media.append(f'<video controls src="{url}" style="max-width:400px; max-height:400px;"></video>')
+                    content_media.append(f'<video controls src="{url}" style="max-width:100%; width:auto; height:auto; max-height:400px;"></video>')
                 elif message.media == MessageMediaType.VIDEO_NOTE:
-                    content_media.append(f'<video controls src="{url}" style="max-width:400px; max-height:400px;"></video>')
+                    content_media.append(f'<video controls src="{url}" style="max-width:100%; width:auto; height:auto; max-height:400px;"></video>')
                 elif message.media == MessageMediaType.AUDIO:
                     mime_type = getattr(message.audio, 'mime_type', 'audio/mpeg')
                     content_media.append(f'<audio controls style="width:100%; max-width:400px;"><source src="{url}" type="{mime_type}"></audio>')
@@ -403,7 +403,7 @@ class PostParser:
                     content_media.append(f'<audio controls style="width:100%; max-width:400px;"><source src="{url}" type="{mime_type}"></audio>')
                 elif message.media == MessageMediaType.STICKER:
                     emoji = getattr(message.sticker, 'emoji', '')
-                    content_media.append(f'<img src="{url}" alt="Sticker {emoji}" style="max-width:200px; max-height:200px; object-fit:contain;">')
+                    content_media.append(f'<img src="{url}" alt="Sticker {emoji}" style="max-width:100%; width:auto; height:auto; max-height:200px; object-fit:contain;">')
                 content_media.append('</div>')
         
         if webpage := getattr(message, "web_page", None): # Web page preview
@@ -427,7 +427,7 @@ class PostParser:
                     return (
                         f'<div style="margin:5px;">'
                         f'<a href="{webpage.url}" target="_blank">'
-                        f'<img src="{url}" style="max-width:600px; max-height:600px; object-fit:contain;"></a>'
+                        f'<img src="{url}" style="max-width:100%; width:auto; height:auto; max-height:600px; object-fit:contain;"></a>'
                         f'</div>'
                     )
             return None
@@ -517,7 +517,7 @@ class PostParser:
                 parts.append('&nbsp;&nbsp;&nbsp;&nbsp;'.join(second_line_parts))
 
             html = '<br>'.join(parts) if parts else None
-            return f"<br>{html}" if html else None
+            return f"<br><br>{html}" if html else None
             
         except Exception as e:
             logger.error(f"reactions_views_parsing_error: {str(e)}")
