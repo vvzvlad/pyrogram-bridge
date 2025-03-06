@@ -210,15 +210,11 @@ class PostParser:
         if message.media == MessageMediaType.VIDEO and len(message_text.strip()) <= 100:
             flags.append("video")
 
-        # Check if the message text contains variations of the word "стрим"
-        # (e.g., "стрим", "стримы", etc.) or "livestream" in a case-insensitive manner.
-        if re.search(r'(?i)\b(стрим\w*|livestream)\b', message_text):
+        # Check if the message text contains variations of the word "стрим", "вебинар" 
+        # or "онлайн-лекция" in a case-insensitive manner.
+        if re.search(r'(?i)\b(стрим\w*|livestream|онлайн-лекци[яю]|вебинар\w*)\b', message_text):
             flags.append("stream")
         
-        # Check if the message text contains variations of the word "вебинар" in a case-insensitive manner.
-        if re.search(r'(?i)\bвебинар\w*\b', message_text):
-            flags.append("vebinar")
-
         # Check if the message text contains the word "донат" in a case-insensitive manner.
         if re.search(r'(?i)\bдонат\w*\b', message_text):
             flags.append("donat")
@@ -237,8 +233,8 @@ class PostParser:
                     flags.append("poo")
                     break
 
-        # Check if the message text contains "#реклама", "Партнерский пост" or "по промокоду" in a case-insensitive manner.
-        if re.search(r'(?i)(#реклама|#промо|О\s+рекламодателе|партнерский\s+пост|по\s+промокоду|erid)', message_text):
+        # Check if the message text contains "#реклама", "Партнерский пост", "по промокоду", "скидка на курс", "регистрируйтесь тут" in a case-insensitive manner.
+        if re.search(r'(?i)(#реклама|#промо|О\s+рекламодателе|партнерский\s+пост|по\s+промокоду|erid|скидка\s+на\s+курс|регистрируйтесь\s+тут)', message_text):
             flags.append("advert")
 
         # Check if the message contains any http/https links in text or href attributes
