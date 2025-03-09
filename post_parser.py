@@ -209,6 +209,10 @@ class PostParser:
         # Add flag "video" if the message media is VIDEO and the body text is up to 100 characters.
         if message.media == MessageMediaType.VIDEO and len(message_text.strip()) <= 100:
             flags.append("video")
+        
+        # Add flag for posts without images
+        if not message.media or message.media == MessageMediaType.POLL:
+            flags.append("no_image")
 
         # Check if the message text contains variations of the word "стрим", "вебинар" 
         # or "онлайн-лекция" in a case-insensitive manner.
