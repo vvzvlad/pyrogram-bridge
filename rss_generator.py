@@ -72,8 +72,10 @@ async def _create_messages_groups(messages):
     # First pass - collect messages and organize into processing groups
     for message in messages:
         try:
-            # Skip service messages about pinned posts
-            if message.service and 'PINNED_MESSAGE' in str(message.service): continue
+            # Skip service messages about pinned posts and new chat photos
+            if message.service:
+                if 'PINNED_MESSAGE' in str(message.service): continue
+                if 'NEW_CHAT_PHOTO' in str(message.service): continue
                 
             if message.media_group_id:
                 if message.media_group_id not in media_groups:
