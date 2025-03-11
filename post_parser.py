@@ -213,6 +213,10 @@ class PostParser:
         # Add flag for posts without images
         if not message.media or message.media == MessageMediaType.POLL:
             flags.append("no_image")
+        
+        # Add flag for sticker messages
+        if message.media == MessageMediaType.STICKER:
+            flags.append("sticker")
 
         # Check if the message text contains variations of the word "стрим", "вебинар" 
         # or "онлайн-лекция" in a case-insensitive manner.
