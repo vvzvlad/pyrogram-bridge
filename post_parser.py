@@ -137,6 +137,9 @@ class PostParser:
             elif message.media == MessageMediaType.VIDEO_NOTE:  return "📱 Video circle"
             elif message.media == MessageMediaType.STICKER:     return "🎯 Sticker"
             elif message.media == MessageMediaType.POLL:        return "📊 Poll"
+            elif message.media == MessageMediaType.DOCUMENT:    
+                if hasattr(message.document, 'mime_type') and message.document.mime_type == 'application/pdf': return "📄 Document"
+                else: return "📎 Document"
             elif message.web_page:                              return "🔗 Web link"
             return "📷 Media post"
 
@@ -420,7 +423,11 @@ class PostParser:
 
                 logger.debug(f"Collected media file: {channel_username}/{message.id}/{file_unique_id}")
                 content_media.append(f'<div class="message-media">')
-                if message.media in [MessageMediaType.PHOTO, MessageMediaType.DOCUMENT]:
+                
+                # Check if document is a PDF file
+                if message.media == MessageMediaType.DOCUMENT and hasattr(message.document, 'mime_type') and message.document.mime_type == 'application/pdf':
+                    content_media.append(f'<div class="document-pdf" style="padding: 10px;">[PDF-файл]</div>')
+                elif message.media in [MessageMediaType.PHOTO, MessageMediaType.DOCUMENT]:
                     content_media.append(f'<img src="{url}" style="max-width:100%; width:auto; height:auto; max-height:400px; object-fit:contain;">')
                 elif message.media == MessageMediaType.VIDEO:
                     content_media.append(f'<video controls src="{url}" style="max-width:100%; width:auto; height:auto; max-height:400px;"></video>')
