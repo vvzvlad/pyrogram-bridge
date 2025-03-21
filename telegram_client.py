@@ -1,5 +1,10 @@
 import logging
 import os
+import asyncio
+# Add uvloop for asyncio speedup
+import uvloop
+asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+
 from pyrogram import Client
 from config import get_settings
 

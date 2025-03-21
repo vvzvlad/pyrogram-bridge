@@ -1,12 +1,15 @@
 import logging
 import os
 import mimetypes
-import asyncio
+
 import json
 from datetime import datetime
 import time
 from contextlib import asynccontextmanager
 import random
+import asyncio
+import uvloop
+asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
 import magic
 from pyrogram import errors
@@ -18,6 +21,9 @@ from config import get_settings
 from rss_generator import generate_channel_rss, generate_channel_html
 from post_parser import PostParser
 from url_signer import verify_media_digest
+
+
+
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -64,8 +70,17 @@ if __name__ == "__main__":
             logger.info(f"    {key}: {mask_sensitive_value(str(value))}")
         else:
             logger.info(f"    {key}: {value}")
+    
+    # Log uvloop status
+    logger.info("    uvloop: enabled (asyncio speedup active)")
             
-    uvicorn.run("api_server:app", host=Config["api_host"], port=Config["api_port"], reload=True)
+    uvicorn.run(
+        "api_server:app", 
+        host=Config["api_host"], 
+        port=Config["api_port"], 
+        reload=True,
+        loop="uvloop"
+    )
 
 async def find_file_id_in_message(message, file_unique_id: str):
     """Find file_id by checking all possible media types in message"""

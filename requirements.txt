@@ -1,8 +1,9 @@
 fastapi==0.115.8
 uvicorn==0.34.0
 python-multipart==0.0.20
-Kurigram==2.1.37
-TgCrypto==1.2.5
+Kurigram
+TgCrypto
+uvloop
 pillow==11.1.0
 feedgen==1.0.0
 python-dateutil==2.9.0.post0
