@@ -19,4 +19,5 @@ def get_settings():
         "token": os.getenv("TOKEN", ""),
         "time_based_merge": os.getenv("TIME_BASED_MERGE", "False").strip() in ["True", "true"],
         "show_bridge_link": os.getenv("SHOW_BRIDGE_LINK", "False").strip() in ["True", "true"],
+        "show_post_flags": os.getenv("SHOW_POST_FLAGS", "False").strip() in ["True", "true"],
     } 

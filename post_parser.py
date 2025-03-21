@@ -285,6 +285,9 @@ class PostParser:
         return html_content
 
     def _format_flags(self, message: Message) -> str:
+        if not Config['show_post_flags']:
+            return ''
+        
         flags = self._extract_flags(message)
         if flags:
             return f'<div class="message-flags">Flags: {", ".join(flags)}</div>'
