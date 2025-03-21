@@ -325,6 +325,19 @@ class PostParser:
             'reactions': self._extract_reactions(message),
             'media_group_id': message.media_group_id
         }
+        
+        # Add webpage data if available
+        if webpage := getattr(message, "web_page", None):
+            result['webpage'] = {
+                'type': getattr(webpage, 'type', None),
+                'url': getattr(webpage, 'url', None),
+                'display_url': getattr(webpage, 'display_url', None),
+                'site_name': getattr(webpage, 'site_name', None),
+                'title': getattr(webpage, 'title', None),
+                'description': getattr(webpage, 'description', None),
+                'has_large_media': getattr(webpage, 'has_large_media', False),
+                'is_telegram_link': getattr(webpage, 'type', '') == 'telegram_message'
+            }
 
         return result
     
@@ -438,19 +451,58 @@ class PostParser:
     def _format_webpage(self, webpage, message) -> Union[str, None]:
         base_url = Config['pyrogram_bridge_url']
         try:
+            # Check if this is a Telegram message link
+            is_telegram_message = getattr(webpage, "type", "") == "telegram_message"
+            
+            if is_telegram_message:
+                # Telegram message preview with distinctive styling
+                html_parts = ['<div class="webpage-preview telegram-preview" style="border-left: 3px solid #0088cc; padding-left: 10px; margin: 10px 0; background-color: #f5fafd;">']
+                html_parts.append(f'<div class="webpage-site" style="color:#0088cc; font-size:0.9em;">📱 Telegram</div>')
+            else:
+                # Regular webpage preview
+                html_parts = ['<div class="webpage-preview" style="border-left: 3px solid #ccc; padding-left: 10px; margin: 10px 0;">']
+                # Add site name if available
+                if site_name := getattr(webpage, "site_name", None):
+                    html_parts.append(f'<div class="webpage-site" style="color:#666; font-size:0.9em;">{site_name}</div>')
+            
+            # Add title with link if available
+            if title := getattr(webpage, "title", None):
+                url = getattr(webpage, "url", "#")
+                html_parts.append(f'<div class="webpage-title" style="font-weight:bold; margin:5px 0;"><a href="{url}" target="_blank">{title}</a></div>')
+            
+            # Add description if available
+            if description := getattr(webpage, "description", None):
+                # Process the description to handle line breaks and possibly HTML
+                processed_description = description.replace('\n', '<br>')
+                # Check for unlinked URLs and turn them into links
+                processed_description = self._add_hyperlinks_to_raw_urls(processed_description)
+                html_parts.append(f'<div class="webpage-description" style="margin:5px 0;">{processed_description}</div>')
+            
+            # Display URL for non-telegram links or when display_url is available
+            if not is_telegram_message:
+                display_url = getattr(webpage, "display_url", None)
+                url = getattr(webpage, "url", None)
+                if display_url:
+                    html_parts.append(f'<div class="webpage-url" style="color:#666; font-size:0.9em; margin-bottom:5px;">{display_url}</div>')
+                elif url:
+                    html_parts.append(f'<div class="webpage-url" style="color:#666; font-size:0.9em; margin-bottom:5px;">{url}</div>')
+            else:
+                # For Telegram links, show a "View in Telegram" button
+                url = getattr(webpage, "url", "#")
+                html_parts.append(f'<div class="telegram-link" style="margin:5px 0;"><a href="{url}" target="_blank" style="display:inline-block; padding:5px 10px; background-color:#0088cc; color:white; text-decoration:none; border-radius:3px;">📱 Открыть в Telegram</a></div>')
+            
+            # Add photo if available
             if photo := getattr(webpage, "photo", None):
                 if file_unique_id := getattr(photo, "file_unique_id", None):
                     channel_username = self.get_channel_username(message)
                     file = f"{channel_username}/{message.id}/{file_unique_id}"
                     digest = generate_media_digest(file)
                     url = f"{base_url}/media/{file}/{digest}"
-                    return (
-                        f'<div style="margin:5px;">'
-                        f'<a href="{webpage.url}" target="_blank">'
-                        f'<img src="{url}" style="max-width:100%; width:auto; height:auto; max-height:600px; object-fit:contain;"></a>'
-                        f'</div>'
-                    )
-            return None
+                    html_parts.append(f'<div class="webpage-photo" style="margin-top:10px;"><a href="{webpage.url}" target="_blank">'
+                                     f'<img src="{url}" style="max-width:100%; width:auto; height:auto; max-height:200px; object-fit:contain;"></a></div>')
+            
+            html_parts.append('</div>')
+            return '\n'.join(html_parts)
         except Exception as e:
             logger.error(f"webpage_parsing_error: url {getattr(webpage, 'url', 'unknown')}, error {str(e)}")
             return None
