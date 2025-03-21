@@ -151,7 +151,7 @@ async def _render_messages_groups(messages_groups, post_parser, exclude_flags: s
                 
                 # Collect all media sections from all messages in the group
                 all_media = [msg['html']['media'] for msg in processed_messages if msg['html']['media']]
-                combined_media = '\n'.join(all_media)
+                combined_media = '\n<br>\n'.join(all_media)
 
                 # Merge text fields from all messages
                 all_texts = [msg['text'] for msg in processed_messages if msg['text']]
@@ -159,7 +159,7 @@ async def _render_messages_groups(messages_groups, post_parser, exclude_flags: s
 
                 # Merge html body sections from all messages
                 all_html_bodies = [msg['html']['body'] for msg in processed_messages if msg['html']['body']]
-                combined_html_body = '\n'.join(all_html_bodies)
+                combined_html_body = '\n<br><br>\n'.join(all_html_bodies)
 
                 html_parts = [
                     f'<div class="message-header">{main_message["html"]["header"]}</div>',
