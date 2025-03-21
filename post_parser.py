@@ -426,7 +426,9 @@ class PostParser:
                 
                 # Check if document is a PDF file
                 if message.media == MessageMediaType.DOCUMENT and hasattr(message.document, 'mime_type') and message.document.mime_type == 'application/pdf':
-                    content_media.append(f'<div class="document-pdf" style="padding: 10px;">[PDF-файл]</div>')
+                    if channel_username.startswith('-100'): tg_link = f"https://t.me/c/{channel_username[4:]}/{message.id}"
+                    else:  tg_link = f"https://t.me/{channel_username}/{message.id}"
+                    content_media.append(f'<div class="document-pdf" style="padding: 10px;"><a href="{tg_link}" target="_blank">[PDF-файл]</a></div>')
                 elif message.media in [MessageMediaType.PHOTO, MessageMediaType.DOCUMENT]:
                     content_media.append(f'<img src="{url}" style="max-width:100%; width:auto; height:auto; max-height:400px; object-fit:contain;">')
                 elif message.media == MessageMediaType.VIDEO:
