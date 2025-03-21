@@ -59,13 +59,12 @@ class PostParser:
         self.client = client
 
     def _debug_message(self, message: Message) -> Message:
-        if Config["debug"]:   
-            debug_message = copy.deepcopy(message)
-            debug_message.sender_chat = None
-            debug_message.caption_entities = None
-            debug_message.reactions = None
-            debug_message.entities = None
-            print(debug_message)
+        debug_message = copy.deepcopy(message)
+        debug_message.sender_chat = None
+        debug_message.caption_entities = None
+        debug_message.reactions = None
+        debug_message.entities = None
+        print(debug_message)
         return
     
     def channel_name_prepare(self, channel: str):
@@ -75,13 +74,15 @@ class PostParser:
         else:
             return channel
 
-    async def get_post(self, channel: str, post_id: int, output_type: str = 'json') -> Union[str, Dict[Any, Any]]:
+    async def get_post(self, channel: str, post_id: int, output_type: str = 'json', debug: bool = False) -> Union[str, Dict[Any, Any]]:
         print(f"Getting post {channel}, {post_id}")
         try:
             channel = self.channel_name_prepare(channel)
             message = await self.client.get_messages(channel, post_id)
 
-            self._debug_message(message)
+            # Выводим отладочную информацию, если включен глобальный debug или параметр debug
+            if Config["debug"] or debug:
+                self._debug_message(message)
 
             if not message:
                 logger.error(f"post_not_found: channel {channel}, post_id {post_id}")
@@ -519,12 +520,12 @@ class PostParser:
                     links.append(f'<a href="tg://resolve?domain=c/{channel_id}&post={message.id}">Open in Telegram</a>')
                     links.append(f'<a href="https://t.me/c/{channel_id}/{message.id}">Open in Web</a>')
                     if Config['show_bridge_link']:
-                        links.append(f'<a href="{base_url}/html/{channel_identifier}/{message.id}">Open in Bridge</a>')
+                        links.append(f'<a href="{base_url}/html/{channel_identifier}/{message.id}?debug=true">Open in Bridge</a>')
                 else:  # For channels with username
                     links.append(f'<a href="tg://resolve?domain={channel_identifier}&post={message.id}">Open in Telegram</a>')
                     links.append(f'<a href="https://t.me/{channel_identifier}/{message.id}">Open in Web</a>')
                     if Config['show_bridge_link']:
-                        links.append(f'<a href="{base_url}/html/{channel_identifier}/{message.id}">Open in Bridge</a>')
+                        links.append(f'<a href="{base_url}/html/{channel_identifier}/{message.id}?debug=true">Open in Bridge</a>')
                 second_line_parts.extend(links)
 
             if second_line_parts:

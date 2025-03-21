@@ -88,6 +88,7 @@ SHOW_POST_FLAGS - optional, if set to true, will show post flags in html post vi
 ``` curl https://pgbridge.example.com/rss/DragorWW_space?exclude_flags=video,stream,donat,clown ``` with exclude_flags parameter  
 ``` curl https://pgbridge.example.com/rss/DragorWW_space?exclude_text=реклама,акция ``` with exclude_text parameter  
 ``` curl https://pgbridge.example.com/rss/DragorWW_space?exclude_text="специальное предложение",акция ``` with exclude_text parameter containing phrases with spaces  
+``` curl https://pgbridge.example.com/html/DragorWW_space/123?debug=true ``` with debug parameter to print raw message to logs  
 
 Warning: TG API has rate limit, and bridge will wait time before http response, if catch FloodWait exception. Increase http timeout in your client prevention timeout error. Examply, in miniflux: ENV HTTP_CLIENT_TIMEOUT=200  
 

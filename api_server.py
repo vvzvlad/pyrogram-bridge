@@ -443,7 +443,7 @@ def calculate_cache_stats():
 @app.get("/post/html/{channel}/{post_id}", response_class=HTMLResponse)
 @app.get("/html/{channel}/{post_id}/{token}", response_class=HTMLResponse)  
 @app.get("/post/html/{channel}/{post_id}/{token}", response_class=HTMLResponse)
-async def get_post_html(channel: str, post_id: int, token: str | None = None):
+async def get_post_html(channel: str, post_id: int, token: str | None = None, debug: bool = False):
     if Config["token"]:
         if token != Config["token"]:
             logger.error(f"Invalid token for HTML post: {token}, expected: {Config['token']}")
@@ -453,7 +453,7 @@ async def get_post_html(channel: str, post_id: int, token: str | None = None):
             
     try:
         parser = PostParser(client.client)
-        html_content = await parser.get_post(channel, post_id, 'html')
+        html_content = await parser.get_post(channel, post_id, 'html', debug)
         if not html_content:
             raise HTTPException(status_code=404, detail="Post not found")
         return html_content
@@ -467,7 +467,7 @@ async def get_post_html(channel: str, post_id: int, token: str | None = None):
 @app.get("/post/json/{channel}/{post_id}")
 @app.get("/json/{channel}/{post_id}/{token}")
 @app.get("/post/json/{channel}/{post_id}/{token}")
-async def get_post(channel: str, post_id: int, token: str | None = None):
+async def get_post(channel: str, post_id: int, token: str | None = None, debug: bool = False):
     if Config["token"]:
         if token != Config["token"]:
             logger.error(f"Invalid token for JSON post: {token}, expected: {Config['token']}")
@@ -477,7 +477,7 @@ async def get_post(channel: str, post_id: int, token: str | None = None):
             
     try:
         parser = PostParser(client.client)
-        json_content = await parser.get_post(channel, post_id, 'json')
+        json_content = await parser.get_post(channel, post_id, 'json', debug)
         if not json_content:
             raise HTTPException(status_code=404, detail="Post not found")
         return json_content
