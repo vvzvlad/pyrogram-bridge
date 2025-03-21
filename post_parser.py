@@ -534,7 +534,8 @@ class PostParser:
                     links.append(f'<a href="tg://resolve?domain={channel_identifier}&post={message.id}">Open in Telegram</a>')
                     links.append(f'<a href="https://t.me/{channel_identifier}/{message.id}">Open in Web</a>')
                 if Config['show_bridge_link']:
-                    links.append(f'<a href="{base_url}/html/{channel_identifier}/{message.id}?token={Config['token']}&debug=true">Open in Bridge</a>')
+                    token = Config['token']
+                    links.append(f'<a href="{base_url}/html/{channel_identifier}/{message.id}?token={token}&debug=true">Open in Bridge</a>')
                 second_line_parts.extend(links)
 
             if second_line_parts:
