@@ -487,9 +487,10 @@ class PostParser:
                 elif url:
                     html_parts.append(f'<div class="webpage-url" style="color:#666; font-size:0.9em; margin-bottom:5px;">{url}</div>')
             else:
-                # For Telegram links, show a "View in Telegram" button
-                url = getattr(webpage, "url", "#")
-                html_parts.append(f'<div class="telegram-link" style="margin:5px 0;"><a href="{url}" target="_blank" style="display:inline-block; padding:5px 10px; background-color:#0088cc; color:white; text-decoration:none; border-radius:3px;">📱 Открыть в Telegram</a></div>')
+                # Show Telegram URL (more subtle than button)
+                display_url = getattr(webpage, "display_url", None)
+                if display_url:
+                    html_parts.append(f'<div class="webpage-url" style="color:#0088cc; font-size:0.9em; margin-bottom:5px;">{display_url}</div>')
             
             # Add photo if available
             if photo := getattr(webpage, "photo", None):
@@ -499,7 +500,7 @@ class PostParser:
                     digest = generate_media_digest(file)
                     url = f"{base_url}/media/{file}/{digest}"
                     html_parts.append(f'<div class="webpage-photo" style="margin-top:10px;"><a href="{webpage.url}" target="_blank">'
-                                     f'<img src="{url}" style="max-width:100%; width:auto; height:auto; max-height:200px; object-fit:contain;"></a></div>')
+                                        f'<img src="{url}" style="max-width:100%; width:auto; height:auto; max-height:200px; object-fit:contain;"></a></div>')
             
             html_parts.append('</div>')
             return '\n'.join(html_parts)
