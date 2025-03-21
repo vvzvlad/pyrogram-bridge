@@ -80,7 +80,7 @@ class PostParser:
             channel = self.channel_name_prepare(channel)
             message = await self.client.get_messages(channel, post_id)
 
-            # Выводим отладочную информацию, если включен глобальный debug или параметр debug
+            # Print debug message if global debug is enabled or debug url parameter is True
             if Config["debug"] or debug:
                 self._debug_message(message)
 
