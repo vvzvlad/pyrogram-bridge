@@ -18,4 +18,5 @@ def get_settings():
         "debug": os.getenv("DEBUG", "False") == "True",
         "token": os.getenv("TOKEN", ""),
         "time_based_merge": os.getenv("TIME_BASED_MERGE", "False").strip() in ["True", "true"],
+        "show_bridge_link": os.getenv("SHOW_BRIDGE_LINK", "False").strip() in ["True", "true"],
     } 
