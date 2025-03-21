@@ -486,11 +486,11 @@ class PostParser:
                     html_parts.append(f'<div class="webpage-url" style="color:#666; font-size:0.9em; margin-bottom:5px;">{display_url}</div>')
                 elif url:
                     html_parts.append(f'<div class="webpage-url" style="color:#666; font-size:0.9em; margin-bottom:5px;">{url}</div>')
-            else:
-                # Show Telegram URL (more subtle than button)
-                display_url = getattr(webpage, "display_url", None)
-                if display_url:
-                    html_parts.append(f'<div class="webpage-url" style="color:#0088cc; font-size:0.9em; margin-bottom:5px;">{display_url}</div>')
+            #else:
+            #    # Show Telegram URL (more subtle than button)
+            #    display_url = getattr(webpage, "display_url", None)
+            #    if display_url:
+            #        html_parts.append(f'<div class="webpage-url" style="color:#0088cc; font-size:0.9em; margin-bottom:5px;">{display_url}</div>')
             
             # Add photo if available
             if photo := getattr(webpage, "photo", None):
