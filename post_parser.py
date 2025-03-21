@@ -123,6 +123,11 @@ class PostParser:
         if getattr(message, "channel_chat_created", False):
             return "✨ Channel created"
         text = message.text or message.caption or ''
+        
+        # Check if the text contains only a URL and nothing else
+        if text.strip() and re.match(r'^https?://[^\s]+$', text.strip()):
+            return "🔗 Web link"
+            
         if not text:
             if   message.media == MessageMediaType.PHOTO:       return "📷 Photo"
             elif message.media == MessageMediaType.VIDEO:       return "🎥 Video"
@@ -132,6 +137,7 @@ class PostParser:
             elif message.media == MessageMediaType.VIDEO_NOTE:  return "📱 Video circle"
             elif message.media == MessageMediaType.STICKER:     return "🎯 Sticker"
             elif message.media == MessageMediaType.POLL:        return "📊 Poll"
+            elif message.web_page:                              return "🔗 Web link"
             return "📷 Media post"
 
         # Remove URLs
@@ -140,6 +146,11 @@ class PostParser:
         text = re.sub('<[^<]+?>', '', text)
         # Remove multiple spaces and empty lines
         text = '\n'.join(line.strip() for line in text.split('\n') if line.strip())
+
+        # If after removing URLs and other formatting the text is empty,
+        # and we have a web_page, set the title to "Web link"
+        if not text.strip() and getattr(message, "web_page", None):
+            return "🔗 Web link"
 
         # Get first non-empty line
         first_line = text.split('\n', maxsplit=1)[0] if text else ""
