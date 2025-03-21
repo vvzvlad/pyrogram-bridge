@@ -206,8 +206,9 @@ class PostParser:
             getattr(message, "forward_sender_name", None)):
             flags.append("fwd")
 
-        # Add flag "video" if the message media is VIDEO and the body text is up to 100 characters.
-        if message.media == MessageMediaType.VIDEO and len(message_text.strip()) <= 100:
+        # Add flag "video" if the message media is VIDEO or ANIMATION and the body text is up to 100 characters.
+        if (message.media in [MessageMediaType.VIDEO, MessageMediaType.ANIMATION] and 
+            len(message_text.strip()) <= 100):
             flags.append("video")
         
         # Add flag for posts without images
