@@ -555,7 +555,11 @@ class PostParser:
             views_html = ""
             if reactions := getattr(message, "reactions", None):
                 for reaction in reactions.reactions:
-                    reactions_html += f'<span class="reaction">{reaction.emoji} {reaction.count}&nbsp;&nbsp;</span>'
+                    # Replace None or empty emoji with replacement character
+                    emoji = reaction.emoji
+                    if emoji is None or emoji == "None" or emoji == "":
+                        emoji = "�"  # Question mark as replacement for missing emojis
+                    reactions_html += f'<span class="reaction">{emoji} {reaction.count}&nbsp;&nbsp;</span>'
                 reactions_html = reactions_html.rstrip()
 
             if views := getattr(message, "views", None):
