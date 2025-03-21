@@ -76,6 +76,8 @@ PYROGRAM_BRIDGE_URL - url to rss bridge, used for generate absolute url to media
 TOKEN - optional, if set, will be used to check if user has access to rss feed. If token is set, rss url will be https://pgbridge.example.com/rss/DragorWW_space/1234567890  
 Use this if you rss bridge access all world, otherwise your bridge can be used by many people and telegram will inevitably be sanctioned for botting.  
 TIME_BASED_MERGE - optional, if set to true, will merge posts by time. Merge time is 5 seconds, use &merge_seconds=XX in rss url for tuning.  
+SHOW_BRIDGE_LINK - optional, if set to true, will add "Open in Bridge" link to html post view. Default is false.  
+SHOW_POST_FLAGS - optional, if set to true, will show post flags in html post view. Default is false.  
 
 ## Get channel rss feed (use it in your rss reader)
 
