@@ -4,6 +4,7 @@ from typing import Optional
 from feedgen.feed import FeedGenerator
 from post_parser import PostParser
 from config import get_settings
+import re
 
 Config = get_settings()
 
@@ -199,42 +200,15 @@ async def _render_messages_groups(messages_groups, post_parser, exclude_flags: s
     
     # Filter posts by exclude_text
     if exclude_text:
-        # Split by comma, but preserve commas inside quotes
-        exclude_text_list = []
-        current_phrase = ""
-        in_quotes = False
-        
-        for char in exclude_text:
-            if char == '"' and (not current_phrase.endswith('\\') or current_phrase.endswith('\\\\')):
-                in_quotes = not in_quotes
-                current_phrase += char
-            elif char == ',' and not in_quotes:
-                if current_phrase:
-                    # Remove surrounding quotes if present
-                    if current_phrase.startswith('"') and current_phrase.endswith('"'):
-                        current_phrase = current_phrase[1:-1]
-                    exclude_text_list.append(current_phrase.strip().lower())
-                    current_phrase = ""
-            else:
-                current_phrase += char
-        
-        # Add the last phrase if any
-        if current_phrase:
-            if current_phrase.startswith('"') and current_phrase.endswith('"'):
-                current_phrase = current_phrase[1:-1]
-            exclude_text_list.append(current_phrase.strip().lower())
-        
-        logger.debug(f"Parsed exclude_text into phrases: {exclude_text_list}")
-        
+        # Compile single regex pattern
+        exclude_pattern = re.compile(exclude_text.strip(), re.IGNORECASE)
         filtered_posts = []
         for post in rendered_posts:
-            post_text = post['text'].lower()
-            # Check if any of the exclude_text items is in the post text (case-insensitive)
-            if not any(text in post_text for text in exclude_text_list):
+            # Check if pattern matches the post text
+            if not exclude_pattern.search(post['text']):
                 filtered_posts.append(post)
             else:
-                matching_phrases = [text for text in exclude_text_list if text in post_text]
-                logger.debug(f"Excluded post {post['message_id']} containing phrases: {matching_phrases}")
+                logger.debug(f"excluded_post: message_id {post['message_id']}, pattern {exclude_pattern.pattern}")
         rendered_posts = filtered_posts
     
     # Sort by date

@@ -131,13 +131,24 @@ Or use meta-flag "all" to exclude all flags in posts:
 
 ## Exclude text
 
-You can filter out posts containing specific words or phrases using the `exclude_text` parameter. This allows for more flexible content filtering beyond the predefined flags.
+You can filter out posts containing specific text patterns using the `exclude_text` parameter. This parameter accepts a regular expression pattern that will be matched against the post text.
 
-For simple words without spaces:
-``` curl https://pgbridge.example.com/rss/DragorWW_space?exclude_text=реклама,промо,акция ```
+The pattern is case-insensitive and supports all standard regex features. For example:
 
-For phrases containing spaces, use quotes:
-``` curl https://pgbridge.example.com/rss/DragorWW_space?exclude_text="специальное предложение","только сегодня",акция ```
+``` curl https://pgbridge.example.com/rss/DragorWW_space?exclude_text=все.*комикс|реклам.*канал ```
 
-The filtering is case-insensitive and will exclude any post containing any of the specified words or phrases.
+This will exclude posts containing:
+
+- Any text starting with "все" and ending with "комикс"
+- Any text containing "реклам" followed by "канал"
+
+You can use any regex pattern, including:
+
+- `.*` for any characters
+- `\d+` for numbers
+- `[а-яА-Я]+` for Russian letters
+- `|` for alternative patterns
+- And other standard regex features
+
+The pattern is matched against the entire post text, so you can create complex filtering rules.
 
