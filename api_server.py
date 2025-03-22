@@ -567,8 +567,8 @@ async def get_rss_feed(channel: str,
         if token != Config["token"]:
             logger.error(f"invalid_token_error: token {token}, expected {Config['token']}")
             raise HTTPException(status_code=403, detail="Invalid token")
-        else:
-            logger.info(f"valid_token: token {token}")
+        #else:
+            #logger.info(f"valid_token: token {token}")
     while True:
         try:
             if output_type == 'rss':
