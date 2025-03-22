@@ -263,8 +263,8 @@ async def generate_channel_rss(channel: str,
     """
     if limit < 1:
         raise ValueError(f"limit must be positive, got {limit}")
-    if limit > 100:
-        raise ValueError(f"limit cannot exceed 100, got {limit}")
+    if limit > 200:
+        raise ValueError(f"limit cannot exceed 200, got {limit}")
 
     try:
         if post_parser is None:
