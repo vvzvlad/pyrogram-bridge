@@ -200,8 +200,8 @@ async def _render_messages_groups(messages_groups, post_parser, exclude_flags: s
     
     # Filter posts by exclude_text
     if exclude_text:
-        # Compile single regex pattern
-        exclude_pattern = re.compile(exclude_text.strip(), re.IGNORECASE)
+        # Compile single regex pattern with UNICODE flag for proper handling of non-ASCII characters
+        exclude_pattern = re.compile(exclude_text.strip(), re.IGNORECASE | re.UNICODE)
         filtered_posts = []
         for post in rendered_posts:
             # Check if pattern matches the post text
