@@ -89,7 +89,7 @@ class PostParser:
                 return None
             
             if output_type == 'html':
-                return self._format_html(message)
+                return self._format_html(message, debug)
             elif output_type == 'json':
                 return self.process_message(message)
             else:
@@ -288,7 +288,7 @@ class PostParser:
 
         return flags
 
-    def _format_html(self, message: Message) -> str:
+    def _format_html(self, message: Message, debug: bool = False) -> str:
         html_content = []
         data = self.process_message(message)['html']
 
@@ -296,6 +296,13 @@ class PostParser:
         html_content.append(f'<div class="message-media">{data["media"]}</div>')
         html_content.append(f'<div class="message-text">{data["body"]}</div>')
         html_content.append(f'<div class="message-footer">{data["footer"]}</div>')
+        
+        # Add raw JSON debug output if debug is enabled
+        if debug:
+            debug_message = copy.deepcopy(message)
+            debug_json = json.dumps(debug_message, default=str, indent=2, ensure_ascii=False)
+            html_content.append(f'<pre class="debug-json" style="background: #f5f5f5; padding: 10px; margin-top: 20px; overflow-x: auto; font-size: 10px;">{debug_json}</pre>')
+            
         html_content = '\n'.join(html_content)
         return html_content
 
