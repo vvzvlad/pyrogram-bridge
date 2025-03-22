@@ -60,10 +60,10 @@ class PostParser:
 
     def _debug_message(self, message: Message) -> Message:
         debug_message = copy.deepcopy(message)
-        debug_message.sender_chat = None
-        debug_message.caption_entities = None
-        debug_message.reactions = None
-        debug_message.entities = None
+        #debug_message.sender_chat = None
+        #debug_message.caption_entities = None
+        #debug_message.reactions = None
+        #debug_message.entities = None
         print(debug_message)
         return
     
