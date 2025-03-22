@@ -152,3 +152,6 @@ You can use any regex pattern, including:
 
 The pattern is matched against the entire post text, so you can create complex filtering rules.
 
+For some applications you will need to convert the request to an encoded URL: 
+```Салли.*и.*Фасолька|Увядший.*Лепесток``` -> ```%D0%A1%D0%B0%D0%BB%D0%BB%D0%B8.%2A%D0%B8. %2A%D0%A4%D0%B0%D1%81%D0%BE%D0%BB%D1%8C%D0%BA%D0%B0%7C%D0%A3%D0%B2%D1%8F%D0%B4%D1%88%D0%B8%D0%B9.%2A%D0%9B%D0%B5%D0%BF%D0%B5%D1%81%D1%82%D0%BE%D0%BA```
+For example, you can use this tool: https://www.urlencoder.org/
