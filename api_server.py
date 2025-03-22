@@ -23,8 +23,21 @@ from post_parser import PostParser
 from url_signer import verify_media_digest
 from starlette.middleware.base import BaseHTTPMiddleware
 
-
-
+class RequestLoggingMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        # Log request details
+        logger.info(f"Request: {request.method} {request.url}")
+        logger.info(f"Headers: {dict(request.headers)}")
+        logger.info(f"Query params: {dict(request.query_params)}")
+        
+        try:
+            response = await call_next(request)
+            # Log response details
+            logger.info(f"Response status: {response.status_code}")
+            return response
+        except Exception as e:
+            logger.error(f"Request processing error: {str(e)}")
+            raise
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -52,7 +65,7 @@ async def lifespan(_: FastAPI):
         pass
     await client.stop()
 
-app = FastAPI( title="Pyrogram Bridge", lifespan=lifespan)
+app = FastAPI(title="Pyrogram Bridge", lifespan=lifespan)
 app.add_middleware(RequestLoggingMiddleware)
 
 def mask_sensitive_value(input_str: str) -> str:
@@ -609,19 +622,3 @@ async def get_rss_feed(channel: str,
             error_message = f"rss_generation_error: channel {channel}, error {str(e)}"
             logger.error(error_message)
             raise HTTPException(status_code=500, detail=error_message) from e 
-
-class RequestLoggingMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        # Log request details
-        logger.info(f"Request: {request.method} {request.url}")
-        logger.info(f"Headers: {dict(request.headers)}")
-        logger.info(f"Query params: {dict(request.query_params)}")
-        
-        try:
-            response = await call_next(request)
-            # Log response details
-            logger.info(f"Response status: {response.status_code}")
-            return response
-        except Exception as e:
-            logger.error(f"Request processing error: {str(e)}")
-            raise 
