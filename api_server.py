@@ -1,6 +1,7 @@
 import logging
 import os
 import mimetypes
+import base64
 
 import json
 from datetime import datetime
@@ -586,12 +587,14 @@ async def get_rss_feed(channel: str,
             #logger.info(f"valid_token: token {token}")
     while True:
         try:
-            # URL decode parameters if they are encoded
-            if exclude_text:
+            if exclude_text: # Decode base64 parameters if they are encoded
                 try:
-                    exclude_text = exclude_text.encode('latin1').decode('utf-8')
-                except UnicodeError:
-                    pass  # If decoding fails, use original value
+                    exclude_text = base64.b64decode(exclude_text.encode()).decode('utf-8') # Try to decode as base64 first
+                except Exception: # If base64 decoding fails, try URL decoding
+                    try:
+                        exclude_text = exclude_text.encode('latin1').decode('utf-8')
+                    except UnicodeError:
+                        pass  # If all decoding fails, use original value
 
             if output_type == 'rss':
                 rss_content = await generate_channel_rss(channel,
