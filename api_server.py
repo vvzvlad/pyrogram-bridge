@@ -586,6 +586,13 @@ async def get_rss_feed(channel: str,
             #logger.info(f"valid_token: token {token}")
     while True:
         try:
+            # URL decode parameters if they are encoded
+            if exclude_text:
+                try:
+                    exclude_text = exclude_text.encode('latin1').decode('utf-8')
+                except UnicodeError:
+                    pass  # If decoding fails, use original value
+
             if output_type == 'rss':
                 rss_content = await generate_channel_rss(channel,
                                                         client=client.client, 
