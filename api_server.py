@@ -597,10 +597,12 @@ async def get_rss_feed(channel: str,
             total_wait_time = wait_time + random_additional_wait
             if total_wait_time > 190: total_wait_time = 190
 
-            logger.warning(f"flood_wait_error: channel {channel}, waiting {total_wait_time:.1f} seconds (base: {wait_time}s, random: {random_additional_wait:.1f}s)")
-            await asyncio.sleep(total_wait_time)
-            logger.info(f"flood_wait_retry: channel {channel}")
-            continue
+            logger.warning(f"flood_wait_error: channel {channel}, retry after {total_wait_time:.1f} seconds (base: {wait_time}s, random: {random_additional_wait:.1f}s)")
+            return Response(
+                status_code=429,
+                headers={"Retry-After": str(int(total_wait_time))},
+                content="Too many requests, please try again later"
+            )
         except Exception as e:
             error_message = f"rss_generation_error: channel {channel}, error {str(e)}"
             logger.error(error_message)
