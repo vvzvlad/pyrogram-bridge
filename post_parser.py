@@ -303,25 +303,9 @@ class PostParser:
         
         # Add raw JSON debug output if debug is enabled
         if debug:
-            try:
-                # Convert the message to a dictionary
-                message_dict = message.__dict__
-                # Format JSON properly with indents
-                debug_json = json.dumps(message_dict, indent=4, ensure_ascii=False, default=str)
-                
-                # Create a div for JSON display with proper styling
-                json_lines = debug_json.split('\n')
-                json_html = []
-                for line in json_lines:
-                    # HTML escape each line individually
-                    escaped_line = html.escape(line)
-                    json_html.append(f'<div class="json-line">{escaped_line}</div>')
-                
-                formatted_json = '\n'.join(json_html)
-                html_content.append(f'<div class="debug-json" style="background: #f5f5f5; padding: 10px; margin-top: 20px; overflow-x: auto; font-family: monospace; font-size: 12px;">{formatted_json}</div>')
-            except Exception as e:
-                html_content.append(f'<div class="debug-error">Error formatting JSON: {str(e)}</div>')
-        
+            debug_json = json.dumps(message, indent=2, ensure_ascii=False, default=str)
+            debug_json = debug_json.replace('\\n', '<br>').replace('\\"', '"')
+            html_content.append(f'<pre class="debug-json" style="background: #f5f5f5; padding: 10px; margin-top: 20px; overflow-x: auto; font-size: 10px; white-space: pre-wrap;">{debug_json}</pre>')
         html_content = '\n'.join(html_content)
         return html_content
 
