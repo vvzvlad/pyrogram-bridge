@@ -490,8 +490,9 @@ class PostParser:
             if description := getattr(webpage, "description", None):
                 # Process the description to handle line breaks and possibly HTML
                 processed_description = description.replace('\n', '<br>')
-                # Check for unlinked URLs and turn them into links
-                processed_description = self._add_hyperlinks_to_raw_urls(processed_description)
+                # Check for unlinked URLs and turn them into links only if description is short
+                if len(processed_description.strip()) <= 10:
+                    processed_description = self._add_hyperlinks_to_raw_urls(processed_description)
                 html_parts.append(f'<div class="webpage-description" style="margin:5px 0;">{processed_description}</div>')
             
             # Display URL for non-telegram links or when display_url is available
@@ -502,11 +503,6 @@ class PostParser:
                     html_parts.append(f'<div class="webpage-url" style="color:#666; font-size:0.9em; margin-bottom:5px;">{display_url}</div>')
                 elif url:
                     html_parts.append(f'<div class="webpage-url" style="color:#666; font-size:0.9em; margin-bottom:5px;">{url}</div>')
-            #else:
-            #    # Show Telegram URL (more subtle than button)
-            #    display_url = getattr(webpage, "display_url", None)
-            #    if display_url:
-            #        html_parts.append(f'<div class="webpage-url" style="color:#0088cc; font-size:0.9em; margin-bottom:5px;">{display_url}</div>')
             
             # Add photo if available
             if photo := getattr(webpage, "photo", None):
