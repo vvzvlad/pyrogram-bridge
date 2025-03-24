@@ -197,6 +197,12 @@ class PostParser:
         return None
 
     def _format_reply_info(self, message: Message) -> Union[str, None]:
+        if getattr(message, "service", None) and 'PINNED_MESSAGE' in str(message.service) and (reply_to := getattr(message, "reply_to_message", None)):
+            reply_text = reply_to.text or reply_to.caption or ''
+            if len(reply_text) > 100:
+                reply_text = reply_text[:100] + '...'
+            return f'<div class="message-pinned">Pinned: {reply_text}</div><br>'
+        
         if reply_to := getattr(message, "reply_to_message", None):
             reply_text = reply_to.text or reply_to.caption or ''
             if len(reply_text) > 100:
@@ -336,7 +342,8 @@ class PostParser:
             'author': self._get_author_info(message),
             'views': message.views,
             'reactions': self._extract_reactions(message),
-            'media_group_id': message.media_group_id
+            'media_group_id': message.media_group_id,
+            'service': getattr(message, "service", None)
         }
         
         # Add webpage data if available
@@ -355,7 +362,7 @@ class PostParser:
         return result
     
 
-    def _sanitize_html(self, html: str) -> str:
+    def _sanitize_html(self, html_raw: str) -> str:
         allowed_tags = ['p', 'a', 'b', 'i', 'strong', 'em', 'ul', 'ol', 'li', 'br', 'div', 'span', 'img', 'video', 'audio', 'source']
         allowed_attributes = {
             'a': ['href', 'title', 'target'],
@@ -372,7 +379,7 @@ class PostParser:
                 allowed_css_properties=["max-width", "max-height", "object-fit", "width", "height"]
             )
             sanitized_html = HTMLSanitizer(
-                html,
+                html_raw,
                 tags=allowed_tags,
                 attributes=allowed_attributes,
                 protocols=['http', 'https', 'tg'],
@@ -382,7 +389,7 @@ class PostParser:
             return sanitized_html
         except Exception as e:
             logger.error(f"html_sanitization_error: {str(e)}")
-            return html
+            return html_raw
 
     def _generate_html_header(self, message: Message) -> str:
         content_header = []
@@ -611,8 +618,8 @@ class PostParser:
             if second_line_parts:
                 parts.append('&nbsp;&nbsp;&nbsp;&nbsp;'.join(second_line_parts))
 
-            html = '<br>'.join(parts) if parts else None
-            return f"<br><br>{html}" if html else None
+            result_html = '<br>'.join(parts) if parts else None
+            return self._sanitize_html(result_html) if result_html else None
             
         except Exception as e:
             logger.error(f"reactions_views_parsing_error: {str(e)}")
