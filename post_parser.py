@@ -126,8 +126,11 @@ class PostParser:
         text = message.text or message.caption or ''
         
         # Check if the text contains only a URL and nothing else
-        if text.strip() and re.match(r'^https?://[^\s]+$', text.strip()):
-            return "🔗 Web link"
+        if text.strip():
+            # Remove all URLs from text
+            text_without_urls = re.sub(r'https?://[^\s<>"\']+', '', text.strip())
+            if not text_without_urls:
+                return "🔗 Web link"
             
         if not text:
             if   message.media == MessageMediaType.PHOTO:       return "📷 Photo"
@@ -224,7 +227,7 @@ class PostParser:
 
         # Add flag "video" if the message media is VIDEO or ANIMATION and the body text is up to 100 characters.
         if (message.media in [MessageMediaType.VIDEO, MessageMediaType.ANIMATION] and 
-            len(message_text.strip()) <= 200):
+            len((message.text or message.caption or '').strip()) <= 100):
             flags.append("video")
         
         # Add flag for posts without images
@@ -400,7 +403,9 @@ class PostParser:
         else: text = ''
 
         text = text.replace('\n', '<br>') # Replace newlines with <br>
-        text = self._add_hyperlinks_to_raw_urls(text) # Add hyperlinks to raw URLs
+        # Add hyperlinks to raw URLs only if original text is short
+        if len((message.text or message.caption or '').strip()) <= 10:
+            text = self._add_hyperlinks_to_raw_urls(text)
         
         if text: # Message text
             content_body.append(f'<div class="message-text">{text}</div>')
@@ -493,9 +498,7 @@ class PostParser:
             if description := getattr(webpage, "description", None):
                 # Process the description to handle line breaks and possibly HTML
                 processed_description = description.replace('\n', '<br>')
-                # Check for unlinked URLs and turn them into links only if description is short
-                if len(processed_description.strip()) <= 10:
-                    processed_description = self._add_hyperlinks_to_raw_urls(processed_description)
+                processed_description = self._add_hyperlinks_to_raw_urls(processed_description)
                 html_parts.append(f'<div class="webpage-description" style="margin:5px 0;">{processed_description}</div>')
             
             # Display URL for non-telegram links or when display_url is available
