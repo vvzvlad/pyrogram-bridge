@@ -3,6 +3,7 @@ import copy
 import re
 import os
 import json
+import html
 
 from datetime import datetime
 from typing import Union, Dict, Any, List
@@ -301,7 +302,7 @@ class PostParser:
         if debug:
             debug_message = copy.deepcopy(message)
             debug_json = json.dumps(debug_message, default=str, indent=2, ensure_ascii=False)
-            html_content.append(f'<pre class="debug-json" style="background: #f5f5f5; padding: 10px; margin-top: 20px; overflow-x: auto; font-size: 10px;">{debug_json}</pre>')
+            html_content.append(f'<pre class="debug-json" style="background: #f5f5f5; padding: 10px; margin-top: 20px; overflow-x: auto; font-size: 10px; white-space: pre-wrap;">{html.escape(debug_json)}</pre>')
             
         html_content = '\n'.join(html_content)
         return html_content
