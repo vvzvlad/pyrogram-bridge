@@ -400,10 +400,7 @@ class PostParser:
         else: text = ''
 
         text = text.replace('\n', '<br>') # Replace newlines with <br>
-        # Add hyperlinks to raw URLs only if original text is short
-        if len((message.text or message.caption or '').strip()) <= 10:
-            text = self._add_hyperlinks_to_raw_urls(text)
-        
+        text = self._add_hyperlinks_to_raw_urls(text)
         if text: # Message text
             content_body.append(f'<div class="message-text">{text}</div>')
 
@@ -462,7 +459,8 @@ class PostParser:
         
         if webpage := getattr(message, "web_page", None): # Web page preview
             if webpage_html := self._format_webpage(webpage, message):
-                content_media.append(webpage_html)
+                if len((message.text or message.caption or '').strip()) <= 10:
+                    content_media.append(webpage_html)
 
         html_media = '\n'.join(content_media)
         html_media = self._sanitize_html(html_media)
