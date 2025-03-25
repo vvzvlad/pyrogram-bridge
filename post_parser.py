@@ -409,7 +409,7 @@ class PostParser:
         text = text.replace('\n', '<br>') # Replace newlines with <br>
         text = self._add_hyperlinks_to_raw_urls(text)
         if text: # Message text
-            content_body.append(f'<div class="message-text">{text}</div>')
+            content_body.append(f'<div class="message-text">{text}</div><br>')
 
         if poll := getattr(message, "poll", None): # Poll message
             if poll_html := self._format_poll(poll):
