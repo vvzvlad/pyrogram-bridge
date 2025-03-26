@@ -23,6 +23,7 @@ from rss_generator import generate_channel_rss, generate_channel_html
 from post_parser import PostParser
 from url_signer import verify_media_digest
 from starlette.middleware.base import BaseHTTPMiddleware
+import json_repair
 
 class RequestLoggingMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
@@ -359,6 +360,31 @@ async def download_new_files(media_files: list, cache_dir: str):
         logger.info("All media files are already in cache")
 
 
+def fix_corrupted_json(file_path: str) -> list:
+    """
+    Attempt to fix corrupted JSON file using json-repair library
+    Returns list of valid entries
+    """
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+            
+        # Try to repair and parse the JSON
+        fixed_data = json_repair.loads(content)
+        
+        # Validate entries
+        valid_entries = []
+        for entry in fixed_data:
+            if isinstance(entry, dict) and all(key in entry for key in ['channel', 'post_id', 'file_unique_id']):
+                valid_entries.append(entry)
+                
+        logger.info(f"Fixed JSON file: {file_path}, found {len(valid_entries)} valid entries")
+        return valid_entries
+        
+    except Exception as e:
+        logger.error(f"Failed to fix JSON file {file_path}: {str(e)}")
+        return []
+
 async def cache_media_files():
     """Background task for cache management: removes old files and downloads new ones"""
     delay = 60
@@ -369,8 +395,19 @@ async def cache_media_files():
                 await asyncio.sleep(delay)
                 continue
 
-            with open(file_path, 'r', encoding='utf-8') as f:
-                media_files = json.load(f)
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    media_files = json.load(f)
+            except json.JSONDecodeError:
+                logger.error(f"JSON decode error in {file_path}, attempting to fix")
+                media_files = fix_corrupted_json(file_path)
+                if media_files:
+                    with open(file_path, 'w', encoding='utf-8') as f:
+                        json.dump(media_files, f, ensure_ascii=False, indent=2)
+                else:
+                    logger.error("Failed to fix JSON file, skipping cache update")
+                    await asyncio.sleep(delay)
+                    continue
 
             cache_dir = os.path.abspath("./data/cache")
             updated_media_files, files_removed = await remove_old_cached_files(media_files, cache_dir)
