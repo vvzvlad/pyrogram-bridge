@@ -1,0 +1,41 @@
+volumes:
+  pyrogram_bridge:
+  
+services:
+  pyrogram_bridge:
+    image: ghcr.io/vvzvlad/pyrogram-bridge:latest
+    container_name: pyrogram-bridge
+    environment:
+      TG_API_ID: XXX
+      TG_API_HASH: XXX
+      PYROGRAM_BRIDGE_URL: https://pgbridge.example.com
+      API_PORT: 80
+      TOKEN: ХХХ
+      TIME_BASED_MERGE: True
+      SHOW_BRIDGE_LINK: True
+      SHOW_POST_FLAGS: True
+      TZ: Europe/Moscow
+    restart: always
+    volumes:
+      - pyrogram_bridge:/app/data
+    logging:
+      driver: "json-file"
+      options:
+        max-file: 5
+        max-size: 10m
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.pgbridge.rule: Host(`pgbridge.example.com`)
+      traefik.http.services.pgbridge.loadBalancer.server.port: 80
+      traefik.http.routers.pgbridge.entrypoints: websecure
+      traefik.http.routers.pgbridge.tls: true
+      com.centurylinklabs.watchtower.enable: "true"   
+      autoheal: true
+    healthcheck:
+      test: ["CMD", "curl", "-s", "-f", "-o", "/dev/null", "http://127.0.0.1:80/rss/vvzvlad_lytdybr?limit=1"]
+      interval: 30m
+      timeout: 5s
+      retries: 2
+      start_period: 30s
+      start_interval: 5s
+
