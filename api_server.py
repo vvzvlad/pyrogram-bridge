@@ -459,8 +459,8 @@ def calculate_cache_stats():
 @app.get("/post/html/{channel}/{post_id}", response_class=HTMLResponse)
 @app.get("/html/{channel}/{post_id}/{token}", response_class=HTMLResponse)  
 @app.get("/post/html/{channel}/{post_id}/{token}", response_class=HTMLResponse)
-async def get_post_html(channel: str, post_id: int, token: str | None = None, debug: bool = False):
-    if Config["token"]:
+async def get_post_html(channel: str, post_id: int, token: str | None = None, debug: bool = False, request: Request = None):
+    if Config["token"] and request and request.client.host not in ["127.0.0.1", "localhost"]:
         if token != Config["token"]:
             logger.error(f"Invalid token for HTML post: {token}, expected: {Config['token']}")
             raise HTTPException(status_code=403, detail="Invalid token")
@@ -483,8 +483,8 @@ async def get_post_html(channel: str, post_id: int, token: str | None = None, de
 @app.get("/post/json/{channel}/{post_id}")
 @app.get("/json/{channel}/{post_id}/{token}")
 @app.get("/post/json/{channel}/{post_id}/{token}")
-async def get_post(channel: str, post_id: int, token: str | None = None, debug: bool = False):
-    if Config["token"]:
+async def get_post(channel: str, post_id: int, token: str | None = None, debug: bool = False, request: Request = None):
+    if Config["token"] and request and request.client.host not in ["127.0.0.1", "localhost"]:
         if token != Config["token"]:
             logger.error(f"Invalid token for JSON post: {token}, expected: {Config['token']}")
             raise HTTPException(status_code=403, detail="Invalid token")
@@ -505,8 +505,8 @@ async def get_post(channel: str, post_id: int, token: str | None = None, debug: 
 
 @app.get("/health")
 @app.get("/health/{token}")
-async def health_check(token: str | None = None):
-    if Config["token"]:
+async def health_check(token: str | None = None, request: Request = None):
+    if Config["token"] and request and request.client.host not in ["127.0.0.1", "localhost"]:
         if token != Config["token"]:
             logger.error(f"Invalid token for health check: {token}, expected: {Config['token']}")
             raise HTTPException(status_code=403, detail="Invalid token")
@@ -577,14 +577,13 @@ async def get_rss_feed(channel: str,
                         output_type: str = 'rss', 
                         exclude_flags: str | None = None,
                         exclude_text: str | None = None,
-                        merge_seconds: int = 5
+                        merge_seconds: int = 5,
+                        request: Request = None
                         ):
-    if Config["token"]:
+    if Config["token"] and request and request.client.host not in ["127.0.0.1", "localhost"]:
         if token != Config["token"]:
             logger.error(f"invalid_token_error: token {token}, expected {Config['token']}")
             raise HTTPException(status_code=403, detail="Invalid token")
-        #else:
-            #logger.info(f"valid_token: token {token}")
     while True:
         try:
 
