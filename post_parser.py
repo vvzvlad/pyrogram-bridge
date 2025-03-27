@@ -127,6 +127,10 @@ class PostParser:
         
         # Check if the text contains only a URL and nothing else
         if text.strip():
+            # Check for YouTube links
+            if re.search(r'(?:youtube\.com|youtu\.be)', text.lower()):
+                return "🎥 YouTube video"
+                
             # Remove all URLs from text
             text_without_urls = re.sub(r'https?://[^\s<>"\']+', '', text.strip())
             if not text_without_urls:
