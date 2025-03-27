@@ -59,15 +59,6 @@ class PostParser:
     def __init__(self, client):
         self.client = client
 
-    def _debug_message(self, message: Message) -> Message:
-        debug_message = copy.deepcopy(message)
-        #debug_message.sender_chat = None
-        #debug_message.caption_entities = None
-        #debug_message.reactions = None
-        #debug_message.entities = None
-        print(debug_message)
-        return
-    
     def channel_name_prepare(self, channel: str):
         if isinstance(channel, str) and channel.startswith('-100'): # Convert numeric channel ID to int
             channel_id = int(channel)
@@ -81,9 +72,7 @@ class PostParser:
             channel = self.channel_name_prepare(channel)
             message = await self.client.get_messages(channel, post_id)
 
-            # Print debug message if global debug is enabled or debug url parameter is True
-            if Config["debug"] or debug:
-                self._debug_message(message)
+            if Config["debug"]: print(message)
 
             if not message:
                 logger.error(f"post_not_found: channel {channel}, post_id {post_id}")
