@@ -657,7 +657,8 @@ class PostParser:
                 second_line_parts.extend(links)
 
             if second_line_parts:
-                parts.append(f'<div class="date-links">{' <span class="spacer"></span> '.join(second_line_parts)}</div>')
+                spacer = " <span class=\"spacer\"></span> "
+                parts.append(f'<div class="date-links">{spacer.join(second_line_parts)}</div>')
 
             # Third line: flags (if any)
             if flags := self._format_flags(message):
