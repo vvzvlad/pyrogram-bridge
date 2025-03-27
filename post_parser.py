@@ -306,6 +306,42 @@ class PostParser:
         html_content = []
         data = self.process_message(message)['html']
 
+        # Add CSS styles
+        html_content.append('''
+<style>
+.message-footer {
+    margin-top: 10px;
+    font-size: 0.9em;
+    color: #666;
+}
+.reactions-views {
+    margin-bottom: 5px;
+}
+.reaction {
+    margin-right: 5px;
+}
+.spacer {
+    display: inline-block;
+    width: 1em;
+}
+.date-links {
+    margin: 5px 0;
+}
+.date-links a {
+    margin-right: 1em;
+    color: #0088cc;
+    text-decoration: none;
+}
+.date-links a:hover {
+    text-decoration: underline;
+}
+.flags {
+    color: #666;
+    font-size: 0.9em;
+}
+</style>
+''')
+
         html_content.append(f'<div class="message-header">{data["header"]}</div>')
         html_content.append(f'<div class="message-media">{data["media"]}</div>')
         html_content.append(f'<div class="message-text">{data["body"]}</div>')
@@ -325,7 +361,7 @@ class PostParser:
         
         flags = self._extract_flags(message)
         if flags:
-            return f'<div class="message-flags">Flags: {", ".join(flags)}</div>'
+            return f'<span class="flags">🏷 {", ".join(flags)}</span>'
         return ''
 
     def process_message(self, message: Message) -> Dict[Any, Any]:
@@ -575,6 +611,7 @@ class PostParser:
         try:
             parts = []
             
+            # First line: reactions and views
             reactions_html = ""
             views_html = ""
             if reactions := getattr(message, "reactions", None):
@@ -582,24 +619,24 @@ class PostParser:
                     # Replace None or empty emoji with replacement character
                     emoji = reaction.emoji
                     if emoji is None or emoji == "None" or emoji == "":
-                        emoji = "�"  # Question mark as replacement for missing emojis
-                    reactions_html += f'<span class="reaction">{emoji} {reaction.count}&nbsp;&nbsp;</span>'
+                        emoji = "��"  # Question mark as replacement for missing emojis
+                    reactions_html += f'<span class="reaction">{emoji} {reaction.count}</span>'
                 reactions_html = reactions_html.rstrip()
 
             if views := getattr(message, "views", None):
-                views_html = f'<span class="views">{views} views</span>'
+                views_html = f'<span class="views">👁 {views}</span>'
 
-            # Combine reactions and views on the same line
+            # Combine reactions and views with proper spacing
             if reactions_html or views_html:
-                parts.append(f'{reactions_html}&nbsp;&nbsp;{views_html}')
+                parts.append(f'<div class="reactions-views">{reactions_html} <span class="spacer"></span> {views_html}</div>')
 
-            # Add date and links on the same line
+            # Second line: date and links
             second_line_parts = []
             
             # Format date as DD/MM/YY, HH:MM:SS
             if message.date:
                 formatted_date = message.date.strftime("%d/%m/%y, %H:%M:%S")
-                second_line_parts.append(formatted_date)
+                second_line_parts.append(f'<span class="date">{formatted_date}</span>')
 
             # Add links
             channel_identifier = self.get_channel_username(message)
@@ -620,9 +657,13 @@ class PostParser:
                 second_line_parts.extend(links)
 
             if second_line_parts:
-                parts.append('&nbsp;&nbsp;&nbsp;&nbsp;'.join(second_line_parts))
+                parts.append(f'<div class="date-links">{' <span class="spacer"></span> '.join(second_line_parts)}</div>')
 
-            result_html = '<br>'.join(parts) if parts else None
+            # Third line: flags (if any)
+            if flags := self._format_flags(message):
+                parts.append(f'<div class="flags">{flags}</div>')
+
+            result_html = '\n'.join(parts) if parts else None
             return self._sanitize_html(result_html) if result_html else None
             
         except Exception as e:
