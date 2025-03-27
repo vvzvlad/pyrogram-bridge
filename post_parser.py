@@ -325,7 +325,11 @@ class PostParser:
         
         flags = self._extract_flags(message)
         if flags:
-            return f'🏷 {" 🏷".join(flags)}'
+            flags_html = ['<div class="message-flags">']
+            for flag in flags:
+                flags_html.append(f'🏷 {flag}')
+            flags_html.append('</div>')
+            return ' '.join(flags_html)
         return ''
 
     def process_message(self, message: Message) -> Dict[Any, Any]:
@@ -575,52 +579,52 @@ class PostParser:
         try:
             parts = []
             
+            # First line: reactions + views + date
+            first_line_parts = []
+            
+            # Add reactions
             reactions_html = ""
-            views_html = ""
             if reactions := getattr(message, "reactions", None):
                 for reaction in reactions.reactions:
                     # Replace None or empty emoji with replacement character
                     emoji = reaction.emoji
                     if emoji is None or emoji == "None" or emoji == "":
                         emoji = "�"  # Question mark as replacement for missing emojis
-                    reactions_html += f'{emoji} {reaction.count} '
-                reactions_html = reactions_html.strip()
+                    reactions_html += f'<span class="reaction">{emoji} {reaction.count}&nbsp;&nbsp;</span>'
+                reactions_html = reactions_html.rstrip()
+                first_line_parts.append(reactions_html)
 
+            # Add views
             if views := getattr(message, "views", None):
-                views_html = f'{views} 👁'
+                first_line_parts.append(f'<span class="views">{views} 👁</span>')
 
-            # Combine reactions and views on the same line
-            if reactions_html or views_html:
-                parts.append(f'{reactions_html} | {views_html}')
-
-            # Add date and links on the same line
-            second_line_parts = []
-            
-            # Format date as DD/MM/YY, HH:MM:SS
+            # Add date
             if message.date:
                 formatted_date = message.date.strftime("%d/%m/%y, %H:%M:%S")
-                second_line_parts.append(formatted_date)
+                first_line_parts.append(formatted_date)
 
-            # Add links
+            if first_line_parts:
+                parts.append('&nbsp;&nbsp;|&nbsp;&nbsp;'.join(first_line_parts))
+
+            # Second line: links
             channel_identifier = self.get_channel_username(message)
             if channel_identifier:
                 links = []
                 base_url = Config['pyrogram_bridge_url']
                 
-                if channel_identifier.startswith('-100'):  # For channels with only ID
-                    channel_id = channel_identifier[4:]  # Remove '-100' prefix for web links
-                    links.append(f'Open in Telegram')
-                    links.append(f'Open in Web')
-                else:  # For channels with username
-                    links.append(f'Open in Telegram')
-                    links.append(f'Open in Web')
+                if channel_identifier.startswith('-100'):
+                    channel_id = channel_identifier[4:]
+                    links.append(f'<a href="tg://resolve?domain=c/{channel_id}&post={message.id}">Open in Telegram</a>')
+                    links.append(f'<a href="https://t.me/c/{channel_id}/{message.id}">Open in Web</a>')
+                else:
+                    links.append(f'<a href="tg://resolve?domain={channel_identifier}&post={message.id}">Open in Telegram</a>')
+                    links.append(f'<a href="https://t.me/{channel_identifier}/{message.id}">Open in Web</a>')
                 if Config['show_bridge_link']:
                     token = Config['token']
-                    links.append(f'Open in Bridge')
-                second_line_parts.extend(links)
-
-            if second_line_parts:
-                parts.append(' | '.join(second_line_parts))
+                    links.append(f'<a href="{base_url}/html/{channel_identifier}/{message.id}?token={token}&debug=true">Open in Bridge</a>')
+                
+                if links:
+                    parts.append('&nbsp;|&nbsp;'.join(links))
 
             result_html = '<br>'.join(parts) if parts else None
             return self._sanitize_html(result_html) if result_html else None
