@@ -531,7 +531,7 @@ class PostParser:
         if reactions_views_html := self._reactions_views_links(message):  # Add reactions, views, date and links
             content_footer.append(reactions_views_html)
         if flags_html := self._format_flags(message):  # Add flags
-            content_footer.append(flags_html)
+            content_footer.append('<br>' + flags_html)
         html_footer = '\n'.join(content_footer)
         html_footer = self._sanitize_html(html_footer)
         return html_footer
