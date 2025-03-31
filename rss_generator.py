@@ -77,6 +77,7 @@ async def _create_messages_groups(messages):
             if message.service:
                 if 'PINNED_MESSAGE' in str(message.service): continue
                 if 'NEW_CHAT_PHOTO' in str(message.service): continue
+                if 'NEW_CHAT_TITLE' in str(message.service): continue
                 
             if message.media_group_id:
                 if message.media_group_id not in media_groups:

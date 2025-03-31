@@ -137,7 +137,7 @@ class PostParser:
                 if hasattr(message.document, 'mime_type') and message.document.mime_type == 'application/pdf': return "📄 Document"
                 else: return "📎 Document"
             elif message.web_page:                              return "🔗 Web link"
-            return "📷 Media post"
+            return "🤷‍♂️ Unknown post"
 
         # Remove URLs
         text = re.sub(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', '', text)
