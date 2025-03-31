@@ -124,6 +124,7 @@ class PostParser:
                     return "🎥 YouTube"
                 return "🔗 Web link"
             
+
         if not text:
             if   message.media == MessageMediaType.PHOTO:       return "📷 Photo"
             elif message.media == MessageMediaType.VIDEO:       return "🎥 Video"
@@ -575,10 +576,14 @@ class PostParser:
             reactions_html = ""
             if reactions := getattr(message, "reactions", None):
                 for reaction in reactions.reactions:
-                    # Replace None or empty emoji with replacement character
-                    emoji = reaction.emoji
-                    if emoji is None or emoji == "None" or emoji == "":
-                        emoji = "\xEF\xBF\xBD"  # Question mark as replacement for missing emojis
+                    emoji = "⭐" # Default for paid reactions
+                    if hasattr(reaction, "emoji") and reaction.emoji:
+                        emoji = reaction.emoji
+                    elif hasattr(reaction, "custom_emoji_id"):
+                        emoji = "❓" # Custom emoji placeholder
+                    elif not getattr(reaction, "is_paid", False):
+                        emoji = "❓" # Default for unknown reactions
+                    
                     reactions_html += f'<span class="reaction">{emoji} {reaction.count}&nbsp;&nbsp;</span>'
                 reactions_html = reactions_html.rstrip()
                 first_line_parts.append(reactions_html)
