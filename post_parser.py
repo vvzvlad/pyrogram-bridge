@@ -116,13 +116,12 @@ class PostParser:
         
         # Check if the text contains only a URL and nothing else
         if text.strip():
-            # Check for YouTube links
-            if re.search(r'(?:youtube\.com|youtu\.be)', text.lower()):
-                return "🎥 YouTube video"
-                
             # Remove all URLs from text
             text_without_urls = re.sub(r'https?://[^\s<>"\']+', '', text.strip())
             if not text_without_urls:
+                # If we have only URL, check if it's YouTube
+                if re.search(r'(?:youtube\.com|youtu\.be)', text.lower()):
+                    return "🎥 YouTube"
                 return "🔗 Web link"
             
         if not text:
@@ -224,15 +223,15 @@ class PostParser:
             getattr(message, "forward_sender_name", None)):
             flags.append("fwd")
 
-        # Add flag "video" if the message media is VIDEO or ANIMATION and the body text is up to 100 characters.
+        # Add flag "video" if the message media is VIDEO or ANIMATION and the body text is up to 200 characters.
         if (message.media in [MessageMediaType.VIDEO, MessageMediaType.ANIMATION] and 
-            len((message.text or message.caption or '').strip()) <= 100):
+            len((message.text or message.caption or '').strip()) <= 200):
             flags.append("video")
         
         # Add flag for posts without images
         if not message.media or message.media == MessageMediaType.POLL:
             flags.append("no_image")
-        
+
         # Add flag for sticker messages
         if message.media == MessageMediaType.STICKER:
             flags.append("sticker")
@@ -579,7 +578,7 @@ class PostParser:
                     # Replace None or empty emoji with replacement character
                     emoji = reaction.emoji
                     if emoji is None or emoji == "None" or emoji == "":
-                        emoji = "�"  # Question mark as replacement for missing emojis
+                        emoji = "\xEF\xBF\xBD"  # Question mark as replacement for missing emojis
                     reactions_html += f'<span class="reaction">{emoji} {reaction.count}&nbsp;&nbsp;</span>'
                 reactions_html = reactions_html.rstrip()
                 first_line_parts.append(reactions_html)
