@@ -576,14 +576,10 @@ class PostParser:
             reactions_html = ""
             if reactions := getattr(message, "reactions", None):
                 for reaction in reactions.reactions:
-                    emoji = "⭐" # Default for paid reactions
-                    if hasattr(reaction, "emoji") and reaction.emoji:
-                        emoji = reaction.emoji
-                    elif hasattr(reaction, "custom_emoji_id"):
-                        emoji = "❓" # Custom emoji placeholder
-                    elif not getattr(reaction, "is_paid", False):
-                        emoji = "❓" # Default for unknown reactions
-                    
+                    if getattr(reaction, "is_paid", False): emoji = "⭐" 
+                    elif hasattr(reaction, "emoji") and reaction.emoji: emoji = reaction.emoji 
+                    elif hasattr(reaction, "custom_emoji_id"): emoji = "❓" # Then check custom emoji
+                    else: emoji = "❓" # Default for unknown cases
                     reactions_html += f'<span class="reaction">{emoji} {reaction.count}&nbsp;&nbsp;</span>'
                 reactions_html = reactions_html.rstrip()
                 first_line_parts.append(reactions_html)
