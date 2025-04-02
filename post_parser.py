@@ -453,9 +453,11 @@ class PostParser:
                 elif message.media == MessageMediaType.AUDIO:
                     mime_type = getattr(message.audio, 'mime_type', 'audio/mpeg')
                     content_media.append(f'<audio controls style="width:100%; max-width:400px;"><source src="{url}" type="{mime_type}"></audio>')
+                    content_media.append('<br>')
                 elif message.media == MessageMediaType.VOICE:
                     mime_type = getattr(message.voice, 'mime_type', 'audio/ogg')
                     content_media.append(f'<audio controls style="width:100%; max-width:400px;"><source src="{url}" type="{mime_type}"></audio>')
+                    content_media.append('<br>')
                 elif message.media == MessageMediaType.STICKER:
                     emoji = getattr(message.sticker, 'emoji', '')
                     content_media.append(f'<img src="{url}" alt="Sticker {emoji}" style="max-width:100%; width:auto; height:auto; max-height:200px; object-fit:contain;">')
