@@ -1,7 +1,14 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+# flake8: noqa
+# pylint: disable=broad-exception-raised, raise-missing-from, too-many-arguments, redefined-outer-name
+# pylance: disable=reportMissingImports, reportMissingModuleSource, reportGeneralTypeIssues
+# type: ignore
+
 import logging
 import os
 import mimetypes
-import base64
 
 import json
 from datetime import datetime
