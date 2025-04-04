@@ -245,7 +245,7 @@ async def download_media_file(channel: str, post_id: int, file_unique_id: str) -
                 with open(file_ids_path, 'r', encoding='utf-8') as f:
                     media_files = json.load(f)
                 for file_data in media_files:
-                    if (file_data.get('channel') == channel and 
+                    if (file_data.get('channel') == str(channel) and  # Ensure channel is string for comparison
                         file_data.get('post_id') == post_id and 
                         file_data.get('file_unique_id') == file_unique_id):
                         file_data['added'] = datetime.now().timestamp()
@@ -258,8 +258,38 @@ async def download_media_file(channel: str, post_id: int, file_unique_id: str) -
 
     file_id = await find_file_id_in_message(message, file_unique_id)
     if not file_id:
-        logger.error(f"Media with file_unique_id {file_unique_id} not found in message {post_id}")
+        error_message = f"Media with file_unique_id {file_unique_id} not found in message {post_id} for channel {channel}"
+        logger.error(error_message)
+        
+        # Attempt to remove the invalid entry from media_file_ids.json
+        file_ids_path = os.path.join(os.path.abspath("./data"), 'media_file_ids.json')
+        try:
+            if os.path.exists(file_ids_path):
+                with open(file_ids_path, 'r', encoding='utf-8') as f:
+                    media_files = json.load(f)
+                
+                initial_count = len(media_files)
+                media_files_updated = [
+                    f_data for f_data in media_files 
+                    if not (
+                        f_data.get('channel') == str(channel) and 
+                        f_data.get('post_id') == post_id and 
+                        f_data.get('file_unique_id') == file_unique_id
+                    )
+                ]
+                
+                if len(media_files_updated) < initial_count:
+                    with open(file_ids_path, 'w', encoding='utf-8') as f:
+                        json.dump(media_files_updated, f, ensure_ascii=False, indent=2)
+                    logger.info(f"Removed invalid entry for {channel}/{post_id}/{file_unique_id} from media_file_ids.json")
+                else:
+                     logger.warning(f"Entry for {channel}/{post_id}/{file_unique_id} not found in media_file_ids.json for removal")
+
+        except Exception as e:
+            logger.error(f"Failed to remove entry for {channel}/{post_id}/{file_unique_id} from media_file_ids.json: {str(e)}")
+            
         raise HTTPException(status_code=404, detail="File not found in message")
+        
     file_path = await client.client.download_media(file_id, file_name=cache_path)
     logger.info(f"Downloaded media file {file_unique_id} to {cache_path}")
     return file_path, False
