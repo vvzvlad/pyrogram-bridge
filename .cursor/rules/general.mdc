@@ -1,0 +1,134 @@
+# General Development & Project Convention Rules
+
+- **Clarity and Simplicity:** Write code that is easy to understand and maintain. Avoid unnecessary complexity.
+- **Modularity:** Break down functionality into smaller, reusable components (functions, classes, modules). *Avoid creating separate directories for every small module unless complexity absolutely requires it.*
+- **Configuration Management:** Separate configuration from code. Use a dedicated file (like `config.py`) or environment variables.
+- **Dependency Management:** List *all* Python dependencies with pinned versions in `requirements.txt`. Use a virtual environment (like `.venv`) for local development (ensure `.venv` is in `.gitignore`).
+- **Containerization:**
+    - Use `Dockerfile` to define the application image. Follow established patterns in the existing `Dockerfile`.
+      ```Dockerfile # Example Structure
+      FROM python:3.11-slim
+
+      WORKDIR /app
+
+      # Set environment variables (optional)
+      # ENV PYTHONDONTWRITEBYTECODE 1
+      # ENV PYTHONUNBUFFERED 1
+
+      # Install dependencies
+      COPY requirements.txt .
+      RUN pip install --no-cache-dir -r requirements.txt
+
+      # Copy application code
+      COPY src/ /app/src/
+      # If code is in root:
+      # COPY . .
+
+      # Expose port (if applicable)
+      EXPOSE 8000
+
+      # Command to run the application
+      CMD ["python", "src/api_server.py"] # or "uvicorn", "src.api_server:app", ...
+      ```
+    - Use `docker-compose.yml` for local development setup and potentially for deployment orchestration.
+      ```yaml # Example Structure (using pre-built image) not use version, its deprecated!
+      volumes:
+        app_data: # Define named volume for persistence
+
+      services:
+        app:
+          image: ghcr.io/vvzvlad/project:latest # Use pre-built image
+          container_name: project-name
+          ports:
+            - "8000:80" # Map host port 8000 to container port 80 (adjust if needed)
+          volumes:
+            - app_data:/app/data # Mount named volume for data
+          environment:
+            TG_API_ID: "YOUR_API_ID"
+            TG_API_HASH: "YOUR_API_HASH"
+          restart: unless-stopped
+      ```
+    - **Data Persistence:** Mount the `./data/` directory as a volume in Docker containers to persist application data (cache, logs, etc.) outside the container. All application-generated files should go here.
+- **Version Control:** Follow standard Git practices (meaningful commit messages, branches for features/fixes).
+- **CI/CD:** Utilize GitHub Actions (workflows defined in `.github/workflows/`) for automated tasks like testing, building, and deployment. (Note: Add this section if `.github/` directory is actively used for workflows).
+- **Documentation:**
+    - Maintain a comprehensive `README.md` explaining the project's purpose, setup, configuration, and usage.
+      Recommended `README.md` Structure:
+      ```markdown
+      # Project Title
+
+      [Brief Description]
+
+      ## Features
+      - Feature 1
+      - Feature 2
+
+      ## Requirements
+      - Docker & Docker Compose
+      - Python 3.x (for local non-Docker development, if supported)
+      - ...
+
+      ## Installation & Setup (Docker)
+      1. Ensure Docker and Docker Compose are installed.
+      2. Create `docker-compose.yml` based on the example in the README or the rules.
+      3. Create `.env` file (if needed for `env_file` directive in your *actual* `docker-compose.yml`) or configure environment variables directly in `docker-compose.yml`.
+      4. Pull the image and start the container: `docker-compose up -d`
+      5. Perform first-time setup if necessary (login via `docker exec`, see main README).
+      6. Access the application at `http://localhost:8000` (or the configured host port).
+
+      ## Configuration
+      Explain environment variables (loaded via `environment` or `env_file` in Docker Compose) or config file settings.
+
+      ## Usage
+      Explain how to use the application (API endpoints, common tasks).
+
+      ## Development
+      Instructions for setting up a local development environment (if different from Docker setup).
+        - How to run tests (if applicable).
+        - Linting/formatting tools and commands.
+
+      ## Contributing (Optional)
+
+      ## License (Optional)
+      ```
+    - Add docstrings to public functions and classes explaining their purpose, arguments, and return values. Add comments for complex or non-obvious logic.
+- **Language:** All code, comments, logs, and documentation must be in English.
+- **Naming:** Use `snake_case` for variables, functions, and filenames. Use `PascalCase` for classes.
+- **Testing:** While not currently implemented, aim to add tests for critical functionality in the future (e.g., in the `tests/` directory).
+- **Standard File Header:** Start all Python files (`.py`) with the following header for consistency and linter configuration:
+  ```python
+  #!/usr/bin/env python3
+  # -*- coding: utf-8 -*-
+
+  # flake8: noqa
+  # pylint: disable=broad-exception-raised, raise-missing-from, too-many-arguments, redefined-outer-name
+  # pylance: disable=reportMissingImports, reportMissingModuleSource, reportGeneralTypeIssues
+  # type: ignore
+
+  # --- Your code starts here ---
+  ```
+
+- **Project Structure (Target):**
+    - All Python source code should ideally reside within the `src/` directory.
+    - Keep the structure flat initially; avoid deep nesting unless necessary.
+    - Example Target Layout:
+      ```
+      .github/
+      data/
+      src/
+          __init__.py
+          api_server.py
+          config.py
+          post_parser.py
+          rss_generator.py
+          telegram_client.py
+          url_signer.py
+          utils.py # For common helpers
+      tests/
+      .cursor/
+      .gitignore
+      Dockerfile
+      docker-compose.yml
+      README.md
+      requirements.txt
+      ``` 

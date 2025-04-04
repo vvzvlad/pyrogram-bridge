@@ -1,0 +1,16 @@
+# Logging Rules
+
+- **Library:** Use the standard Python `logging` module.
+- **Configuration:** Configure logger level (e.g., `INFO`, `DEBUG`) and format centrally, potentially based on environment (development vs. production).
+- **Level Usage:**
+    - `DEBUG`: Detailed information, typically of interest only when diagnosing problems.
+    - `INFO`: Confirmation that things are working as expected (e.g., server start, request received, background task completion).
+    - `WARNING`: An indication that something unexpected happened, or indicative of some problem in the near future (e.g., 'disk space low'). The software is still working as expected.
+    - `ERROR`: Due to a more serious problem, the software has not been able to perform some function.
+    - `CRITICAL`: A serious error, indicating that the program itself may be unable to continue running.
+- **Message Content:**
+    - **Be Specific:** Avoid generic messages. State *what* happened and provide context. Instead of "Error", write "Failed to download media file {file_id} from channel {channel_id}: {error_message}".
+    - **Include Relevant Data:** Log important identifiers (user IDs, request IDs, file IDs, channel IDs) when applicable.
+    - **Language:** Log messages must be in English.
+- **Context:** Ensure log records include timestamp, logger name, level, and the message.
+- **Performance:** Be mindful of logging frequency in performance-critical sections. Avoid excessive logging in loops unless necessary for debugging. 

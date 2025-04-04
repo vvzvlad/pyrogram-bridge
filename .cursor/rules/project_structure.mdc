@@ -1,0 +1,9 @@
+# Project Structure Rules
+
+- **Keep core logic in root files:** `api_server.py`, `post_parser.py`, `rss_generator.py`, `telegram_client.py`, `url_signer.py` contain the main functionality.
+- **Configuration:** All configuration is managed in `config.py`.
+- **Dependencies:** Python dependencies are listed in `requirements.txt`.
+- **Docker:** Docker setup is defined in `Dockerfile` and `docker-compose.yml`.
+- **Data:** Persistent data and cache should be stored in the `data/` directory.
+- **Naming Conventions:** Use `snake_case` for filenames and variables.
+- **Language:** All code comments and log messages must be in English. 

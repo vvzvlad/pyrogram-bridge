@@ -112,24 +112,46 @@ async def find_file_id_in_message(message, file_unique_id: str):
         logger.debug(f"Message {message.id} is a poll, skipping media search")
         return None
         
-    if message.photo and message.photo.file_unique_id == file_unique_id:
-        return message.photo.file_id
-    elif message.video and message.video.file_unique_id == file_unique_id:
-        return message.video.file_id
-    elif message.animation and message.animation.file_unique_id == file_unique_id:
-        return message.animation.file_id
-    elif message.video_note and message.video_note.file_unique_id == file_unique_id:
-        return message.video_note.file_id
-    elif message.audio and message.audio.file_unique_id == file_unique_id:
-        return message.audio.file_id
-    elif message.voice and message.voice.file_unique_id == file_unique_id:
-        return message.voice.file_id
-    elif message.sticker and message.sticker.file_unique_id == file_unique_id:
-        return message.sticker.file_id
-    elif message.web_page and message.web_page.photo and message.web_page.photo.file_unique_id == file_unique_id:
-        return message.web_page.photo.file_id
-    elif message.document and message.document.file_unique_id == file_unique_id:
-        return message.document.file_id
+    media_found = []
+    if message.photo:
+        media_found.append(f"photo ({message.photo.file_unique_id})")
+        if message.photo.file_unique_id == file_unique_id:
+            return message.photo.file_id
+    if message.video:
+        media_found.append(f"video ({message.video.file_unique_id})")
+        if message.video.file_unique_id == file_unique_id:
+            return message.video.file_id
+    if message.animation:
+        media_found.append(f"animation ({message.animation.file_unique_id})")
+        if message.animation.file_unique_id == file_unique_id:
+            return message.animation.file_id
+    if message.video_note:
+        media_found.append(f"video_note ({message.video_note.file_unique_id})")
+        if message.video_note.file_unique_id == file_unique_id:
+            return message.video_note.file_id
+    if message.audio:
+        media_found.append(f"audio ({message.audio.file_unique_id})")
+        if message.audio.file_unique_id == file_unique_id:
+            return message.audio.file_id
+    if message.voice:
+        media_found.append(f"voice ({message.voice.file_unique_id})")
+        if message.voice.file_unique_id == file_unique_id:
+            return message.voice.file_id
+    if message.sticker:
+        media_found.append(f"sticker ({message.sticker.file_unique_id})")
+        if message.sticker.file_unique_id == file_unique_id:
+            return message.sticker.file_id
+    if message.web_page and message.web_page.photo:
+        media_found.append(f"web_page.photo ({message.web_page.photo.file_unique_id})")
+        if message.web_page.photo.file_unique_id == file_unique_id:
+            return message.web_page.photo.file_id
+    if message.document:
+        media_found.append(f"document ({message.document.file_unique_id})")
+        if message.document.file_unique_id == file_unique_id:
+            return message.document.file_id
+            
+    # If we reached here, the file_unique_id was not found
+    logger.warning(f"Could not find media with file_unique_id '{file_unique_id}' in message {message.id} (channel: {message.chat.id}). Found media: {', '.join(media_found) or 'None'}")
     return None
 
 
