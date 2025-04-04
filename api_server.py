@@ -28,7 +28,7 @@ from telegram_client import TelegramClient
 from config import get_settings
 from rss_generator import generate_channel_rss, generate_channel_html
 from post_parser import PostParser
-from url_signer import verify_media_digest
+from url_signer import verify_media_digest, generate_media_digest
 from starlette.middleware.base import BaseHTTPMiddleware
 import json_repair
 
@@ -591,7 +591,8 @@ async def get_media(channel: str, post_id: int, file_unique_id: str, digest: str
     try:
         url = f"{channel}/{post_id}/{file_unique_id}"
         if not verify_media_digest(url, digest):
-            logger.error(f"Invalid digest for media {url}: {digest}, expected: {digest}")
+            expected_digest = generate_media_digest(url)
+            logger.error(f"Invalid digest for media {url}: {digest}, expected: {expected_digest}")
             raise HTTPException(status_code=403, detail="Invalid URL signature")
         else:
             logger.info(f"Valid digest for media {url}: {digest}")   
