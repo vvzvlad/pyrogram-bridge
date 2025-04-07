@@ -117,23 +117,8 @@ class PostParser:
         return "Unknown author"
 
     def _generate_title(self, message: Message) -> str:
-        # Check for "channel created" service message
-        if getattr(message, "channel_chat_created", False):
-            return "✨ Channel created"
-        text = message.text or message.caption or ''
-        
-        # Check if the text contains only a URL and nothing else
-        if text.strip():
-            # Remove all URLs from text
-            text_without_urls = re.sub(r'https?://[^\s<>"\']+', '', text.strip())
-            if not text_without_urls:
-                # If we have only URL, check if it's YouTube
-                if re.search(r'(?:youtube\.com|youtu\.be)', text.lower()):
-                    return "🎥 YouTube"
-                return "🔗 Web link"
-            
-
-        if not text:
+        # Priority 1: Media Type (if present and not just a webpage preview/poll)
+        if message.media and message.media != MessageMediaType.WEB_PAGE and message.media != MessageMediaType.POLL:
             if   message.media == MessageMediaType.PHOTO:       return "📷 Photo"
             elif message.media == MessageMediaType.VIDEO:       return "🎥 Video"
             elif message.media == MessageMediaType.ANIMATION:   return "🎞 GIF"
@@ -142,38 +127,58 @@ class PostParser:
             elif message.media == MessageMediaType.VIDEO_NOTE:  return "📱 Video circle"
             elif message.media == MessageMediaType.STICKER:     return "🎯 Sticker"
             elif message.media == MessageMediaType.POLL:        return "📊 Poll"
-            elif message.media == MessageMediaType.DOCUMENT:    
-                if hasattr(message.document, 'mime_type') and message.document.mime_type == 'application/pdf': return "📄 Document"
-                else: return "📎 Document"
-            elif message.web_page:                              return "🔗 Web link"
-            return "🤷‍♂️ Unknown post"
+            elif message.media == MessageMediaType.DOCUMENT:
+                # Distinguish PDF documents
+                if hasattr(message.document, 'mime_type') and 'pdf' in message.document.mime_type.lower():
+                    return "📄 PDF Document"
+                else:
+                    return "📎 Document"
 
-        # Remove URLs
-        text = re.sub(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', '', text)
-        # Remove HTML tags
-        text = re.sub('<[^<]+?>', '', text)
-        # Remove multiple spaces and empty lines
-        text = '\n'.join(line.strip() for line in text.split('\n') if line.strip())
+        # Priority 2: Service Messages
+        if getattr(message, "channel_chat_created", False):
+            return "✨ Channel created"
 
-        # If after removing URLs and other formatting the text is empty,
-        # and we have a web_page, set the title to "Web link"
-        if not text.strip() and getattr(message, "web_page", None):
-            return "🔗 Web link"
+        text = message.text or message.caption or ''
+        text_stripped = text.strip()
 
-        # Get first non-empty line
-        first_line = text.split('\n', maxsplit=1)[0] if text else ""
-        
-        max_length = 100
-        if len(first_line) <= max_length:
-            return first_line.strip()
-        
-        # Cut to last space
-        trimmed = first_line[:max_length]
-        last_space = trimmed.rfind(' ')
-        if last_space > 0:
-            trimmed = trimmed[:last_space]
-        
-        return f"{trimmed.strip()}..." if trimmed else ""
+        # Priority 3: Text Content (if media didn't determine the title)
+        if text_stripped:
+            # Check if the text contains only URL(s)
+            text_without_urls = re.sub(r'https?://[^\s<>"\']+', '', text_stripped)
+            if not text_without_urls.strip(): # If only URL(s) are present after removing them
+                # Check for specific domains like YouTube
+                if re.search(r'(?:youtube\.com|youtu\.be)', text_stripped.lower()):
+                    return "🎥 YouTube Link" # More specific title for YouTube links
+                return "🔗 Web link" # Generic title for other links
+
+            # Use first line of text if it's not just URL(s)
+            # Clean the text by removing URLs and HTML tags first
+            clean_text = re.sub(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', '', text)
+            clean_text = re.sub('<[^<]+?>', '', clean_text)
+            # Remove empty lines resulting from cleaning
+            clean_text = '\\n'.join(line.strip() for line in clean_text.split('\\n') if line.strip())
+
+            if clean_text: # If there is meaningful text left
+                first_line = clean_text.split('\\n', maxsplit=1)[0]
+                max_length = 100 # Max title length
+                if len(first_line) <= max_length:
+                    return first_line.strip() # Use the first line if it's short enough
+
+                # Trim longer lines intelligently
+                trimmed = first_line[:max_length]
+                last_space = trimmed.rfind(' ')
+                if last_space != -1: # Trim at the last space found
+                    trimmed = trimmed[:last_space]
+
+                # Append ellipsis if trimmed
+                return f"{trimmed.strip()}..." if trimmed else "📝 Text Post" # Fallback if trimming results in empty string
+
+        # Priority 4: Fallbacks for specific types if text is empty or was just URL(s)
+        # This handles cases where only a web_page preview exists without significant text/caption
+        if message.web_page: return "🔗 Web link"
+
+        # Final fallback if no other condition met
+        return "�� Unknown Post"
 
     def _format_forward_info(self, message: Message) -> Union[str, None]:
         if forward_from_chat := getattr(message, "forward_from_chat", None):
@@ -303,6 +308,8 @@ class PostParser:
         html_content = []
         data = self.process_message(message)['html']
 
+        if debug:
+            html_content.append(f'<div class="title">Title: {data["title"]}</div>')
         html_content.append(f'<div class="message-header">{data["header"]}</div>')
         html_content.append(f'<div class="message-media">{data["media"]}</div>')
         html_content.append(f'<div class="message-text">{data["body"]}</div>')
