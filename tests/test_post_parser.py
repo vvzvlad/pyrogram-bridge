@@ -22,13 +22,14 @@ class TestPostParserGenerateTitle(unittest.TestCase):
     def tearDown(self):
         pass
 
-    def _create_mock_message(self, media=None, text=None, caption=None, document_mime_type=None, channel_chat_created=False, web_page=None):
+    def _create_mock_message(self, media=None, text=None, caption=None, document_mime_type=None, channel_chat_created=False, web_page=None, poll=None):
         message = MagicMock(spec=Message)
         message.media = media
         message.text = text
         message.caption = caption
         message.web_page = web_page
         message.channel_chat_created = channel_chat_created
+        message.poll = poll
 
         # Mock document properties if document exists
         if document_mime_type:
@@ -82,11 +83,11 @@ class TestPostParserGenerateTitle(unittest.TestCase):
 
     def test_generate_title_text_only(self):
         message = self._create_mock_message(text="This is the first line.\nThis is the second line.")
-        self.assertEqual(self.parser._generate_title(message), "This is the first line.\nThis is the second line.")
+        self.assertEqual(self.parser._generate_title(message), "This is the first line") #first line and remove dot
 
     def test_generate_title_text_with_html(self):
         message = self._create_mock_message(text="<b>Bold</b> text first line.\n<i>Italic</i> second line.")
-        self.assertEqual(self.parser._generate_title(message), "Bold text first line.\nItalic second line.")
+        self.assertEqual(self.parser._generate_title(message), "Bold text first line") #first line and remove tags and dot
 
     def test_generate_title_text_with_url_and_text(self):
         message = self._create_mock_message(text="Check out this link: https://example.com")
@@ -106,35 +107,33 @@ class TestPostParserGenerateTitle(unittest.TestCase):
 
     def test_generate_title_caption_with_url_and_text(self):
         message = self._create_mock_message(media=MessageMediaType.PHOTO, caption="Look at this photo! https://example.com/image.jpg")
-        # Media takes priority
-        self.assertEqual(self.parser._generate_title(message), "📷 Photo")
+        self.assertEqual(self.parser._generate_title(message), "Look at this photo!")
 
     def test_generate_title_long_text_trimming(self):
         long_text = "This is a very long line of text that definitely exceeds the maximum length allowed for a title, so it should be trimmed intelligently at the last space before the limit."
         message = self._create_mock_message(text=long_text)
-        expected_title = "This is a very long line of text that definitely exceeds the maximum length allowed for a title, so..."
+        expected_title = "This is a very long line of text that..." #cut at 30 symbols
         self.assertEqual(self.parser._generate_title(message), expected_title)
 
     def test_generate_title_long_text_no_space_trimming(self):
         long_text = "Thisisaverylonglineoftextthatdefinitelyexceedsthemaximumlengthallowedforatitlesoitshouldbetrimmedatthelimitbecausehasnospaces."
         message = self._create_mock_message(text=long_text)
-        expected_title = "Thisisaverylonglineoftextthatdefinitelyexceedsthemaximumlengthallowedforatitlesoitshouldbetrimmedatt..."
+        expected_title = "Thisisaverylonglineoftextthatdefinite..." #cut at 30 symbols
         self.assertEqual(self.parser._generate_title(message), expected_title)
 
     def test_generate_title_text_with_only_html_and_urls(self):
-        message = self._create_mock_message(text="<a href='https://example.com'>Link</a> https://another.link")
-        self.assertEqual(self.parser._generate_title(message), "<a href='")
+        message = self._create_mock_message(text="<a href='https://example.com'>Link name</a> https://another.link")
+        self.assertEqual(self.parser._generate_title(message), "Link name")
 
     def test_generate_title_empty_text_after_cleaning(self):
         message = self._create_mock_message(text="<br>  https://link.com \n ")
-        # Use variable to capture the actual value
-        result = self.parser._generate_title(message)
-        self.assertIn("Unknown Post", result)  # Just check if it contains "Unknown Post"
+        self.assertEqual(self.parser._generate_title(message), "🔗 Web link")
 
     def test_generate_title_webpage_preview_only(self):
         web_page_mock = MagicMock()
+        web_page_mock.title = "Web page title"
         message = self._create_mock_message(web_page=web_page_mock, text=" ") # Text is whitespace only
-        self.assertEqual(self.parser._generate_title(message), "🔗 Web link")
+        self.assertEqual(self.parser._generate_title(message), "🔗 Web page title")
 
     def test_generate_title_webpage_preview_ignored_with_media(self):
         web_page_mock = MagicMock()
@@ -153,9 +152,13 @@ class TestPostParserGenerateTitle(unittest.TestCase):
         self.assertIn("Unknown Post", result)  # Just check if it contains "Unknown Post"
 
     def test_generate_title_poll_media_type(self):
-        # Poll media type should be ignored for title generation, text should be used
-        message = self._create_mock_message(media=MessageMediaType.POLL, text="What is your favorite color?")
-        self.assertEqual(self.parser._generate_title(message), "What is your favorite color?")
+        # Create a mock poll object with question
+        poll_mock = MagicMock()
+        poll_mock.question = "Как правильно?"
+        message = self._create_mock_message(media=MessageMediaType.POLL, poll=poll_mock)
+        
+        # Test should check that poll.question is used for title
+        self.assertEqual(self.parser._generate_title(message), "📊 Poll: Как правильно?")
 
     def test_generate_title_webpage_media_type(self):
         # Webpage media type should be ignored for title generation, text should be used

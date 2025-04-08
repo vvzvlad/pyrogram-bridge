@@ -117,68 +117,90 @@ class PostParser:
         return "Unknown author"
 
     def _generate_title(self, message: Message) -> str:
-        # Priority 1: Media Type (if present and not just a webpage preview/poll)
-        if message.media and message.media != MessageMediaType.WEB_PAGE and message.media != MessageMediaType.POLL:
-            if   message.media == MessageMediaType.PHOTO:       return "📷 Photo"
-            elif message.media == MessageMediaType.VIDEO:       return "🎥 Video"
-            elif message.media == MessageMediaType.ANIMATION:   return "🎞 GIF"
-            elif message.media == MessageMediaType.AUDIO:       return "🎵 Audio"
-            elif message.media == MessageMediaType.VOICE:       return "🎤 Voice"
-            elif message.media == MessageMediaType.VIDEO_NOTE:  return "📱 Video circle"
-            elif message.media == MessageMediaType.STICKER:     return "🎯 Sticker"
-            elif message.media == MessageMediaType.POLL:        return "📊 Poll"
-            elif message.media == MessageMediaType.DOCUMENT:
-                # Distinguish PDF documents
-                if hasattr(message.document, 'mime_type') and 'pdf' in message.document.mime_type.lower():
-                    return "📄 PDF Document"
-                else:
-                    return "📎 Document"
+        """Generate a title for a message, based on its content."""
 
-        # Priority 2: Service Messages
-        if getattr(message, "channel_chat_created", False):
+        if getattr(message, "channel_chat_created", False): #Channel created service message
             return "✨ Channel created"
 
         text = message.text or message.caption or ''
         text_stripped = text.strip()
-
-        # Priority 3: Text Content (if media didn't determine the title)
+        
         if text_stripped:
-            # Check if the text contains only URL(s)
-            text_without_urls = re.sub(r'https?://[^\s<>"\']+', '', text_stripped)
-            if not text_without_urls.strip(): # If only URL(s) are present after removing them
-                # Check for specific domains like YouTube
+            # Check if there is only HTML or URL
+            text_has_tags = bool(re.search(r'<[^>]+?>', text_stripped))
+            text_has_urls = bool(re.search(r'https?://[^\s<>"\']+', text_stripped))
+            
+            # Clean text from tags and links
+            clean_text = html.unescape(text)
+            clean_text = re.sub(r'<[^>]+?>', '', clean_text) 
+            clean_text = re.sub(r'https?://[^\s<>"\']+', '', clean_text)
+            clean_text = clean_text.strip()
+            
+            # If after cleaning there is no meaningful content
+            if not clean_text:
+                # If there was a <br> or other special tags
+                if text_has_tags and not text_has_urls:
+                    return "❓ Unknown Post"
+                
+                # If there was a YouTube link
                 if re.search(r'(?:youtube\.com|youtu\.be)', text_stripped.lower()):
-                    return "🎥 YouTube Link" # More specific title for YouTube links
-                return "🔗 Web link" # Generic title for other links
+                    return "🎥 YouTube Link"
+                    
+                # Otherwise, it's a normal web link
+                return "🔗 Web link"
+                
+            # Process URL at the beginning of the title
+            if text_has_urls and "://" in clean_text:
+                # Remove part of text after URL
+                clean_text = clean_text.split("://")[0].strip()
+            
+            # Process line breaks - take only the first line
+            first_line = clean_text.split('\n', 1)[0]
+            first_line = re.sub(r'\.$', '', first_line) #Remove dot
+            first_line = first_line.strip()
 
-            # Use first line of text if it's not just URL(s)
-            # Clean the text by removing URLs and HTML tags first
-            clean_text = re.sub(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', '', text)
-            clean_text = re.sub('<[^<]+?>', '', clean_text)
-            # Remove empty lines resulting from cleaning
-            clean_text = '\\n'.join(line.strip() for line in clean_text.split('\\n') if line.strip())
+            # Process long strings
+            cut_at = 37
+            if len(first_line) > cut_at: return f"{first_line[:cut_at]}..."
+            
+            return first_line
 
-            if clean_text: # If there is meaningful text left
-                first_line = clean_text.split('\\n', maxsplit=1)[0]
-                max_length = 100 # Max title length
-                if len(first_line) <= max_length:
-                    return first_line.strip() # Use the first line if it's short enough
-
-                # Trim longer lines intelligently
-                trimmed = first_line[:max_length]
-                last_space = trimmed.rfind(' ')
-                if last_space != -1: # Trim at the last space found
-                    trimmed = trimmed[:last_space]
-
-                # Append ellipsis if trimmed
-                return f"{trimmed.strip()}..." if trimmed else "📝 Text Post" # Fallback if trimming results in empty string
-
-        # Priority 4: Fallbacks for specific types if text is empty or was just URL(s)
-        # This handles cases where only a web_page preview exists without significant text/caption
-        if message.web_page: return "🔗 Web link"
-
-        # Final fallback if no other condition met
-        return "�� Unknown Post"
+        # Process media content
+        if message.media:                
+            # Polls
+            if message.media == MessageMediaType.POLL:
+                if hasattr(message, 'poll') and hasattr(message.poll, 'question'):
+                    poll_question = message.poll.question.strip()
+                    if poll_question:
+                        return f"📊 Poll: {poll_question}"
+                else:
+                    return "📊 Poll"
+                
+            # PDF documents
+            if message.media == MessageMediaType.DOCUMENT:
+                if hasattr(message.document, 'mime_type') and 'pdf' in message.document.mime_type.lower():
+                    return "📄 PDF Document"
+                else:
+                    return "📎 Document"
+                
+            # Other media types
+            if message.media == MessageMediaType.PHOTO:       return "📷 Photo"
+            if message.media == MessageMediaType.VIDEO:       return "🎥 Video"
+            if message.media == MessageMediaType.ANIMATION:   return "🎞 GIF"
+            if message.media == MessageMediaType.AUDIO:       return "🎵 Audio"
+            if message.media == MessageMediaType.VOICE:       return "🎤 Voice"
+            if message.media == MessageMediaType.VIDEO_NOTE:  return "📱 Video circle"
+            if message.media == MessageMediaType.STICKER:     return "🎯 Sticker"
+            
+        # Web pages
+        if message.web_page:
+            if message.web_page.title:
+                return f"🔗 {message.web_page.title}"
+            else:
+                return "🔗 Web link"
+            
+        # If nothing matches
+        return "❓ Unknown Post"
 
     def _format_forward_info(self, message: Message) -> Union[str, None]:
         if forward_from_chat := getattr(message, "forward_from_chat", None):
