@@ -109,6 +109,10 @@ class TestPostParserGenerateTitle(unittest.TestCase):
         message = self._create_mock_message(media=MessageMediaType.PHOTO, caption="Look at this photo! https://example.com/image.jpg")
         self.assertEqual(self.parser._generate_title(message), "Look at this photo!")
 
+    def test_generate_title_caption_with_uppercase_text(self):
+        message = self._create_mock_message(text="ЖИЗНЬ НА ОБОЯХ")
+        self.assertEqual(self.parser._generate_title(message), "Жизнь на обоях") #downcase 
+
     def test_generate_title_long_text_trimming(self):
         long_text = "This is a very long line of text that definitely exceeds the maximum length allowed for a title, so it should be trimmed intelligently at the last space before the limit."
         message = self._create_mock_message(text=long_text)

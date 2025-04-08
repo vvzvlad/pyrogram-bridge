@@ -159,6 +159,10 @@ class PostParser:
             first_line = re.sub(r'\.$', '', first_line) #Remove dot
             first_line = first_line.strip()
 
+            # Handle uppercase text - convert to title case if the text is all uppercase
+            if first_line.isupper():
+                first_line = first_line.lower().capitalize()
+
             # Process long strings
             cut_at = 37
             if len(first_line) > cut_at: return f"{first_line[:cut_at]}..."
@@ -260,7 +264,7 @@ class PostParser:
             flags.append("fwd")
 
         # Add flag "video" if the message media is VIDEO or ANIMATION and the body text is up to 200 characters.
-        if (message.media in [MessageMediaType.VIDEO, MessageMediaType.ANIMATION] and 
+        if (message.media in [MessageMediaType.VIDEO, MessageMediaType.ANIMATION, MessageMediaType.VIDEO_NOTE] and 
             len((message.text or message.caption or '').strip()) <= 200):
             flags.append("video")
         
