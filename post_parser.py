@@ -172,8 +172,16 @@ class PostParser:
 
             # Process long strings
             cut_at = 37
-            if len(first_line) > cut_at: return f"{first_line[:cut_at]}..."
-            
+            max_extra_chars = 15
+            if len(first_line) > cut_at: 
+                # Find the next space after cut_at, but not more than 15 chars forward
+                extended_cut = cut_at
+                for i in range(cut_at, min(cut_at + max_extra_chars, len(first_line))):
+                    extended_cut = i
+                    if first_line[i] == ' ':
+                        break
+                return f"{first_line[:extended_cut]}..."
+    
             return first_line
 
         # Process media content

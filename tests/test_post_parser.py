@@ -116,13 +116,20 @@ class TestPostParserGenerateTitle(unittest.TestCase):
     def test_generate_title_long_text_trimming(self):
         long_text = "This is a very long line of text that definitely exceeds the maximum length allowed for a title, so it should be trimmed intelligently at the last space before the limit."
         message = self._create_mock_message(text=long_text)
-        expected_title = "This is a very long line of text that..." #cut at 30 symbols
+        expected_title = "This is a very long line of text that..." #cut at 37
+        self.assertEqual(self.parser._generate_title(message), expected_title)
+
+    def test_generate_title_break_word_after_limit(self):
+        # Test with a specific text example from the user's query
+        text = "На прошлой неделе предложил своим подписчикам рассказать, как бы они хотели улучшить функциональность государственного сервиса"
+        message = self._create_mock_message(text=text)
+        expected_title = "На прошлой неделе предложил своим подписчикам..."
         self.assertEqual(self.parser._generate_title(message), expected_title)
 
     def test_generate_title_long_text_no_space_trimming(self):
         long_text = "Thisisaverylonglineoftextthatdefinitelyexceedsthemaximumlengthallowedforatitlesoitshouldbetrimmedatthelimitbecausehasnospaces."
         message = self._create_mock_message(text=long_text)
-        expected_title = "Thisisaverylonglineoftextthatdefinite..." #cut at 30 symbols
+        expected_title = "Thisisaverylonglineoftextthatdefinitelyexceedsthema..." #cut at 30+15 symbols without space
         self.assertEqual(self.parser._generate_title(message), expected_title)
 
     def test_generate_title_text_with_only_html_and_urls(self):
