@@ -145,6 +145,13 @@ class PostParser:
                 # If there was a YouTube link
                 if re.search(r'(?:youtube\.com|youtu\.be)', text_stripped.lower()):
                     return "🎥 YouTube Link"
+                
+                # Check if we have a web_page with title and text is basically just a URL
+                if message.web_page and message.web_page.title:
+                    # Проверяем, что текст - это по сути только URL
+                    url_match = re.match(r'^(https?://[^\s<>"\']+)$', text_stripped)
+                    if url_match:
+                        return f"🔗 {message.web_page.title}"
                     
                 # Otherwise, it's a normal web link
                 return "🔗 Web link"

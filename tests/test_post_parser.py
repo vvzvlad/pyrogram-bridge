@@ -133,11 +133,6 @@ class TestPostParserGenerateTitle(unittest.TestCase):
         message = self._create_mock_message(text="<br>  https://link.com \n ")
         self.assertEqual(self.parser._generate_title(message), "🔗 Web link")
 
-    def test_generate_title_webpage_preview_only(self):
-        web_page_mock = MagicMock()
-        web_page_mock.title = "Web page title"
-        message = self._create_mock_message(web_page=web_page_mock, text=" ") # Text is whitespace only
-        self.assertEqual(self.parser._generate_title(message), "🔗 Web page title")
 
     def test_generate_title_webpage_preview_ignored_with_media(self):
         web_page_mock = MagicMock()
@@ -168,6 +163,26 @@ class TestPostParserGenerateTitle(unittest.TestCase):
         # Webpage media type should be ignored for title generation, text should be used
         message = self._create_mock_message(media=MessageMediaType.WEB_PAGE, text="Check this out")
         self.assertEqual(self.parser._generate_title(message), "Check this out")
+
+    def test_generate_title_webpage_with_url_text(self):
+        """Test case that reproduces real issue with VK video link."""
+        # Создаем мок для web_page
+        web_page_mock = MagicMock()
+        web_page_mock.title = "Web page title"
+        
+        # Создаем сообщение с текстом URL и mock web_page
+        message = self._create_mock_message(
+            web_page=web_page_mock, 
+            text="https://vkvideo.ru/video295754128_456239449"
+        )
+        
+        self.assertEqual(self.parser._generate_title(message), "🔗 Web page title")
+    
+    def test_generate_title_webpage_without_url_text(self):
+        web_page_mock = MagicMock()
+        web_page_mock.title = "Web page title"
+        message = self._create_mock_message(web_page=web_page_mock) # Text is whitespace only
+        self.assertEqual(self.parser._generate_title(message), "🔗 Web page title")
 
 if __name__ == '__main__':
     unittest.main() 
