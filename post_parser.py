@@ -163,7 +163,7 @@ class PostParser:
             
             # Process line breaks - take only the first line
             first_line = clean_text.split('\n', 1)[0]
-            first_line = re.sub(r'\.$', '', first_line) #Remove dot
+            first_line = re.sub(r'[.,;:]+$', '', first_line) #Remove dot
             first_line = first_line.strip()
 
             # Handle uppercase text - convert to title case if the text is all uppercase
@@ -180,7 +180,9 @@ class PostParser:
                     extended_cut = i
                     if first_line[i] == ' ':
                         break
-                return f"{first_line[:extended_cut]}..."
+                title = f"{first_line[:extended_cut]}"
+                title = re.sub(r'[.,;:]+$', '', title)
+                return f"{title}..."
     
             return first_line
 
