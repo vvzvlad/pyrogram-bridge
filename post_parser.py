@@ -12,6 +12,7 @@ import re
 import os
 import json
 import html
+import inspect
 
 from datetime import datetime
 from typing import Union, Dict, Any, List
@@ -66,6 +67,21 @@ if not logger.handlers:
 class PostParser:
     def __init__(self, client):
         self.client = client
+
+    @staticmethod
+    def get_all_possible_flags() -> List[str]:
+        """Dynamically extracts all possible flag names from the _extract_flags method."""
+        try:
+            source_code = inspect.getsource(PostParser._extract_flags)
+            # Find all occurrences of flags.append("flag_name")
+            flags = re.findall(r'flags\.append\("([^"]+)"\)', source_code)
+            # Return unique flags
+            return sorted(list(set(flags)))
+        except Exception as e:
+            logger.error(f"flag_extraction_error: Could not extract flags dynamically: {str(e)}")
+            # Fallback to a manually defined list might be needed here in case of error,
+            # but for now, we return an empty list.
+            return []
 
     def channel_name_prepare(self, channel: str):
         if isinstance(channel, str) and channel.startswith('-100'): # Convert numeric channel ID to int

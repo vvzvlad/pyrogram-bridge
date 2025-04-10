@@ -31,6 +31,7 @@ from post_parser import PostParser
 from url_signer import verify_media_digest, generate_media_digest
 from starlette.middleware.base import BaseHTTPMiddleware
 import json_repair
+from typing import List
 
 class RequestLoggingMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
@@ -283,7 +284,7 @@ async def download_media_file(channel: str, post_id: int, file_unique_id: str) -
                         json.dump(media_files_updated, f, ensure_ascii=False, indent=2)
                     logger.info(f"Removed invalid entry for {channel}/{post_id}/{file_unique_id} from media_file_ids.json")
                 else:
-                     logger.warning(f"Entry for {channel}/{post_id}/{file_unique_id} not found in media_file_ids.json for removal")
+                    logger.warning(f"Entry for {channel}/{post_id}/{file_unique_id} not found in media_file_ids.json for removal")
 
         except Exception as e:
             logger.error(f"Failed to remove entry for {channel}/{post_id}/{file_unique_id} from media_file_ids.json: {str(e)}")
@@ -720,3 +721,22 @@ async def get_rss_feed(channel: str,
             error_message = f"rss_generation_error: channel {channel}, error {str(e)}"
             logger.error(error_message)
             raise HTTPException(status_code=500, detail=error_message) from e 
+
+@app.get("/flags", response_model=List[str])
+@app.get("/flags/{token}", response_model=List[str])
+async def get_available_flags(token: str | None = None, request: Request = None):
+    """Returns a list of all possible flags that can be assigned to posts."""
+    if Config["token"] and request and request.client.host not in ["127.0.0.1", "localhost"]:
+        if token != Config["token"]:
+            logger.error(f"Invalid token for flags endpoint: {token}, expected: {Config['token']}")
+            raise HTTPException(status_code=403, detail="Invalid token")
+        else:
+            logger.info(f"Valid token for flags endpoint: {token}")
+
+    try:
+        flags = PostParser.get_all_possible_flags()
+        return flags
+    except Exception as e:
+        error_message = f"Failed to get flags list: {str(e)}"
+        logger.error(error_message)
+        raise HTTPException(status_code=500, detail=error_message) from e 
