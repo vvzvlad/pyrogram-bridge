@@ -1,3 +1,5 @@
+# pylint: disable=protected-access, wrong-import-position
+
 import unittest
 from unittest.mock import MagicMock, PropertyMock
 import sys

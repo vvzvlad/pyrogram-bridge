@@ -1,6 +1,7 @@
+# pylint: disable=protected-access, wrong-import-position
+
 import unittest
-from unittest.mock import MagicMock, PropertyMock, patch
-import re
+from unittest.mock import MagicMock, PropertyMock
 import sys
 import os
 # Add project root to sys.path to find post_parser
