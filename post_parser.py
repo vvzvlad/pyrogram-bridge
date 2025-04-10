@@ -320,6 +320,10 @@ class PostParser:
         if re.search(r'(?i)(#реклама|#промо|О\s+рекламодателе|партнерский\s+пост|по\s+промокоду|erid|скидка\s+на\s+курс|регистрируйтесь\s+тут)', message_text):
             flags.append("advert")
 
+        # Check for paywall-related words and tags
+        if re.search(r'(?i)(Дзен\.Премиум|Sponsr|Бусти|Boosty)', message_text):
+            flags.append("paywall")
+
         # Check if the message contains any http/https links in text or href attributes
         if re.search(r'https?://[^\s<>"\']+', message_text) or re.search(r'href=["\']https?://[^"\']+["\']', message_text):
             flags.append("link")
