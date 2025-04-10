@@ -353,15 +353,27 @@ class PostParser:
             hidden_links = re.findall(r'https?://(?:www\.)?t\.me/\+([A-Za-z0-9]+)', message_text)
             # Find links without a '+' after t.me/ indicating an open (foreign) channel link.
             open_links = re.findall(r'https?://(?:www\.)?t\.me/(?!\+)([A-Za-z0-9_]+)', message_text)
+            
+            # Find links with pattern t.me/boost/channel_name
+            boost_links = re.findall(r'https?://(?:www\.)?t\.me/boost/([A-Za-z0-9_]+)', message_text)
+            
             if hidden_links:
                 flags.append("hid_channel")
 
             current_channel = self.get_channel_username(message)
-            # Add the flag "foreign_channel" if there's an open link that differs from the current channel.
+            
+            # Check regular open links
             for open_link in open_links:
-                if current_channel is None or open_link.lower() != current_channel.lower():
+                if current_channel is None or (open_link.lower() != current_channel.lower() and open_link.lower() != 'boost'):
                     flags.append("foreign_channel")
                     break
+                    
+            # Check boost links separately - only consider as foreign if the boosted channel is not current channel
+            if not "foreign_channel" in flags:
+                for boost_channel in boost_links:
+                    if current_channel is None or boost_channel.lower() != current_channel.lower():
+                        flags.append("foreign_channel")
+                        break
         except Exception as e:
             logger.error(f"tme_link_extraction_error: message_id {message.id}, error {str(e)}")
 

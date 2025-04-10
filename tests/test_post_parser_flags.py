@@ -295,6 +295,45 @@ class TestPostParserExtractFlags(unittest.TestCase):
         self.parser.get_channel_username = MagicMock(return_value=None) # Simulate no current channel found
         self.assertIn("foreign_channel", self.parser._extract_flags(message)) # Should still flag as foreign if current unknown
 
+    def test_flag_foreign_channel_boost_other_channel(self):
+        """Test that boost link to foreign channel is flagged."""
+        message = self._create_mock_message(text="Boost another channel: https://t.me/boost/other_channel", chat_username="test_channel")
+        self.parser.get_channel_username = MagicMock(return_value="test_channel") # Ensure current channel is mocked
+        self.assertIn("foreign_channel", self.parser._extract_flags(message))
+    
+    def test_flag_foreign_channel_boost_same_channel(self):
+        """Test that boost link to own channel is not flagged."""
+        message = self._create_mock_message(text="Boost our channel: https://t.me/boost/test_channel", chat_username="test_channel")
+        self.parser.get_channel_username = MagicMock(return_value="test_channel") # Ensure current channel is mocked
+        self.assertNotIn("foreign_channel", self.parser._extract_flags(message))
+    
+    def test_flag_foreign_channel_boost_link_case_insensitive(self):
+        """Test that boost link to own channel is not flagged (case insensitive)."""
+        message = self._create_mock_message(text="Boost our channel: https://t.me/boost/TEST_CHANNEL", chat_username="test_channel")
+        self.parser.get_channel_username = MagicMock(return_value="test_channel") # Ensure current channel is mocked
+        self.assertNotIn("foreign_channel", self.parser._extract_flags(message))
+    
+    def test_flag_foreign_channel_multiple_links(self):
+        """Test with multiple links - should flag if any is foreign."""
+        message = self._create_mock_message(
+            text="Links: https://t.me/test_channel and https://t.me/other_channel and https://t.me/boost/test_channel", 
+            chat_username="test_channel"
+        )
+        self.parser.get_channel_username = MagicMock(return_value="test_channel") # Ensure current channel is mocked
+        self.assertIn("foreign_channel", self.parser._extract_flags(message))
+    
+    def test_flag_foreign_channel_only_boost_word(self):
+        """Test that the word 'boost' is not flagged."""
+        message = self._create_mock_message(text="Check out https://t.me/boost", chat_username="test_channel")
+        self.parser.get_channel_username = MagicMock(return_value="test_channel") # Ensure current channel is mocked
+        self.assertNotIn("foreign_channel", self.parser._extract_flags(message))
+        
+    def test_flag_foreign_channel_boost_no_channel(self):
+        """Test with boost/ but no channel after - should be flagged as foreign."""
+        message = self._create_mock_message(text="Strange link: https://t.me/boost/", chat_username="test_channel")
+        self.parser.get_channel_username = MagicMock(return_value="test_channel") # Ensure current channel is mocked
+        self.assertNotIn("foreign_channel", self.parser._extract_flags(message))
+
     def test_flag_multiple_flags(self):
         message = self._create_mock_message(
             media=MessageMediaType.VIDEO,
