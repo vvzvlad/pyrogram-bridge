@@ -2,7 +2,6 @@ import unittest
 from unittest.mock import MagicMock, PropertyMock
 import sys
 import os
-from unittest.mock import patch
 
 # Add project root to sys.path to find post_parser
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
