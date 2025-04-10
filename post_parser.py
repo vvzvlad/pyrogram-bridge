@@ -340,8 +340,9 @@ class PostParser:
         if re.search(r'(?i)(Дзен\.Премиум|Sponsr|Бусти|Boosty)', message_text):
             flags.append("paywall")
 
-        # Check if the message contains any http/https links in text or href attributes
-        if re.search(r'https?://[^\s<>"\']+', message_text) or re.search(r'href=["\']https?://[^"\']+["\']', message_text):
+        # Check if the message contains any http/https links in text or href attributes (excluding t.me links)
+        if (re.search(r'https?://(?!(?:www\.)?t\.me)[^\s<>"\']+', message_text) or 
+            re.search(r'href=["\']https?://(?!(?:www\.)?t\.me)[^"\']+["\']', message_text)):
             flags.append("link")
 
         # Check if the message contains channel mentions in the format @name

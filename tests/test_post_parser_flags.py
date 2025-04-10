@@ -380,7 +380,7 @@ class TestPostParserExtractFlags(unittest.TestCase):
             text="Join our livestream! Full access on Boosty. Check out https://t.me/other_channel",
         )
         flags = self.parser._extract_flags(message)
-        expected_flags = ["no_image", "stream", "paywall", "link", "foreign_channel"]
+        expected_flags = ["no_image", "stream", "paywall", "foreign_channel"]
         self.assertCountEqual(flags, expected_flags)
 
     def test_flag_multiple_sticker_donat_poo_hid(self):
@@ -391,7 +391,7 @@ class TestPostParserExtractFlags(unittest.TestCase):
         )
         flags = self.parser._extract_flags(message)
         # Sticker implies no 'no_image' flag
-        expected_flags = ["sticker", "donat", "poo", "link", "hid_channel"]
+        expected_flags = ["sticker", "donat", "poo", "hid_channel"]
         self.assertCountEqual(flags, expected_flags)
 
     def test_flag_multiple_text_only_advert_stream_clown_foreign(self):
@@ -401,7 +401,7 @@ class TestPostParserExtractFlags(unittest.TestCase):
             reactions_data=[("🤡", 31)]
         )
         flags = self.parser._extract_flags(message)
-        expected_flags = ["no_image", "advert", "stream", "clown", "link", "foreign_channel"]
+        expected_flags = ["no_image", "advert", "stream", "clown", "foreign_channel"]
         self.assertCountEqual(flags, expected_flags)
 
     def test_flag_multiple_video_note_fwd_paywall_mention(self):
@@ -413,6 +413,18 @@ class TestPostParserExtractFlags(unittest.TestCase):
         flags = self.parser._extract_flags(message)
         expected_flags = ["video", "fwd", "paywall", "mention"]
         self.assertCountEqual(flags, expected_flags)
+
+    def test_flag_link_with_tme_excluded(self):
+        message = self._create_mock_message(text="Check out this Telegram link https://t.me/channel_name")
+        # Use _generate_html_body to ensure link detection logic runs
+        _ = self.parser._generate_html_body(message)
+        self.assertNotIn("link", self.parser._extract_flags(message))
+    
+    def test_flag_link_with_mixed_links(self):
+        message = self._create_mock_message(text="Check both links: https://example.com and https://t.me/channel_name")
+        # Use _generate_html_body to ensure link detection logic runs
+        _ = self.parser._generate_html_body(message)
+        self.assertIn("link", self.parser._extract_flags(message))
 
 
 if __name__ == '__main__':
