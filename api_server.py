@@ -36,7 +36,6 @@ from url_signer import verify_media_digest, generate_media_digest
 # Define custom exception for zero-size files
 class ZeroSizeFileError(Exception):
     """Custom exception for zero-size files found or downloaded."""
-    pass
 
 class RequestLoggingMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
