@@ -245,33 +245,33 @@ async def download_media_file(channel: str, post_id: int, file_unique_id: str) -
     if os.path.exists(cache_path):
         # Check if the cached file is zero size
         if os.path.getsize(cache_path) == 0:
-            logger.warning(f"zero_size_cache_found: Found zero-size cached file: {cache_path}. Deleting.")
+            logger.warning(f"zero_size_cache_found: Found zero-size cached file: {cache_path}. Deleting and attempting redownload.")
             try:
                 os.remove(cache_path)
                 logger.info(f"Removed zero-size cached file: {cache_path}")
             except OSError as e:
                 logger.error(f"cleanup_error: Failed to remove zero-size cached file {cache_path}: {e}")
-            # Raise specific error to signal this condition
-            raise ZeroSizeFileError(f"Cached file {file_unique_id} for {channel}/{post_id} was zero size.")
-
-        logger.info(f"Found cached media file: {cache_path}")
-        # Update access timestamp in media_file_ids.json
-        file_ids_path = os.path.join(os.path.abspath("./data"), 'media_file_ids.json')
-        try:
-            if os.path.exists(file_ids_path):
-                with open(file_ids_path, 'r', encoding='utf-8') as f:
-                    media_files = json.load(f)
-                for file_data in media_files:
-                    if (file_data.get('channel') == str(channel) and  # Ensure channel is string for comparison
-                        file_data.get('post_id') == post_id and 
-                        file_data.get('file_unique_id') == file_unique_id):
-                        file_data['added'] = datetime.now().timestamp()
-                        break
-                with open(file_ids_path, 'w', encoding='utf-8') as f:
-                    json.dump(media_files, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            logger.error(f"Failed to update timestamp for {channel}/{post_id}/{file_unique_id}: {str(e)}")
-        return cache_path, False
+            # Do not raise error here, proceed to download below
+        else:
+            # File exists and is not zero size, update timestamp and return
+            logger.info(f"Found cached media file: {cache_path}")
+            # Update access timestamp in media_file_ids.json
+            file_ids_path = os.path.join(os.path.abspath("./data"), 'media_file_ids.json')
+            try:
+                if os.path.exists(file_ids_path):
+                    with open(file_ids_path, 'r', encoding='utf-8') as f:
+                        media_files = json.load(f)
+                    for file_data in media_files:
+                        if (file_data.get('channel') == str(channel) and  # Ensure channel is string for comparison
+                            file_data.get('post_id') == post_id and 
+                            file_data.get('file_unique_id') == file_unique_id):
+                            file_data['added'] = datetime.now().timestamp()
+                            break
+                    with open(file_ids_path, 'w', encoding='utf-8') as f:
+                        json.dump(media_files, f, ensure_ascii=False, indent=2)
+            except Exception as e:
+                logger.error(f"Failed to update timestamp for {channel}/{post_id}/{file_unique_id}: {str(e)}")
+            return cache_path, False
 
     file_id = await find_file_id_in_message(message, file_unique_id)
     if not file_id:
@@ -702,6 +702,10 @@ async def get_media(channel: str, post_id: int, file_unique_id: str, digest: str
     except errors.RPCError as e:
         logger.error(f"Media request RPC error for {channel}/{post_id}/{file_unique_id}: {type(e).__name__} - {str(e)}")
         raise HTTPException(status_code=404, detail="File not found in Telegram") from e
+    except ZeroSizeFileError as e: # Catch zero-size file errors FROM DOWNLOAD
+        error_message = f"Failed to obtain valid media file for {channel}/{post_id}/{file_unique_id} after download attempt: {str(e)}"
+        logger.error(error_message)
+        raise HTTPException(status_code=500, detail=error_message) from e
     except Exception as e:
         error_message = f"Failed to get media for {channel}/{post_id}/{file_unique_id}: {str(e)}"
         logger.error(error_message)
