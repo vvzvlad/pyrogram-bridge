@@ -164,7 +164,7 @@ class PostParser:
                 
                 # Check if we have a web_page with title and text is basically just a URL
                 if message.web_page and message.web_page.title:
-                    # Проверяем, что текст - это по сути только URL
+                    # Text is basically just a URL
                     url_match = re.match(r'^(https?://[^\s<>"\']+)$', text_stripped)
                     if url_match:
                         return f"🔗 {message.web_page.title}"
@@ -322,18 +322,14 @@ class PostParser:
         if re.search(r'https?://(?:www\.)?t\.me/boost/', message_text):
             flags.append("donat")
 
-        # Check if the post's reactions contain more clown emojis (🤡).
+        # Check if the post's reactions contain more clown emojis (🤡) or poo emojis (💩).
         if getattr(message, "reactions", None):
             for reaction in message.reactions.reactions:
                 if reaction.emoji == "🤡" and reaction.count >= 30:
-                    flags.append("clown")
+                    flags.append("clownpoo")
                     break
-
-        # Check if the post's reactions contain more poo emojis (💩).
-        if getattr(message, "reactions", None):
-            for reaction in message.reactions.reactions:
                 if reaction.emoji == "💩" and reaction.count >= 30:
-                    flags.append("poo")
+                    flags.append("clownpoo")
                     break
 
         # Check if the message text contains "#реклама", "Партнерский пост", "по промокоду", "скидка на курс", "регистрируйтесь тут" in a case-insensitive manner.
