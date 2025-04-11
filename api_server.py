@@ -33,6 +33,11 @@ from starlette.middleware.base import BaseHTTPMiddleware
 import json_repair
 from typing import List
 
+# Define custom exception for zero-size files
+class ZeroSizeFileError(Exception):
+    """Custom exception for zero-size files found or downloaded."""
+    pass
+
 class RequestLoggingMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         # Log request details
@@ -238,6 +243,17 @@ async def download_media_file(channel: str, post_id: int, file_unique_id: str) -
     # Normal caching flow
     cache_path = os.path.join(post_dir, file_unique_id)
     if os.path.exists(cache_path):
+        # Check if the cached file is zero size
+        if os.path.getsize(cache_path) == 0:
+            logger.warning(f"zero_size_cache_found: Found zero-size cached file: {cache_path}. Deleting.")
+            try:
+                os.remove(cache_path)
+                logger.info(f"Removed zero-size cached file: {cache_path}")
+            except OSError as e:
+                logger.error(f"cleanup_error: Failed to remove zero-size cached file {cache_path}: {e}")
+            # Raise specific error to signal this condition
+            raise ZeroSizeFileError(f"Cached file {file_unique_id} for {channel}/{post_id} was zero size.")
+
         logger.info(f"Found cached media file: {cache_path}")
         # Update access timestamp in media_file_ids.json
         file_ids_path = os.path.join(os.path.abspath("./data"), 'media_file_ids.json')
@@ -292,6 +308,21 @@ async def download_media_file(channel: str, post_id: int, file_unique_id: str) -
         raise HTTPException(status_code=404, detail="File not found in message")
         
     file_path = await client.client.download_media(file_id, file_name=cache_path)
+    
+    # Check if the downloaded file exists and has a size greater than zero
+    if not file_path or not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+        logger.error(f"download_failed_zero_size: Downloaded file {file_unique_id} for {channel}/{post_id} is zero size or missing.")
+        # Attempt to clean up the invalid file
+        if file_path and os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+                logger.info(f"Removed zero-size file: {file_path}")
+            except OSError as e:
+                logger.error(f"cleanup_error: Failed to remove zero-size file {file_path}: {e}")
+        # Raise an error to indicate download failure
+        # Raise specific error
+        raise ZeroSizeFileError(f"Downloaded file {file_unique_id} for {channel}/{post_id} is zero size or missing after download attempt.")
+
     logger.info(f"Downloaded media file {file_unique_id} to {cache_path}")
     return file_path, False
 
@@ -655,8 +686,17 @@ async def get_media(channel: str, post_id: int, file_unique_id: str, digest: str
         if isinstance(channel, str) and channel.startswith('-100'):
             channel_id = int(channel)
             
-        file_path, delete_after = await download_media_file(channel_id, post_id, file_unique_id)
-        return await prepare_file_response(file_path, delete_after=delete_after)
+        try: # Wrap the download and prepare call
+            file_path, delete_after = await download_media_file(channel_id, post_id, file_unique_id)
+            return await prepare_file_response(file_path, delete_after=delete_after)
+        except ZeroSizeFileError as e: # Catch zero-size file errors
+            logger.warning(f"zero_size_file_encountered: {str(e)}. Instructing client to retry.")
+            return Response(
+                status_code=503, # Service Unavailable
+                content="File processing resulted in zero size, please try again in 10 seconds.",
+                headers={"Retry-After": "10"}
+            )
+            
     except HTTPException:
         raise
     except errors.RPCError as e:
