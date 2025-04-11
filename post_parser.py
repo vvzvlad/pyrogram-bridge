@@ -555,7 +555,10 @@ class PostParser:
                     content_media.append('<br>')
                 elif message.media == MessageMediaType.STICKER:
                     emoji = getattr(message.sticker, 'emoji', '')
-                    content_media.append(f'<img src="{url}" alt="Sticker {emoji}" style="max-width:100%; width:auto; height:auto; max-height:200px; object-fit:contain;">')
+                    if getattr(message.sticker, 'is_video', False):
+                        content_media.append(f'<video controls autoplay loop muted src="{url}" style="max-width:100%; width:auto; height:auto; max-height:200px; object-fit:contain;"></video>')
+                    else:
+                        content_media.append(f'<img src="{url}" alt="Sticker {emoji}" style="max-width:100%; width:auto; height:auto; max-height:200px; object-fit:contain;">')
                 content_media.append('</div>')
         
         if webpage := getattr(message, "web_page", None): # Web page preview
