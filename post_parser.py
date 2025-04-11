@@ -318,6 +318,10 @@ class PostParser:
         if re.search(r'(?i)\bдонат\w*\b', message_text):
             flags.append("donat")
 
+        # Check for t.me/boost links and add donat flag
+        if re.search(r'https?://(?:www\.)?t\.me/boost/', message_text):
+            flags.append("donat")
+
         # Check if the post's reactions contain more clown emojis (🤡).
         if getattr(message, "reactions", None):
             for reaction in message.reactions.reactions:

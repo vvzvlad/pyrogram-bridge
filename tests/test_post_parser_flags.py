@@ -207,6 +207,11 @@ class TestPostParserExtractFlags(unittest.TestCase):
         message = self._create_mock_message(text="Support us via ДОНАТ.")
         self.assertIn("donat", self.parser._extract_flags(message))
 
+    def test_flag_donat_with_boost_link(self):
+        """Test that t.me/boost/ links add donat flag."""
+        message = self._create_mock_message(text="Support the channel: https://t.me/boost/channel_name")
+        self.assertIn("donat", self.parser._extract_flags(message))
+
     def test_flag_clown_reaction(self):
         message = self._create_mock_message(reactions_data=[("🤡", 35), ("👍", 10)])
         self.assertIn("clown", self.parser._extract_flags(message))
