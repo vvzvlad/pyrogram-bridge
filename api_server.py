@@ -2,13 +2,14 @@
 # -*- coding: utf-8 -*-
 
 # flake8: noqa
-# pylint: disable=broad-exception-raised, raise-missing-from, too-many-arguments, redefined-outer-name
+# pylint: disable=broad-exception-raised, raise-missing-from, too-many-arguments, redefined-outer-name, wrong-import-position
 # pylance: disable=reportMissingImports, reportMissingModuleSource, reportGeneralTypeIssues
 # type: ignore
 
 import logging
 import os
 import mimetypes
+from typing import List
 
 import json
 from datetime import datetime
@@ -18,10 +19,12 @@ import random
 import asyncio
 import uvloop
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.background import BackgroundTask
+import json_repair
 
 import magic
 from pyrogram import errors
-from starlette.background import BackgroundTask
 from fastapi import FastAPI, HTTPException, Response, Request
 from fastapi.responses import HTMLResponse, FileResponse
 from telegram_client import TelegramClient
@@ -29,9 +32,6 @@ from config import get_settings
 from rss_generator import generate_channel_rss, generate_channel_html
 from post_parser import PostParser
 from url_signer import verify_media_digest, generate_media_digest
-from starlette.middleware.base import BaseHTTPMiddleware
-import json_repair
-from typing import List
 
 # Define custom exception for zero-size files
 class ZeroSizeFileError(Exception):
