@@ -374,7 +374,7 @@ class PostParser:
                     break
                     
             # Check boost links separately - only consider as foreign if the boosted channel is not current channel
-            if not "foreign_channel" in flags:
+            if "foreign_channel" not in flags:
                 for boost_channel in boost_links:
                     if current_channel is None or boost_channel.lower() != current_channel.lower():
                         flags.append("foreign_channel")
