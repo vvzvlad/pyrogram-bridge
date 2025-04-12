@@ -318,6 +318,10 @@ class PostParser:
         if re.search(r'(?i)\bдонат\w*\b', message_text):
             flags.append("donat")
 
+        # Check for pay.cloudtips.ru links and add donat flag
+        if re.search(r'(?i)pay\.cloudtips\.ru', message_text):
+            flags.append("donat")
+
         # Check for t.me/boost links and add donat flag
         if re.search(r'https?://(?:www\.)?t\.me/boost/', message_text):
             flags.append("donat")
