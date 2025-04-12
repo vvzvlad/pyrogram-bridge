@@ -137,6 +137,34 @@ class PostParser:
 
         if getattr(message, "channel_chat_created", False): #Channel created service message
             return "✨ Channel created"
+        
+
+        # Process media content
+        if message.media:                
+            # Polls
+            if message.media == MessageMediaType.POLL:
+                if hasattr(message, 'poll') and hasattr(message.poll, 'question'):
+                    poll_question = message.poll.question.strip()
+                    if poll_question:
+                        return f"📊 Poll: {poll_question}"
+                else:
+                    return "📊 Poll"
+                
+            # PDF documents
+            if message.media == MessageMediaType.DOCUMENT:
+                if hasattr(message.document, 'mime_type') and 'pdf' in message.document.mime_type.lower():
+                    return "📄 PDF Document"
+                else:
+                    return "📎 Document"
+                
+            # Other media types
+            if message.media == MessageMediaType.PHOTO:       return "📷 Photo"
+            if message.media == MessageMediaType.VIDEO:       return "🎥 Video"
+            if message.media == MessageMediaType.ANIMATION:   return "🎞 GIF"
+            if message.media == MessageMediaType.AUDIO:       return "🎵 Audio"
+            if message.media == MessageMediaType.VOICE:       return "🎤 Voice"
+            if message.media == MessageMediaType.VIDEO_NOTE:  return "📱 Video circle"
+            if message.media == MessageMediaType.STICKER:     return "🎯 Sticker"
 
         text = message.text or message.caption or ''
         text_stripped = text.strip()
@@ -201,33 +229,6 @@ class PostParser:
                 return f"{title}..."
     
             return first_line
-
-        # Process media content
-        if message.media:                
-            # Polls
-            if message.media == MessageMediaType.POLL:
-                if hasattr(message, 'poll') and hasattr(message.poll, 'question'):
-                    poll_question = message.poll.question.strip()
-                    if poll_question:
-                        return f"📊 Poll: {poll_question}"
-                else:
-                    return "📊 Poll"
-                
-            # PDF documents
-            if message.media == MessageMediaType.DOCUMENT:
-                if hasattr(message.document, 'mime_type') and 'pdf' in message.document.mime_type.lower():
-                    return "📄 PDF Document"
-                else:
-                    return "📎 Document"
-                
-            # Other media types
-            if message.media == MessageMediaType.PHOTO:       return "📷 Photo"
-            if message.media == MessageMediaType.VIDEO:       return "🎥 Video"
-            if message.media == MessageMediaType.ANIMATION:   return "🎞 GIF"
-            if message.media == MessageMediaType.AUDIO:       return "🎵 Audio"
-            if message.media == MessageMediaType.VOICE:       return "🎤 Voice"
-            if message.media == MessageMediaType.VIDEO_NOTE:  return "📱 Video circle"
-            if message.media == MessageMediaType.STICKER:     return "🎯 Sticker"
             
         # Web pages
         if message.web_page:
