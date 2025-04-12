@@ -416,8 +416,8 @@ class PostParser:
         result = {
             'channel': self.get_channel_username(message),
             'message_id': message.id,
-            'date': datetime.timestamp(message.date),
-            'date_formatted': message.date.strftime('%Y-%m-%d %H:%M:%S'),
+            'date': datetime.timestamp(message.date) if message.date else None,
+            'date_formatted': message.date.strftime('%Y-%m-%d %H:%M:%S') if message.date else None,
             'text': message.text or message.caption or '',
             'html': {
                 'title': self._generate_title(message),
