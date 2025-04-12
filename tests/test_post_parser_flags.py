@@ -211,22 +211,32 @@ class TestPostParserExtractFlags(unittest.TestCase):
         """Test that t.me/boost/ links add donat flag."""
         message = self._create_mock_message(text="Support the channel: https://t.me/boost/channel_name")
         self.assertIn("donat", self.parser._extract_flags(message))
+        
+    def test_flag_donat_with_cloudtips_link(self):
+        """Test that pay.cloudtips.ru links add donat flag."""
+        message = self._create_mock_message(text="Support us via this payment link: https://pay.cloudtips.ru/some_id")
+        self.assertIn("donat", self.parser._extract_flags(message))
+        
+    def test_flag_donat_with_cloudtips_link_case_insensitive(self):
+        """Test that PAY.CLOUDTIPS.RU links add donat flag (case insensitive)."""
+        message = self._create_mock_message(text="Support us via PAY.CLOUDTIPS.RU/user")
+        self.assertIn("donat", self.parser._extract_flags(message))
 
     def test_flag_clown_reaction(self):
         message = self._create_mock_message(reactions_data=[("🤡", 35), ("👍", 10)])
-        self.assertIn("clown", self.parser._extract_flags(message))
+        self.assertIn("clownpoo", self.parser._extract_flags(message))
 
     def test_flag_clown_reaction_not_enough(self):
         message = self._create_mock_message(reactions_data=[("🤡", 29), ("👍", 10)])
-        self.assertNotIn("clown", self.parser._extract_flags(message))
+        self.assertNotIn("clownpoo", self.parser._extract_flags(message))
 
     def test_flag_poo_reaction(self):
         message = self._create_mock_message(reactions_data=[("💩", 30), ("👎", 5)])
-        self.assertIn("poo", self.parser._extract_flags(message))
+        self.assertIn("clownpoo", self.parser._extract_flags(message))
 
     def test_flag_poo_reaction_not_enough(self):
         message = self._create_mock_message(reactions_data=[("💩", 15), ("👎", 5)])
-        self.assertNotIn("poo", self.parser._extract_flags(message))
+        self.assertNotIn("clownpoo", self.parser._extract_flags(message))
 
     def test_flag_advert_hashtag(self):
         message = self._create_mock_message(text="Check this out #реклама")
@@ -351,7 +361,7 @@ class TestPostParserExtractFlags(unittest.TestCase):
         # Mock HTML generation as it's used internally
         _ = self.parser._generate_html_body(message)
         flags = self.parser._extract_flags(message)
-        expected_flags = ["fwd", "video", "stream", "donat", "clown", "advert", "link", "mention", "hid_channel"]
+        expected_flags = ["fwd", "video", "stream", "donat", "clownpoo", "advert", "link", "mention", "hid_channel"]
         self.assertCountEqual(flags, expected_flags) # Use assertCountEqual for order-insensitive list comparison
 
     def test_flag_no_flags(self):
@@ -377,7 +387,7 @@ class TestPostParserExtractFlags(unittest.TestCase):
             reactions_data=[("🤡", 50)]
         )
         flags = self.parser._extract_flags(message)
-        expected_flags = ["video", "advert", "clown"]
+        expected_flags = ["video", "advert", "clownpoo"]
         self.assertCountEqual(flags, expected_flags)
 
     def test_flag_multiple_no_image_stream_paywall_foreign(self):
@@ -398,7 +408,7 @@ class TestPostParserExtractFlags(unittest.TestCase):
         )
         flags = self.parser._extract_flags(message)
         # Sticker implies no 'no_image' flag
-        expected_flags = ["sticker", "donat", "poo", "hid_channel"]
+        expected_flags = ["sticker", "donat", "clownpoo", "hid_channel"]
         self.assertCountEqual(flags, expected_flags)
 
     def test_flag_multiple_text_only_advert_stream_clown_foreign(self):
@@ -408,7 +418,7 @@ class TestPostParserExtractFlags(unittest.TestCase):
             reactions_data=[("🤡", 31)]
         )
         flags = self.parser._extract_flags(message)
-        expected_flags = ["no_image", "advert", "stream", "clown", "foreign_channel"]
+        expected_flags = ["no_image", "advert", "stream", "clownpoo", "foreign_channel"]
         self.assertCountEqual(flags, expected_flags)
 
     def test_flag_multiple_video_note_fwd_paywall_mention(self):
