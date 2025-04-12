@@ -98,8 +98,8 @@ class PostParser:
 
             if Config["debug"]: print(message)
 
-            if not message:
-                logger.error(f"post_not_found: channel {channel}, post_id {post_id}")
+            if not message or getattr(message, 'empty', False):
+                logger.error(f"post_not_found_or_empty: channel {channel}, post_id {post_id}")
                 return None
             
             if output_type == 'html':
