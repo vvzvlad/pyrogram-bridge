@@ -357,7 +357,7 @@ class PostParser:
             # Regex matches string starting and ending with a non-t.me URL
             url_pattern = r'^https?://(?!(?:www\.)?t\.me)[^\s<>"\']+$'
             if re.fullmatch(url_pattern, message_text_str.strip()):
-                 is_only_link = True
+                is_only_link = True
         
         if is_only_link:
             flags.append("only_link")
