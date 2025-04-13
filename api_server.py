@@ -26,7 +26,7 @@ import json_repair
 import magic
 from pyrogram import errors
 from fastapi import FastAPI, HTTPException, Response, Request
-from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
+from fastapi.responses import HTMLResponse, FileResponse
 from telegram_client import TelegramClient
 from config import get_settings
 from rss_generator import generate_channel_rss, generate_channel_html
@@ -650,11 +650,8 @@ async def get_raw_post_json(channel: str, post_id: int, token: str | None = None
         if not message:
             raise HTTPException(status_code=404, detail="Post not found")
             
-        # Return message as JSON using json.dumps with default=str to handle non-serializable objects
-        return Response(
-            content=json.dumps(message, indent=2, ensure_ascii=False, default=str),
-            media_type="application/json"
-        )
+        # Return message as plain text using Pyrogram's built-in string representation
+        return Response(content=str(message), media_type="text/plain")
     except Exception as e:
         error_message = f"Failed to get raw JSON post for channel {channel}, post_id {post_id}: {str(e)}"
         logger.error(error_message)
