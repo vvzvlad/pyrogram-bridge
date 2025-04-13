@@ -134,9 +134,19 @@ class PostParser:
     def _generate_title(self, message: Message) -> str:
         """Generate a title for a message, based on its content."""
 
-        if getattr(message, "channel_chat_created", False): #Channel created service message
-            return "✨ Channel created"
-        
+        # Check for service messages first
+        if service := getattr(message, "service", None):
+            service_str = str(service)
+            if 'PINNED_MESSAGE'           in service_str: return "📌 Pinned message"
+            elif 'NEW_CHAT_PHOTO'         in service_str: return "🖼 New chat photo"
+            elif 'NEW_CHAT_TITLE'         in service_str: return "✏️ New chat title"
+            elif 'VIDEO_CHAT_STARTED'     in service_str: return "▶️ Video chat started"
+            elif 'VIDEO_CHAT_ENDED'       in service_str: return "⏹ Video chat ended"
+            elif 'VIDEO_CHAT_SCHEDULED'   in service_str: return "⏰ Video chat scheduled"
+            elif 'GROUP_CHAT_CREATED'     in service_str: return "✨ Group chat created"
+            elif 'CHANNEL_CHAT_CREATED'   in service_str: return "✨ Chat created"
+            elif 'DELETE_CHAT_PHOTO'      in service_str: return "🗑️ Chat photo deleted"
+            elif 'NEW_CHAT_TITLE'         in service_str: return "✏️ New chat title"
 
         # Process media content
         if message.media:                

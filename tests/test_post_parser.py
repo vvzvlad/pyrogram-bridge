@@ -23,7 +23,7 @@ class TestPostParserGenerateTitle(unittest.TestCase):
     def tearDown(self):
         pass
 
-    def _create_mock_message(self, media=None, text=None, caption=None, document_mime_type=None, channel_chat_created=False, web_page=None, poll=None):
+    def _create_mock_message(self, media=None, text=None, caption=None, document_mime_type=None, channel_chat_created=False, web_page=None, poll=None, service=None):
         message = MagicMock(spec=Message)
         message.media = media
         message.text = text
@@ -31,6 +31,7 @@ class TestPostParserGenerateTitle(unittest.TestCase):
         message.web_page = web_page
         message.channel_chat_created = channel_chat_created
         message.poll = poll
+        message.service = service
 
         # Mock document properties if document exists
         if document_mime_type:
@@ -79,8 +80,58 @@ class TestPostParserGenerateTitle(unittest.TestCase):
         self.assertEqual(self.parser._generate_title(message), "📎 Document")
 
     def test_generate_title_channel_created(self):
-        message = self._create_mock_message(channel_chat_created=True)
-        self.assertEqual(self.parser._generate_title(message), "✨ Channel created")
+        mock_service = MagicMock()
+        mock_service.__str__ = MagicMock(return_value="pyrogram.enums.MessageService.CHANNEL_CHAT_CREATED")
+        message = self._create_mock_message(service=mock_service, channel_chat_created=False) # channel_chat_created flag is now secondary
+        self.assertEqual(self.parser._generate_title(message), "✨ Chat created")
+
+    def test_generate_title_pinned_message(self):
+        mock_service = MagicMock()
+        mock_service.__str__ = MagicMock(return_value="pyrogram.enums.MessageService.PINNED_MESSAGE")
+        message = self._create_mock_message(service=mock_service)
+        self.assertEqual(self.parser._generate_title(message), "📌 Pinned message")
+
+    def test_generate_title_new_chat_photo(self):
+        mock_service = MagicMock()
+        mock_service.__str__ = MagicMock(return_value="pyrogram.enums.MessageService.NEW_CHAT_PHOTO")
+        message = self._create_mock_message(service=mock_service)
+        self.assertEqual(self.parser._generate_title(message), "🖼 New chat photo")
+
+    def test_generate_title_new_chat_title(self):
+        mock_service = MagicMock()
+        mock_service.__str__ = MagicMock(return_value="pyrogram.enums.MessageService.NEW_CHAT_TITLE")
+        message = self._create_mock_message(service=mock_service)
+        self.assertEqual(self.parser._generate_title(message), "✏️ New chat title")
+
+    def test_generate_title_video_chat_started(self):
+        mock_service = MagicMock()
+        mock_service.__str__ = MagicMock(return_value="pyrogram.enums.MessageService.VIDEO_CHAT_STARTED")
+        message = self._create_mock_message(service=mock_service)
+        self.assertEqual(self.parser._generate_title(message), "▶️ Video chat started")
+
+    def test_generate_title_video_chat_ended(self):
+        mock_service = MagicMock()
+        mock_service.__str__ = MagicMock(return_value="pyrogram.enums.MessageService.VIDEO_CHAT_ENDED")
+        message = self._create_mock_message(service=mock_service)
+        self.assertEqual(self.parser._generate_title(message), "⏹ Video chat ended")
+
+    def test_generate_title_video_chat_scheduled(self):
+        mock_service = MagicMock()
+        mock_service.__str__ = MagicMock(return_value="pyrogram.enums.MessageService.VIDEO_CHAT_SCHEDULED")
+        message = self._create_mock_message(service=mock_service)
+        self.assertEqual(self.parser._generate_title(message), "⏰ Video chat scheduled")
+
+    def test_generate_title_group_chat_created(self):
+        mock_service = MagicMock()
+        mock_service.__str__ = MagicMock(return_value="pyrogram.enums.MessageService.GROUP_CHAT_CREATED")
+        message = self._create_mock_message(service=mock_service)
+        self.assertEqual(self.parser._generate_title(message), "✨ Group chat created")
+
+    def test_generate_title_delete_chat_photo(self):
+        mock_service = MagicMock()
+        mock_service.__str__ = MagicMock(return_value="pyrogram.enums.MessageService.DELETE_CHAT_PHOTO")
+        message = self._create_mock_message(service=mock_service)
+        self.assertEqual(self.parser._generate_title(message), "🗑️ Chat photo deleted")
 
     def test_generate_title_text_only(self):
         message = self._create_mock_message(text="This is the first line.\nThis is the second line.")

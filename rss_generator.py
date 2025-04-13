@@ -83,11 +83,17 @@ async def _create_messages_groups(messages):
         try:
             # Skip service messages about pinned posts and new chat photos
             if message.service:
-                if 'PINNED_MESSAGE' in str(message.service): continue
-                if 'NEW_CHAT_PHOTO' in str(message.service): continue
-                if 'NEW_CHAT_TITLE' in str(message.service): continue
-                if 'VIDEO_CHAT_STARTED' in str(message.service): continue
-                
+                if 'PINNED_MESSAGE'         in str(message.service): continue
+                if 'NEW_CHAT_PHOTO'         in str(message.service): continue
+                if 'NEW_CHAT_TITLE'         in str(message.service): continue
+                if 'VIDEO_CHAT_STARTED'     in str(message.service): continue
+                if 'VIDEO_CHAT_ENDED'       in str(message.service): continue
+                if 'VIDEO_CHAT_SCHEDULED'   in str(message.service): continue
+                if 'GROUP_CHAT_CREATED'     in str(message.service): continue
+                if 'CHANNEL_CHAT_CREATED'   in str(message.service): continue
+                if 'DELETE_CHAT_PHOTO'      in str(message.service): continue
+                if 'NEW_CHAT_TITLE'         in str(message.service): continue
+
             if message.media_group_id:
                 if message.media_group_id not in media_groups:
                     media_groups[message.media_group_id] = []
