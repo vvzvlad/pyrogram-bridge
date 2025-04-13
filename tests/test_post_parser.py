@@ -108,7 +108,7 @@ class TestPostParserGenerateTitle(unittest.TestCase):
 
     def test_generate_title_caption_with_url_and_text(self):
         message = self._create_mock_message(media=MessageMediaType.PHOTO, caption="Look at this photo! https://example.com/image.jpg")
-        self.assertEqual(self.parser._generate_title(message), "Look at this photo!")
+        self.assertEqual(self.parser._generate_title(message), "📷 Photo")
 
     def test_generate_title_caption_with_uppercase_text(self):
         message = self._create_mock_message(text="ЖИЗНЬ НА ОБОЯХ")

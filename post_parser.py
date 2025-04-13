@@ -240,24 +240,25 @@ class PostParser:
         return "❓ Unknown Post"
 
     def _format_forward_info(self, message: Message) -> Union[str, None]:
-        if forward_from_chat := getattr(message, "forward_from_chat", None):
-            forward_title = getattr(forward_from_chat, "title", "Unknown channel")
-            forward_username = getattr(forward_from_chat, "username", None)
-            if forward_username:
-                forward_link = f'<a href="https://t.me/{forward_username}">{forward_title} (@{forward_username})</a>'
-                return f'<div class="message-forward">Forwarded from {forward_link}</div><br>'
-            return f'<div class="message-forward">Forwarded from {forward_title}</div><br>'
-        
-        elif forward_from := getattr(message, "forward_from", None):
-            forward_name = f"{getattr(forward_from, 'first_name', '')} {getattr(forward_from, 'last_name', '')}".strip()
-            forward_username = getattr(forward_from, "username", None)
-            if forward_username:
-                forward_link = f'<a href="https://t.me/{forward_username}">{forward_name} (@{forward_username})</a>'
-                return f'<div class="message-forward">Forwarded from {forward_link}</div><br>'
-            return f'<div class="message-forward">Forwarded from {forward_name}</div><br>'
-        
-        elif forward_sender_name := getattr(message, "forward_sender_name", None):
-            return f'<div class="message-forward">Forwarded from {forward_sender_name}</div><br>'
+        if forward_origin := getattr(message, "forward_origin", None):
+            if sender_chat := getattr(forward_origin, "sender_chat", None):
+                forward_title = getattr(sender_chat, "title", "Unknown channel")
+                forward_username = getattr(sender_chat, "username", None)
+                if forward_username:
+                    forward_link = f'<a href="https://t.me/{forward_username}">{forward_title} (@{forward_username})</a>'
+                    return f'<div class="message-forward">Forwarded from {forward_link}</div><br>'
+                return f'<div class="message-forward">Forwarded from {forward_title}</div><br>'
+            
+            elif sender_user := getattr(forward_origin, "sender_user", None):
+                forward_name = f"{getattr(sender_user, 'first_name', '')} {getattr(sender_user, 'last_name', '')}".strip()
+                forward_username = getattr(sender_user, "username", None)
+                if forward_username:
+                    forward_link = f'<a href="https://t.me/{forward_username}">{forward_name} (@{forward_username})</a>'
+                    return f'<div class="message-forward">Forwarded from {forward_link}</div><br>'
+                return f'<div class="message-forward">Forwarded from {forward_name}</div><br>'
+            
+            elif sender_user_name := getattr(forward_origin, "sender_user_name", None):
+                return f'<div class="message-forward">Forwarded from {sender_user_name}</div><br>'
         
         return None
 
@@ -291,9 +292,7 @@ class PostParser:
         flags = []
 
         # Add "fwd" flag for forwarded messages
-        if (getattr(message, "forward_from_chat", None) or 
-            getattr(message, "forward_from", None) or 
-            getattr(message, "forward_sender_name", None)):
+        if message.forward_origin:
             flags.append("fwd")
 
         # Add flag "video" if the message media is VIDEO or ANIMATION and the body text is up to 200 characters.

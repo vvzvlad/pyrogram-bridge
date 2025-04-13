@@ -33,13 +33,12 @@ class TestPostParserExtractFlags(unittest.TestCase):
                             text=None,
                             caption=None,
                             reactions_data=None, # Format: [("emoji", count), ...]
-                            forward_from_chat=None, # Mock Chat object or True
-                            forward_from=None,      # Mock User object or True
-                            forward_sender_name=None, # String or True
+                            forward_origin=None,     # Pass forward info via this
                             chat_username="test_channel"): # Default chat username
         message = MagicMock(spec=Message)
         message.media = media
         message.id = 123 # Add a default message ID
+        message.forward_origin = None # Add missing attribute
 
         # Mock chat attribute
         mock_chat = MagicMock(spec=Chat)
@@ -61,18 +60,11 @@ class TestPostParserExtractFlags(unittest.TestCase):
         else:
             message.reactions = None
 
-        # Mock forwarding info
-        if forward_from_chat:
-            message.forward_from_chat = MagicMock(spec=Chat) if forward_from_chat is True else forward_from_chat
+        # Mock forwarding info using the new forward_origin attribute
+        if forward_origin:
+            message.forward_origin = MagicMock() if forward_origin is True else forward_origin
         else:
-            message.forward_from_chat = None
-
-        if forward_from:
-            message.forward_from = MagicMock(spec=User) if forward_from is True else forward_from
-        else:
-            message.forward_from = None
-
-        message.forward_sender_name = forward_sender_name if forward_sender_name is not True else "Hidden Sender"
+            message.forward_origin = None
 
         # Correctly mock text and caption to have an .html attribute and behave like strings
         if text:
@@ -103,15 +95,15 @@ class TestPostParserExtractFlags(unittest.TestCase):
     # --- Test Cases ---
 
     def test_flag_fwd_forwarded_from_chat(self):
-        message = self._create_mock_message(forward_from_chat=True)
+        message = self._create_mock_message(forward_origin=MagicMock(sender_chat=True))
         self.assertIn("fwd", self.parser._extract_flags(message))
 
     def test_flag_fwd_forwarded_from_user(self):
-        message = self._create_mock_message(forward_from=True)
+        message = self._create_mock_message(forward_origin=MagicMock(sender_user=True))
         self.assertIn("fwd", self.parser._extract_flags(message))
 
     def test_flag_fwd_forwarded_sender_name(self):
-        message = self._create_mock_message(forward_sender_name=True)
+        message = self._create_mock_message(forward_origin=MagicMock(sender_user_name="Hidden Sender"))
         self.assertIn("fwd", self.parser._extract_flags(message))
 
     def test_flag_video_media_video_short_caption(self):
@@ -133,6 +125,7 @@ class TestPostParserExtractFlags(unittest.TestCase):
         message = MagicMock(spec=Message)
         message.media = MessageMediaType.VIDEO
         message.id = 123
+        message.forward_origin = None # Add missing attribute
         
         # Create a basic mock Chat
         mock_chat = MagicMock(spec=Chat)
@@ -356,7 +349,7 @@ class TestPostParserExtractFlags(unittest.TestCase):
             media=MessageMediaType.VIDEO,
             caption="Livestream announcement! Support via донат at https://example.com. Join https://t.me/+SECRET and mention @admin. #реклама",
             reactions_data=[("🤡", 40)],
-            forward_from_chat=True
+            forward_origin=MagicMock(sender_chat=True) # Use forward_origin
         )
         # Mock HTML generation as it's used internally
         _ = self.parser._generate_html_body(message)
@@ -374,7 +367,7 @@ class TestPostParserExtractFlags(unittest.TestCase):
     def test_flag_multiple_fwd_link_mention(self):
         message = self._create_mock_message(
             text="Forwarded message with a link https://example.com and mention @someone.",
-            forward_sender_name=True
+            forward_origin=MagicMock(sender_user_name="Hidden Sender") # Use forward_origin
         )
         flags = self.parser._extract_flags(message)
         expected_flags = ["fwd", "no_image", "link", "mention"]
@@ -425,7 +418,7 @@ class TestPostParserExtractFlags(unittest.TestCase):
         message = self._create_mock_message(
             media=MessageMediaType.VIDEO_NOTE,
             caption="Video note from @someone, full version on Sponsr",
-            forward_from=True # Forwarded from user
+            forward_origin=MagicMock(sender_user=True) # Use forward_origin
         )
         flags = self.parser._extract_flags(message)
         expected_flags = ["video", "fwd", "paywall", "mention"]
