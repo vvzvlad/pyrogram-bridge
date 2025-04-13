@@ -39,6 +39,7 @@ class TestPostParserExtractFlags(unittest.TestCase):
         message.media = media
         message.id = 123 # Add a default message ID
         message.forward_origin = None # Add missing attribute
+        message.web_page = None # Add missing attribute checked in _extract_flags
 
         # Mock chat attribute
         mock_chat = MagicMock(spec=Chat)
@@ -126,6 +127,7 @@ class TestPostParserExtractFlags(unittest.TestCase):
         message.media = MessageMediaType.VIDEO
         message.id = 123
         message.forward_origin = None # Add missing attribute
+        message.web_page = None # Add missing attribute checked in _extract_flags
         
         # Create a basic mock Chat
         mock_chat = MagicMock(spec=Chat)
@@ -260,6 +262,23 @@ class TestPostParserExtractFlags(unittest.TestCase):
         # Use _generate_html_body to ensure link detection logic runs
         _ = self.parser._generate_html_body(message) # Call body generation which prepares text
         self.assertIn("link", self.parser._extract_flags(message))
+
+    def test_flag_only_link_in_text(self):
+        message = self._create_mock_message(text="https://example.com")
+        # Use _generate_html_body to ensure link detection logic runs
+        _ = self.parser._generate_html_body(message) # Call body generation which prepares text
+        self.assertIn("only_link", self.parser._extract_flags(message))
+
+    def test_flag_only_webpage(self):
+        # Create a message with no text/caption first
+        message = self._create_mock_message() 
+        # Manually set the web_page attribute to simulate a webpage preview
+        message.web_page = MagicMock() # Use MagicMock to simulate presence
+        # Ensure text and caption are None for the 'only_link' logic
+        message.text = None
+        message.caption = None
+        # The flag logic should now correctly identify this as only_link
+        self.assertIn("only_link", self.parser._extract_flags(message))  
 
     def test_flag_link_in_href(self):
         # Need to mock html property correctly

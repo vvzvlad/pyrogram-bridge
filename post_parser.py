@@ -288,7 +288,10 @@ class PostParser:
         return None
 
     def _extract_flags(self, message: Message) -> List[str]:
-        message_text = self._generate_html_body(message)
+        # Use raw text/caption for some checks before HTML processing
+        message_text_str = str(message.text or message.caption or '')
+        # Use HTML body for checks involving formatted text or links within HTML
+        message_body_html = self._generate_html_body(message)
         flags = []
 
         # Add "fwd" flag for forwarded messages
@@ -310,19 +313,19 @@ class PostParser:
 
         # Check if the message text contains variations of the word "стрим", "вебинар" 
         # or "онлайн-лекция" in a case-insensitive manner.
-        if re.search(r'(?i)\b(стрим\w*|livestream|онлайн-лекци[яю]|вебинар\w*)\b', message_text):
+        if re.search(r'(?i)\b(стрим\w*|livestream|онлайн-лекци[яю]|вебинар\w*)\b', message_text_str):
             flags.append("stream")
         
         # Check if the message text contains the word "донат" in a case-insensitive manner.
-        if re.search(r'(?i)\bдонат\w*\b', message_text):
+        if re.search(r'(?i)\bдонат\w*\b', message_text_str):
             flags.append("donat")
 
         # Check for pay.cloudtips.ru links and add donat flag
-        if re.search(r'(?i)pay\.cloudtips\.ru', message_text):
+        if re.search(r'(?i)pay\.cloudtips\.ru', message_text_str):
             flags.append("donat")
 
         # Check for t.me/boost links and add donat flag
-        if re.search(r'https?://(?:www\.)?t\.me/boost/', message_text):
+        if re.search(r'https?://(?:www\.)?t\.me/boost/', message_text_str):
             flags.append("donat")
 
         # Check if the post's reactions contain more clown emojis (🤡) or poo emojis (💩).
@@ -336,30 +339,50 @@ class PostParser:
                     break
 
         # Check if the message text contains "#реклама", "Партнерский пост", "по промокоду", "скидка на курс", "регистрируйтесь тут" in a case-insensitive manner.
-        if re.search(r'(?i)(#реклама|#промо|О\s+рекламодателе|партнерский\s+пост|по\s+промокоду|erid|скидка\s+на\s+курс|регистрируйтесь\s+тут)', message_text):
+        if re.search(r'(?i)(#реклама|#промо|О\s+рекламодателе|партнерский\s+пост|по\s+промокоду|erid|скидка\s+на\s+курс|регистрируйтесь\s+тут)', message_text_str):
             flags.append("advert")
 
         # Check for paywall-related words and tags
-        if re.search(r'(?i)(Дзен\.Премиум|Sponsr|Бусти|Boosty)', message_text):
+        if re.search(r'(?i)(Дзен\.Премиум|Sponsr|Бусти|Boosty)', message_text_str):
             flags.append("paywall")
 
-        # Check if the message contains any http/https links in text or href attributes (excluding t.me links)
-        if (re.search(r'https?://(?!(?:www\.)?t\.me)[^\s<>"\']+', message_text) or 
-            re.search(r'href=["\']https?://(?!(?:www\.)?t\.me)[^"\']+["\']', message_text)):
-            flags.append("link")
+        # --- Link Flags ---
+        # Check if the message consists ONLY of a link (text/caption) or only has a webpage preview
+        is_only_link = False
+        if message.web_page and not message_text_str.strip():
+            # Case 1: Only a web_page preview, no text/caption
+            is_only_link = True
+        elif message_text_str.strip():
+            # Case 2: Text/caption exists, check if it's just a single non-t.me URL
+            # Regex matches string starting and ending with a non-t.me URL
+            url_pattern = r'^https?://(?!(?:www\.)?t\.me)[^\s<>"\']+$'
+            if re.fullmatch(url_pattern, message_text_str.strip()):
+                 is_only_link = True
+        
+        if is_only_link:
+            flags.append("only_link")
+
+        # Check if the message contains any http/https links (excluding t.me) 
+        # Only add 'link' if 'only_link' isn't already set
+        if not is_only_link:
+            # Search within the generated HTML body to catch links in hrefs as well
+            if (re.search(r'https?://(?!(?:www\.)?t\.me)[^\s<>"\']+', message_body_html) or 
+                re.search(r'href=[\"\']https?://(?!(?:www\.)?t\.me)[^\"\']+[\"\']', message_body_html)):
+                flags.append("link")
+        # --- End Link Flags ---
 
         # Check if the message contains channel mentions in the format @name
-        if re.search(r'@[a-zA-Z][a-zA-Z0-9_]{3,}', message_text):
+        if re.search(r'@[a-zA-Z][a-zA-Z0-9_]{3,}', message_body_html):
             flags.append("mention")
 
         try:
             # Find links with a '+' after t.me/ indicating a hidden channel link.
-            hidden_links = re.findall(r'https?://(?:www\.)?t\.me/\+([A-Za-z0-9]+)', message_text)
+            hidden_links = re.findall(r'https?://(?:www\.)?t\.me/\+([A-Za-z0-9]+)', message_body_html)
             # Find links without a '+' after t.me/ indicating an open (foreign) channel link.
-            open_links = re.findall(r'https?://(?:www\.)?t\.me/(?!\+)([A-Za-z0-9_]+)', message_text)
+            open_links = re.findall(r'https?://(?:www\.)?t\.me/(?!\+)([A-Za-z0-9_]+)', message_body_html)
             
             # Find links with pattern t.me/boost/channel_name
-            boost_links = re.findall(r'https?://(?:www\.)?t\.me/boost/([A-Za-z0-9_]+)', message_text)
+            boost_links = re.findall(r'https?://(?:www\.)?t\.me/boost/([A-Za-z0-9_]+)', message_body_html)
             
             if hidden_links:
                 flags.append("hid_channel")
