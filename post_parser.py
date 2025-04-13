@@ -7,7 +7,6 @@
 # type: ignore
 
 import logging
-import copy
 import re
 import os
 import json
