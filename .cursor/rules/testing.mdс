@@ -1,0 +1,6 @@
+# Testing Guidelines
+
+- **Location:** Tests are located in the `tests/` directory.
+- **Execution:**
+  - To run tests for the post parser, use the command: `pytest tests/test_post_parser.py`
+  - To run all tests in the project, use: `pytest tests/` 
