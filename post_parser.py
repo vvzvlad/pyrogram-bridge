@@ -397,9 +397,9 @@ class PostParser:
         
         # Add raw JSON debug output if debug is enabled
         if debug:
-            debug_json = json.dumps(message, indent=2, ensure_ascii=False, default=str)
-            debug_json = debug_json.replace('\\n', '<br>').replace('\\"', '"')
-            html_content.append(f'<pre class="debug-json" style="background: #f5f5f5; padding: 10px; margin-top: 20px; overflow-x: auto; font-size: 10px; white-space: pre-wrap;">{debug_json}</pre>')
+            #debug_json = json.dumps(message, indent=2, ensure_ascii=False, default=str)
+            #debug_json = debug_json.replace('\\n', '<br>').replace('\\"', '"')
+            html_content.append(f'<pre class="debug-json" style="background: #f5f5f5; padding: 10px; margin-top: 20px; overflow-x: auto; font-size: 10px; white-space: pre-wrap;">{str(message)}</pre>')
         html_content = '\n'.join(html_content)
         return html_content
 
