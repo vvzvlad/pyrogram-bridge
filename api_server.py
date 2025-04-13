@@ -26,7 +26,7 @@ import json_repair
 import magic
 from pyrogram import errors
 from fastapi import FastAPI, HTTPException, Response, Request
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from telegram_client import TelegramClient
 from config import get_settings
 from rss_generator import generate_channel_rss, generate_channel_html
@@ -626,6 +626,50 @@ async def get_post(channel: str, post_id: int, token: str | None = None, debug: 
         return json_content
     except Exception as e:
         error_message = f"Failed to get JSON post for channel {channel}, post_id {post_id}: {str(e)}"
+        logger.error(error_message)
+        raise HTTPException(status_code=500, detail=error_message) from e
+
+
+@app.get("/raw_json/{channel}/{post_id}")
+@app.get("/raw_json/{channel}/{post_id}/{token}")
+async def get_raw_post_json(channel: str, post_id: int, token: str | None = None, request: Request = None):
+    if Config["token"] and request and request.client.host not in ["127.0.0.1", "localhost"]:
+        if token != Config["token"]:
+            logger.error(f"Invalid token for raw JSON post: {token}, expected: {Config['token']}")
+            raise HTTPException(status_code=403, detail="Invalid token")
+        else:
+            logger.info(f"Valid token for raw JSON post: {token}")
+            
+    try:
+        # Convert numeric channel ID to int if needed
+        channel_id = channel
+        if isinstance(channel, str) and channel.startswith('-100'):
+            channel_id = int(channel)
+            
+        message = await client.client.get_messages(channel_id, post_id)
+        if not message:
+            raise HTTPException(status_code=404, detail="Post not found")
+            
+        # Convert message to dictionary
+        raw_data = message.__dict__
+        
+        # Filter out non-serializable objects
+        serializable_data = {}
+        for key, value in raw_data.items():
+            if isinstance(value, (str, int, float, bool, list, dict, type(None))):
+                serializable_data[key] = value
+            elif hasattr(value, "__dict__"):
+                # Try to convert objects to dict
+                try:
+                    serializable_data[key] = value.__dict__
+                except Exception:
+                    serializable_data[key] = str(value)
+            else:
+                serializable_data[key] = str(value)
+                
+        return JSONResponse(content=serializable_data, media_type="application/json")
+    except Exception as e:
+        error_message = f"Failed to get raw JSON post for channel {channel}, post_id {post_id}: {str(e)}"
         logger.error(error_message)
         raise HTTPException(status_code=500, detail=error_message) from e
 
