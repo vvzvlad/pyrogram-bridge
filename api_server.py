@@ -650,24 +650,7 @@ async def get_raw_post_json(channel: str, post_id: int, token: str | None = None
         if not message:
             raise HTTPException(status_code=404, detail="Post not found")
             
-        # Convert message to dictionary
-        raw_data = message.__dict__
-        
-        # Filter out non-serializable objects
-        serializable_data = {}
-        for key, value in raw_data.items():
-            if isinstance(value, (str, int, float, bool, list, dict, type(None))):
-                serializable_data[key] = value
-            elif hasattr(value, "__dict__"):
-                # Try to convert objects to dict
-                try:
-                    serializable_data[key] = value.__dict__
-                except Exception:
-                    serializable_data[key] = str(value)
-            else:
-                serializable_data[key] = str(value)
-                
-        return JSONResponse(content=serializable_data, media_type="application/json")
+        return JSONResponse(content=message, media_type="application/json")
     except Exception as e:
         error_message = f"Failed to get raw JSON post for channel {channel}, post_id {post_id}: {str(e)}"
         logger.error(error_message)
