@@ -7,13 +7,13 @@
 # type: ignore
 
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Optional
 from feedgen.feed import FeedGenerator
+from pyrogram import errors
 from post_parser import PostParser
 from config import get_settings
-import re
-from pyrogram import errors
 
 Config = get_settings()
 
@@ -276,8 +276,8 @@ async def generate_channel_rss(channel: str,
                 logger.warning(f"Could not get username for channel {channel}, using identifier for error feed.")
                 return create_error_feed(str(channel), base_url) # Ensure channel is string for error feed
         except (errors.UsernameInvalid, errors.UsernameNotOccupied) as e:
-             logger.warning(f"Channel not found error for {channel}: {str(e)}")
-             return create_error_feed(channel, base_url)
+            logger.warning(f"Channel not found error for {channel}: {str(e)}")
+            return create_error_feed(channel, base_url)
         except Exception as e:
             logger.error(f"Error during get_chat for channel '{channel}' (type: {type(channel)}): {str(e)}", exc_info=True) # Log error specifically for get_chat
             # Re-raise the original exception to be caught by the outer handler if needed,

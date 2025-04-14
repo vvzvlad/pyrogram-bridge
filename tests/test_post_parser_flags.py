@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 # Mock the config module before importing PostParser
 sys.modules['config'] = __import__('tests.mock_config', fromlist=['get_settings'])
 
-from pyrogram.types import Message, Chat, User, Reaction, MessageReactions
+from pyrogram.types import Message, Chat, Reaction, MessageReactions
 from pyrogram.enums import MessageMediaType
 from post_parser import PostParser # Import after mocking config
 
