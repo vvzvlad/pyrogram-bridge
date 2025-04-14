@@ -13,6 +13,7 @@ from feedgen.feed import FeedGenerator
 from post_parser import PostParser
 from config import get_settings
 import re
+from pyrogram import errors
 
 Config = get_settings()
 
@@ -266,16 +267,22 @@ async def generate_channel_rss(channel: str,
         
         try:
             channel = post_parser.channel_name_prepare(channel)
+            logger.debug(f"Prepared channel identifier: {channel} (type: {type(channel)})") # Log prepared channel
             channel_info = await post_parser.client.get_chat(channel)
             channel_title = channel_info.title or f"Telegram: {channel}"
             channel_username = post_parser.get_channel_username(channel_info)
             if not channel_username:
-                return create_error_feed(channel, base_url)
+                # Use prepared channel (which could be int) for error feed if username fails
+                logger.warning(f"Could not get username for channel {channel}, using identifier for error feed.")
+                return create_error_feed(str(channel), base_url) # Ensure channel is string for error feed
+        except (errors.UsernameInvalid, errors.UsernameNotOccupied) as e:
+             logger.warning(f"Channel not found error for {channel}: {str(e)}")
+             return create_error_feed(channel, base_url)
         except Exception as e:
-            if "USERNAME_INVALID" in str(e) or "USERNAME_NOT_OCCUPIED" in str(e):
-                return create_error_feed(channel, base_url)
-            else:
-                raise
+            logger.error(f"Error during get_chat for channel '{channel}' (type: {type(channel)}): {str(e)}", exc_info=True) # Log error specifically for get_chat
+            # Re-raise the original exception to be caught by the outer handler if needed,
+            # but add specific logging here.
+            raise ValueError(f"Failed to get chat info for {channel}: {str(e)}") from e # Raise a more specific error perhaps
 
         # Set feed metadata
         main_name = f"{channel_title} (@{channel_username})"
@@ -283,12 +290,16 @@ async def generate_channel_rss(channel: str,
         fg.link(href=f"https://t.me/{channel_username}", rel='alternate')
         fg.description(f'Telegram channel {channel_username} RSS feed')
         fg.language('ru')
-        fg.id(f"{base_url}/rss/{channel}")
+        fg.id(f"{base_url}/rss/{channel_username}") # Use username for feed ID consistency
         
         # Collect messages
         messages = []
-        async for message in post_parser.client.get_chat_history(channel, limit=limit*2):
-            messages.append(message)
+        try:
+            async for message in post_parser.client.get_chat_history(channel, limit=limit*2):
+                messages.append(message)
+        except Exception as e:
+            logger.error(f"Error during get_chat_history for channel '{channel}' (type: {type(channel)}): {str(e)}", exc_info=True) # Log error specifically for get_chat_history
+            raise ValueError(f"Failed to get chat history for {channel}: {str(e)}") from e # Raise a more specific error
             
         # Process messages into groups and render them
         if Config['time_based_merge']:
@@ -358,22 +369,30 @@ async def generate_channel_html(channel: str,
         
         try:
             channel = post_parser.channel_name_prepare(channel)
+            logger.debug(f"Prepared channel identifier for HTML: {channel} (type: {type(channel)})") # Log prepared channel
             channel_info = await post_parser.client.get_chat(channel)
             channel_username = post_parser.get_channel_username(channel_info)
             if not channel_username:
-                return create_error_feed(channel, base_url)
+                logger.warning(f"Could not get username for channel {channel} in HTML generation, returning error feed structure (as string). NOTE: This should ideally return HTML error page.")
+                # For HTML, returning an error feed string might not be ideal. Consider returning a dedicated HTML error page.
+                return create_error_feed(str(channel), base_url) # Ensure channel is string for error feed
+        except (errors.UsernameInvalid, errors.UsernameNotOccupied) as e:
+            logger.warning(f"Channel not found error for {channel} in HTML generation: {str(e)}")
+            # Consider returning a dedicated HTML error page.
+            return create_error_feed(channel, base_url)
         except Exception as e:
-            if "USERNAME_INVALID" in str(e) or "USERNAME_NOT_OCCUPIED" in str(e):
-                return create_error_feed(channel, base_url)
-            else:
-                raise
+            logger.error(f"Error during get_chat for channel '{channel}' (type: {type(channel)}) in HTML generation: {str(e)}", exc_info=True)
+            raise ValueError(f"Failed to get chat info for {channel} in HTML generation: {str(e)}") from e
 
-        
         # Collect messages
         messages = []
-        async for message in post_parser.client.get_chat_history(channel, limit=limit):
-            messages.append(message)
-            
+        try:
+            async for message in post_parser.client.get_chat_history(channel, limit=limit):
+                messages.append(message)
+        except Exception as e:
+            logger.error(f"Error during get_chat_history for channel '{channel}' (type: {type(channel)}) in HTML generation: {str(e)}", exc_info=True)
+            raise ValueError(f"Failed to get chat history for {channel} in HTML generation: {str(e)}") from e
+
         # Process messages into groups and render them
         if Config['time_based_merge']:
             messages = await _create_time_based_media_groups(messages, merge_seconds)
@@ -409,6 +428,7 @@ def create_error_feed(channel: str, base_url: str) -> str:
     
     fe = fg.add_entry()
     fe.title("Channel not found")
+    # Use the original channel string identifier passed to the function for links/text
     fe.link(href=f"https://t.me/{channel}")
     error_html = f"<p>The Telegram channel @{channel} does not exist or is not accessible.</p>"
     fe.description(f"{error_html}")
