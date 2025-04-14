@@ -1,3 +1,8 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
 # Project Structure Rules
 
 - **Keep core logic in root files:** `api_server.py`, `post_parser.py`, `rss_generator.py`, `telegram_client.py`, `url_signer.py` contain the main functionality.

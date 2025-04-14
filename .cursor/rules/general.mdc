@@ -1,3 +1,8 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
 # General Development & Project Convention Rules
 
 - **Clarity and Simplicity:** Write code that is easy to understand and maintain. Avoid unnecessary complexity.
