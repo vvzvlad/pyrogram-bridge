@@ -136,37 +136,119 @@ class PostParser:
 
         # Check for service messages first
         if service := getattr(message, "service", None):
-            service_str = str(service)
-            if 'PINNED_MESSAGE'           in service_str: return "📌 Pinned message"
-            elif 'NEW_CHAT_PHOTO'         in service_str: return "🖼 New chat photo"
-            elif 'NEW_CHAT_TITLE'         in service_str: return "✏️ New chat title"
-            elif 'VIDEO_CHAT_STARTED'     in service_str: return "▶️ Video chat started"
-            elif 'VIDEO_CHAT_ENDED'       in service_str: return "⏹ Video chat ended"
-            elif 'VIDEO_CHAT_SCHEDULED'   in service_str: return "⏰ Video chat scheduled"
-            elif 'GROUP_CHAT_CREATED'     in service_str: return "✨ Group chat created"
-            elif 'CHANNEL_CHAT_CREATED'   in service_str: return "✨ Chat created"
-            elif 'DELETE_CHAT_PHOTO'      in service_str: return "🗑️ Chat photo deleted"
-            elif 'NEW_CHAT_TITLE'         in service_str: return "✏️ New chat title"
+            if 'PINNED_MESSAGE'           in str(service): return "📌 Pinned message"
+            elif 'NEW_CHAT_PHOTO'         in str(service): return "🖼 New chat photo"
+            elif 'NEW_CHAT_TITLE'         in str(service): return "✏️ New chat title"
+            elif 'VIDEO_CHAT_STARTED'     in str(service): return "▶️ Video chat started"
+            elif 'VIDEO_CHAT_ENDED'       in str(service): return "⏹ Video chat ended"
+            elif 'VIDEO_CHAT_SCHEDULED'   in str(service): return "⏰ Video chat scheduled"
+            elif 'GROUP_CHAT_CREATED'     in str(service): return "✨ Group chat created"
+            elif 'CHANNEL_CHAT_CREATED'   in str(service): return "✨ Chat created"
+            elif 'DELETE_CHAT_PHOTO'      in str(service): return "🗑️ Chat photo deleted"
 
-        # Process media content
-        if message.media:                
-            # Polls
+        # --- Text Processing --- (Phase 1: Process text if available)
+        text = message.text or message.caption or ''
+        text_stripped = text.strip()
+        processed_title = None
+        text_was_processed = False # Flag to indicate if text processing block was entered
+        min_title_length = 10 # Minimum length for text to be preferred over media/webpage
+
+        if text_stripped:
+            text_was_processed = True
+            text_has_urls = bool(re.search(r'https?://[^\\s<>\"\\\']+', text_stripped))
+
+            clean_text = html.unescape(text)
+            clean_text = re.sub(r'<[^>]+?>', '', clean_text)
+            clean_text = re.sub(r'https?://[^\s<>"\']+', '', clean_text)
+            clean_text = clean_text.strip()
+
+            if clean_text: # If text remains after cleaning
+                # Process URL at the beginning
+                if text_has_urls and "://" in clean_text:
+                    clean_text = clean_text.split("://")[0].strip()
+
+                # Process line breaks & punctuation
+                first_line = clean_text.split('\n', 1)[0]
+                first_line = re.sub(r'[.,;:]+$', '', first_line)
+                first_line = first_line.strip()
+
+                # Handle uppercase
+                if first_line.isupper() and len(first_line) > 1:
+                    first_line = first_line.lower().capitalize()
+
+                # --- Trim long strings (REVISED LOGIC - Find LAST space before limit) ---
+                cut_at = 37
+                max_extra_chars = 15
+                limit_index = cut_at + max_extra_chars # 52
+
+                if len(first_line) > cut_at:
+                    # Define the effective limit for searching and cutting
+                    cut_limit = min(len(first_line), limit_index)
+
+                    # Find the LAST space before the cut_limit
+                    last_space_index = first_line.rfind(' ', 0, cut_limit)
+
+                    # Decide the cut index
+                    if last_space_index != -1 and last_space_index >= cut_at:
+                        # Found a suitable space within [cut_at, cut_limit)
+                        cut_index = last_space_index
+                    else:
+                        # No suitable space found, cut at the hard limit
+                        cut_index = cut_limit
+
+                    # Slice the string
+                    title_segment = first_line[:cut_index]
+
+                    # Clean trailing punctuation/spaces from the segment AFTER slicing
+                    title_segment = re.sub(r'[\s.,;:]+$', '', title_segment).strip()
+
+                    # Only add ellipsis if the title was actually cut
+                    # (Check against original first_line length before cleaning segment)
+                    if len(first_line[:cut_index]) < len(first_line):
+                       processed_title = f"{title_segment}..."
+                    else: # Safeguard
+                       processed_title = title_segment
+                else:
+                    # Length <= cut_at, use as is
+                    processed_title = first_line
+                # --- End Trim long strings (REVISED LOGIC) ---
+
+        # --- Decision Logic --- (Phase 2: Decide whether to use processed text or fallback)
+
+        # Condition to use processed_title: It exists AND (it's long enough OR there's no media)
+        # Webpage presence doesn't prevent using short text if there's no media.
+        use_text_title = processed_title and (len(processed_title) >= min_title_length or not message.media)
+
+        if use_text_title:
+            return processed_title
+
+        # --- Fallback Processing --- (Phase 3: If text wasn't suitable or was discarded)
+
+        # Handle specific cases for non-meaningful original text (if text block was entered but didn't yield a usable title)
+        if text_was_processed and not use_text_title:
+            if re.search(r'(?:youtube\.com|youtu\.be)', text_stripped.lower()):
+                return "🎥 YouTube Link"
+            # Check if original text was just a URL and there's a webpage title
+            if message.web_page and message.web_page.title:
+                url_match = re.match(r'^\s*(https?://[^\s<>"\']+)\s*$', text_stripped)
+                if url_match:
+                    return f"🔗 {message.web_page.title}"
+            if text_has_urls: # If original text had any URL (and wasn't YouTube/Webpage with title)
+                return "🔗 Web link"
+            # If it only had tags or was short/whitespace, proceed to media/poll check
+
+        # Process media content (if no suitable text title)
+        if message.media:
             if message.media == MessageMediaType.POLL:
                 if hasattr(message, 'poll') and hasattr(message.poll, 'question'):
                     poll_question = message.poll.question.strip()
                     if poll_question:
                         return f"📊 Poll: {poll_question}"
-                else:
-                    return "📊 Poll"
-                
-            # PDF documents
+                return "📊 Poll"
             if message.media == MessageMediaType.DOCUMENT:
                 if hasattr(message.document, 'mime_type') and 'pdf' in message.document.mime_type.lower():
                     return "📄 PDF Document"
-                else:
-                    return "📎 Document"
-                
-            # Other media types
+                return "📎 Document"
             if message.media == MessageMediaType.PHOTO:       return "📷 Photo"
             if message.media == MessageMediaType.VIDEO:       return "🎥 Video"
             if message.media == MessageMediaType.ANIMATION:   return "🎞 GIF"
@@ -175,77 +257,12 @@ class PostParser:
             if message.media == MessageMediaType.VIDEO_NOTE:  return "📱 Video circle"
             if message.media == MessageMediaType.STICKER:     return "🎯 Sticker"
 
-        text = message.text or message.caption or ''
-        text_stripped = text.strip()
-        
-        if text_stripped:
-            # Check if there is only HTML or URL
-            text_has_tags = bool(re.search(r'<[^>]+?>', text_stripped))
-            text_has_urls = bool(re.search(r'https?://[^\s<>"\']+', text_stripped))
-            
-            # Clean text from tags and links
-            clean_text = html.unescape(text)
-            clean_text = re.sub(r'<[^>]+?>', '', clean_text) 
-            clean_text = re.sub(r'https?://[^\s<>"\']+', '', clean_text)
-            clean_text = clean_text.strip()
-            
-            # If after cleaning there is no meaningful content
-            if not clean_text:
-                # If there was a <br> or other special tags
-                if text_has_tags and not text_has_urls:
-                    return "❓ Unknown Post"
-                
-                # If there was a YouTube link
-                if re.search(r'(?:youtube\.com|youtu\.be)', text_stripped.lower()):
-                    return "🎥 YouTube Link"
-                
-                # Check if we have a web_page with title and text is basically just a URL
-                if message.web_page and message.web_page.title:
-                    # Text is basically just a URL
-                    url_match = re.match(r'^(https?://[^\s<>"\']+)$', text_stripped)
-                    if url_match:
-                        return f"🔗 {message.web_page.title}"
-                    
-                # Otherwise, it's a normal web link
-                return "🔗 Web link"
-                
-            # Process URL at the beginning of the title
-            if text_has_urls and "://" in clean_text:
-                # Remove part of text after URL
-                clean_text = clean_text.split("://")[0].strip()
-            
-            # Process line breaks - take only the first line
-            first_line = clean_text.split('\n', 1)[0]
-            first_line = re.sub(r'[.,;:]+$', '', first_line) #Remove dot
-            first_line = first_line.strip()
-
-            # Handle uppercase text - convert to title case if the text is all uppercase
-            if first_line.isupper():
-                first_line = first_line.lower().capitalize()
-
-            # Process long strings
-            cut_at = 37
-            max_extra_chars = 15
-            if len(first_line) > cut_at: 
-                # Find the next space after cut_at, but not more than 15 chars forward
-                extended_cut = cut_at
-                for i in range(cut_at, min(cut_at + max_extra_chars, len(first_line))):
-                    extended_cut = i
-                    if first_line[i] == ' ':
-                        break
-                title = f"{first_line[:extended_cut]}"
-                title = re.sub(r'[.,;:]+$', '', title)
-                return f"{title}..."
-    
-            return first_line
-            
-        # Web pages
+        # Web pages (if no text or media title)
         if message.web_page:
             if message.web_page.title:
                 return f"🔗 {message.web_page.title}"
-            else:
-                return "🔗 Web link"
-            
+            return "🔗 Web link"
+
         # If nothing matches
         return "❓ Unknown Post"
 

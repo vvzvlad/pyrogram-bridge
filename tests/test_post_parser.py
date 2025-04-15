@@ -159,17 +159,79 @@ class TestPostParserGenerateTitle(unittest.TestCase):
 
     def test_generate_title_caption_with_url_and_text(self):
         message = self._create_mock_message(media=MessageMediaType.PHOTO, caption="Look at this photo! https://example.com/image.jpg")
-        self.assertEqual(self.parser._generate_title(message), "📷 Photo")
+        self.assertEqual(self.parser._generate_title(message), "Look at this photo!")
 
     def test_generate_title_caption_with_uppercase_text(self):
         message = self._create_mock_message(text="ЖИЗНЬ НА ОБОЯХ")
         self.assertEqual(self.parser._generate_title(message), "Жизнь на обоях") #downcase 
 
-    def test_generate_title_long_text_trimming(self):
-        long_text = "This is a very long line of text that definitely exceeds the maximum length allowed for a title, so it should be trimmed intelligently at the last space before the limit."
-        message = self._create_mock_message(text=long_text)
-        expected_title = "This is a very long line of text that..." #cut at 37
-        self.assertEqual(self.parser._generate_title(message), expected_title)
+
+    def test_generate_title_long_text_trimming_with_spaces(self):
+        cut_at = 37
+        max_extra = 15
+        limit = cut_at + max_extra # 52
+
+        # --- Test Cases Based on Correct Logic ---
+
+        # 1. Length <= cut_at (37) -> No trim
+        text = "This text is exactly thirty-seven chars" # len 37
+        message = self._create_mock_message(text=text)
+        self.assertEqual(self.parser._generate_title(message), text)
+
+        # 2. Length = 38, no space in check range -> NO Trim (cut index == len)
+        text = "This text is exactly thirty-seven charsX" # len 38
+        message = self._create_mock_message(text=text)
+        self.assertEqual(self.parser._generate_title(message), text) 
+
+        # 3. Space found within range [cut_at, limit)
+        # 3a. Space exactly at cut_at (index 37)
+        text = "This text is exactly thirty-seven chars next" # len 42. Space at 37.
+        message = self._create_mock_message(text=text)
+        # Loop range(37, 42) -> i=37. first_line[37]==' '. Break. ext_cut=37. Slice [:37].
+        self.assertEqual(self.parser._generate_title(message), "This text is exactly thirty-seven chars...")
+
+        # 3b. 
+        text = "This text is quite a bit longer now space_here_herehere" 
+        message = self._create_mock_message(text=text)
+        # Loop range(37, 49). Finds space at i=43. Breaks. ext_cut=43. Slice [:43].
+        self.assertEqual(self.parser._generate_title(message), "This text is quite a bit longer now space_here_hereh...")
+
+        # 3c. Space exactly at limit - 1 (index 51)
+        text = "This is fifty-one characters long with the space1 here X" # len 54. Space at 51.
+        message = self._create_mock_message(text=text)
+        # Loop range(37, 52). Finds space at i=51. Breaks. ext_cut=51. Slice [:51].
+        self.assertEqual(self.parser._generate_title(message), "This is fifty-one characters long with the space1...")
+
+        # 3c. Space exactly at limit - 1 (index 51)
+        text = "This is fifty-one chara the space1 here1 X" # len 54. Space at 51.
+        message = self._create_mock_message(text=text)
+        # Loop range(37, 52). Finds space at i=51. Breaks. ext_cut=51. Slice [:51].
+        self.assertEqual(self.parser._generate_title(message), "This is fifty-one chara the space1 here1...")
+
+        # 4. No space found within range [cut_at, limit)
+        # 4a. Length > cut_at, Length < limit. No space in [cut_at, len). -> Cut at len-1
+        text = "JGHJHKJHKJDHfushdkjfskjdfhnksjdvnskjdnkjsdfjksdhfsdlfijoirukjvnsdkjvskufh" # len 49. cut_at=37. limit=52.
+        message = self._create_mock_message(text=text)
+        # Loop range(37, 49). No space. Finishes. ext_cut=48. Slice [:48].
+        self.assertEqual(self.parser._generate_title(message), "JGHJHKJHKJDHfushdkjfskjdfhnksjdvnskjdnkjsdfjksdhfsdl...")
+
+        text = "JGHJHKJHKJDHfushdkjfskjdfhnksjdvnskjdnkjsdfjksdhfs" # len 49. cut_at=37. limit=52.
+        message = self._create_mock_message(text=text)
+        self.assertEqual(self.parser._generate_title(message), "JGHJHKJHKJDHfushdkjfskjdfhnksjdvnskjdnkjsdfjksdhfs")
+
+        # 4b. Length >= limit. No space in [cut_at, limit). -> Cut at limit-1 = 51
+        text = "ThisIsAnEvenLongerWordWithoutAnySpacesAndDefinitelyMoreThan52Chars" # len 66. cut_at=37. limit=52.
+        message = self._create_mock_message(text=text)
+        # Loop range(37, 52). No space. Finishes. ext_cut=51. Slice [:51].
+        self.assertEqual(self.parser._generate_title(message), "ThisIsAnEvenLongerWordWithoutAnySpacesAndDefinitelyM...")
+
+        # 5. Trailing space/punctuation removal check
+        # 5a. Space found, cut segment ends with space/punct
+        text = "This text is quite a bit longer now, space .,;: here" # len 54. Space at 43.
+        message = self._create_mock_message(text=text)
+        # Loop range(37, 54). Finds space at i=43. Breaks. ext_cut=43. Slice [:43] is "This text is quite a bit longer now, space ".
+        # re.sub removes trailing " .,;: ". Result "This text is quite a bit longer now, space".
+        self.assertEqual(self.parser._generate_title(message), "This text is quite a bit longer now, space...")
 
     def test_generate_title_break_word_after_limit(self):
         # Test with a specific text example from the user's query
@@ -181,7 +243,8 @@ class TestPostParserGenerateTitle(unittest.TestCase):
     def test_generate_title_long_text_no_space_trimming(self):
         long_text = "Thisisaverylonglineoftextthatdefinitelyexceedsthemaximumlengthallowedforatitlesoitshouldbetrimmedatthelimitbecausehasnospaces."
         message = self._create_mock_message(text=long_text)
-        expected_title = "Thisisaverylonglineoftextthatdefinitelyexceedsthema..." #cut at 30+15 symbols without space
+        # Corrected expected title based on new logic: cut at index 52 (min(52, len)) -> slice[:52]
+        expected_title = "Thisisaverylonglineoftextthatdefinitelyexceedsthemax..."
         self.assertEqual(self.parser._generate_title(message), expected_title)
 
     def test_generate_title_text_with_only_html_and_urls(self):
@@ -197,11 +260,6 @@ class TestPostParserGenerateTitle(unittest.TestCase):
         web_page_mock = MagicMock()
         message = self._create_mock_message(media=MessageMediaType.PHOTO, web_page=web_page_mock)
         self.assertEqual(self.parser._generate_title(message), "📷 Photo") # Media has higher priority
-
-    def test_generate_title_webpage_preview_ignored_with_text(self):
-        web_page_mock = MagicMock()
-        message = self._create_mock_message(text="Some text", web_page=web_page_mock)
-        self.assertEqual(self.parser._generate_title(message), "Some text") # Text has higher priority than fallback web page
 
     def test_generate_title_fallback_unknown(self):
         message = self._create_mock_message() # No text, no media, no webpage
@@ -219,9 +277,9 @@ class TestPostParserGenerateTitle(unittest.TestCase):
         self.assertEqual(self.parser._generate_title(message), "📊 Poll: Как правильно?")
 
     def test_generate_title_webpage_media_type(self):
-        # Webpage media type should be ignored for title generation, text should be used
-        message = self._create_mock_message(media=MessageMediaType.WEB_PAGE, text="Check this out")
-        self.assertEqual(self.parser._generate_title(message), "Check this out")
+        # Webpage media type should be ignored for title generation if there's enough text
+        message = self._create_mock_message(media=MessageMediaType.WEB_PAGE, text="Check this out it is long enough")
+        self.assertEqual(self.parser._generate_title(message), "Check this out it is long enough")
 
     def test_generate_title_webpage_with_url_text(self):
         """Test case that reproduces real issue with VK video link."""
@@ -318,6 +376,64 @@ class TestPostParserGenerateTitle(unittest.TestCase):
             message = self._create_mock_message(text=input_text)
             title = self.parser._generate_title(message)
             self.assertEqual(title, expected_output, f"Ошибка при обработке '{input_text}': получено '{title}', ожидалось '{expected_output}'")
+
+    # --- New tests for text length logic ---
+
+    def test_generate_title_media_with_short_caption(self):
+        """Media title should be used if caption is short (< 10 chars)."""
+        message = self._create_mock_message(media=MessageMediaType.PHOTO, caption="Hi <3")
+        self.assertEqual(self.parser._generate_title(message), "📷 Photo")
+
+    def test_generate_title_media_with_long_text(self):
+        """Text title should be used if text is long (>= 10 chars), ignoring media."""
+        message = self._create_mock_message(media=MessageMediaType.VIDEO, text="This is a sufficiently long text.")
+        self.assertEqual(self.parser._generate_title(message), "This is a sufficiently long text")
+
+    def test_generate_title_media_with_long_caption(self):
+        """Text title from caption should be used if caption is long (>= 10 chars), ignoring media."""
+        message = self._create_mock_message(media=MessageMediaType.PHOTO, caption="This is a sufficiently long caption.")
+        self.assertEqual(self.parser._generate_title(message), "This is a sufficiently long caption")
+
+    def test_generate_title_no_media_with_short_text(self):
+        """Text title should be used if no media and text is short."""
+        message = self._create_mock_message(text="Short one")
+        self.assertEqual(self.parser._generate_title(message), "Short one")
+
+    def test_generate_title_no_media_with_long_text(self):
+        """Text title should be used if no media and text is long."""
+        message = self._create_mock_message(text="This is a long text without any media.")
+        self.assertEqual(self.parser._generate_title(message), "This is a long text without any media")
+
+    def test_generate_title_media_with_no_text(self):
+        """Media title should be used if media exists and text is None."""
+        message = self._create_mock_message(media=MessageMediaType.STICKER, text=None)
+        self.assertEqual(self.parser._generate_title(message), "🎯 Sticker")
+
+    def test_generate_title_media_with_empty_text(self):
+        """Media title should be used if media exists and text is empty string."""
+        message = self._create_mock_message(media=MessageMediaType.AUDIO, text="")
+        self.assertEqual(self.parser._generate_title(message), "🎵 Audio")
+
+    def test_generate_title_media_with_whitespace_text(self):
+        """Media title should be used if media exists and text is only whitespace."""
+        message = self._create_mock_message(media=MessageMediaType.VOICE, text="   \\n  ")
+        self.assertEqual(self.parser._generate_title(message), "🎤 Voice")
+
+    def test_generate_title_service_message_overrides_long_text(self):
+        """Service message title should override even long text."""
+        mock_service = MagicMock()
+        mock_service.__str__ = MagicMock(return_value="pyrogram.enums.MessageService.PINNED_MESSAGE")
+        message = self._create_mock_message(service=mock_service, text="This is a long text but should be ignored.")
+        self.assertEqual(self.parser._generate_title(message), "📌 Pinned message")
+
+    def test_generate_title_webpage_with_short_text(self):
+        """Text title should be used if web_page exists and text is short (but not just URL)."""
+        web_page_mock = MagicMock()
+        web_page_mock.title = "Web Page Title To Ignore"
+        message = self._create_mock_message(web_page=web_page_mock, text="Short txt")
+        self.assertEqual(self.parser._generate_title(message), "Short txt")
+
+# --- End new tests ---
 
 if __name__ == '__main__':
     unittest.main() 
