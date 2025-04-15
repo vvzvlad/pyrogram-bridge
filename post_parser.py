@@ -112,13 +112,18 @@ class PostParser:
             logger.error(f"post_parsing_error: channel {channel}, post_id {post_id}, error {str(e)}")
             raise
 
-    def _get_author_info(self, message: Message) -> str:
+    def _get_author_info(self, message: Message) -> str: #Tests: tests/postparser_author_info.py
         if message.sender_chat:
             title = getattr(message.sender_chat, 'title', None)
             username = getattr(message.sender_chat, 'username', None)
             title = title.strip() if title else ''
             username = username.strip() if username else ''
-            return f"{title} (@{username})" if username else title
+            if username:
+                if title:
+                    return f"{title} (@{username})"
+                else:
+                    return f"@{username}"
+            return title
         elif message.from_user:
             first = getattr(message.from_user, 'first_name', None)
             last = getattr(message.from_user, 'last_name', None)
@@ -127,10 +132,16 @@ class PostParser:
             last = last.strip() if last else ''
             username = username.strip() if username else ''
             name = ' '.join(filter(None, [first, last]))
-            return f"{name} (@{username})" if username else name
+            if not name:
+                return "Unknown author"
+            
+            if username:
+                return f"{name} (@{username})"
+            else:
+                return name
         return "Unknown author"
 
-    def _generate_title(self, message: Message) -> str:
+    def _generate_title(self, message: Message) -> str: #Tests: tests/postparser_gen_title.py
         """Generate a title for a message, based on its content."""
 
         # Check for service messages first
@@ -301,7 +312,7 @@ class PostParser:
             return {r.emoji: r.count for r in reactions.reactions}
         return None
 
-    def _extract_flags(self, message: Message) -> List[str]:
+    def _extract_flags(self, message: Message) -> List[str]: #Tests: tests/postparser_extract_flags.py
         # Use raw text/caption for some checks before HTML processing
         message_text_str = str(message.text or message.caption or '')
         # Use HTML body for checks involving formatted text or links within HTML
