@@ -179,6 +179,13 @@ async def _render_messages_groups(messages_groups, post_parser, exclude_flags: s
                 all_html_bodies = [msg['html']['body'] for msg in processed_messages if msg['html']['body']]
                 combined_html_body = '\n<br><br>\n'.join(all_html_bodies)
 
+                # Collect all unique flags from all messages in the group
+                all_flags = set()
+                for msg in processed_messages:
+                    if msg.get('flags'): # Check if flags exist and are not empty
+                        all_flags.update(msg['flags'])
+                combined_flags = list(all_flags) # Convert back to list if needed, or keep as set
+
                 html_parts = [
                     f'<div class="message-header">{main_message["html"]["header"]}</div>',
                     f'<div class="message-media">{combined_media}</div>',
@@ -193,7 +200,7 @@ async def _render_messages_groups(messages_groups, post_parser, exclude_flags: s
                     'title': main_message['html']['title'],
                     'text': combined_text,
                     'author': main_message['author'],
-                    'flags': main_message['flags']
+                    'flags': combined_flags # Use the combined flags
                 })
                 
         except Exception as e:
