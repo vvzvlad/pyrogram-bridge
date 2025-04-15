@@ -186,8 +186,7 @@ async def _render_messages_groups(messages_groups, post_parser, exclude_flags: s
                         all_flags.update(msg['flags'])
                 merged_flags = list(all_flags) # Convert back to list if needed, or keep as set
 
-                main_message['flags'] = merged_flags
-                footer_html = post_parser.generate_html_footer(main_message)
+                footer_html = post_parser.generate_html_footer(main_message, flags_list=merged_flags)
 
                 html_parts = [
                     f'<div class="message-header">{main_message["html"]["header"]}</div>',

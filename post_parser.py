@@ -12,9 +12,8 @@ import os
 import json
 import html
 import inspect
-
 from datetime import datetime
-from typing import Union, Dict, Any, List
+from typing import Union, Dict, Any, List, Optional
 from pyrogram.types import Message
 from pyrogram.enums import MessageMediaType
 from bleach.css_sanitizer import CSSSanitizer   
@@ -662,15 +661,19 @@ class PostParser:
             return None
 
 
-    def generate_html_footer(self, message: Message) -> str:
+    def generate_html_footer(self, message: Message, flags_list: Optional[List[str]] = None) -> str:
         content_footer = []
         content_footer.append('<br>')
         if reactions_views_html := self._reactions_views_links(message):  # Add reactions, views, date and links
             content_footer.append(reactions_views_html)
-        flags_list = self._extract_flags(message)
-        if flags_list:
-            flags_html = self._format_flags(flags_list)
+        
+        # Use provided flags_list if available, otherwise extract from message
+        current_flags = flags_list if flags_list is not None else self._extract_flags(message)
+        
+        if current_flags:
+            flags_html = self._format_flags(current_flags)
             content_footer.append('<br>' + flags_html)
+            
         html_footer = '\n'.join(content_footer)
         html_footer = self._sanitize_html(html_footer)
         return html_footer
