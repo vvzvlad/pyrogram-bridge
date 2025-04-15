@@ -167,9 +167,9 @@ class TestPostParserGenerateTitle(unittest.TestCase):
 
 
     def test_generate_title_long_text_trimming_with_spaces(self):
-        cut_at = 37
-        max_extra = 15
-        limit = cut_at + max_extra # 52
+        #cut_at = 37
+        #max_extra = 15
+        #limit = cut_at + max_extra # 52
 
         # --- Test Cases Based on Correct Logic ---
 

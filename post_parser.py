@@ -176,42 +176,30 @@ class PostParser:
                 if first_line.isupper() and len(first_line) > 1:
                     first_line = first_line.lower().capitalize()
 
-                # --- Trim long strings (REVISED LOGIC - Find LAST space before limit) ---
+                # --- Trim long strings ---
                 cut_at = 37
                 max_extra_chars = 15
                 limit_index = cut_at + max_extra_chars # 52
 
                 if len(first_line) > cut_at:
-                    # Define the effective limit for searching and cutting
-                    cut_limit = min(len(first_line), limit_index)
+                    cut_limit = min(len(first_line), limit_index) # Define the effective limit for searching and cutting
+                    last_space_index = first_line.rfind(' ', 0, cut_limit) # Find the LAST space before the cut_limit
 
-                    # Find the LAST space before the cut_limit
-                    last_space_index = first_line.rfind(' ', 0, cut_limit)
-
-                    # Decide the cut index
-                    if last_space_index != -1 and last_space_index >= cut_at:
-                        # Found a suitable space within [cut_at, cut_limit)
-                        cut_index = last_space_index
+                    if last_space_index != -1 and last_space_index >= cut_at: # Decide the cut index
+                        cut_index = last_space_index # Found a suitable space within [cut_at, cut_limit)
                     else:
-                        # No suitable space found, cut at the hard limit
-                        cut_index = cut_limit
+                        cut_index = cut_limit # No suitable space found, cut at the hard limit
 
-                    # Slice the string
-                    title_segment = first_line[:cut_index]
+                    title_segment = first_line[:cut_index] # Slice the string
 
-                    # Clean trailing punctuation/spaces from the segment AFTER slicing
-                    title_segment = re.sub(r'[\s.,;:]+$', '', title_segment).strip()
+                    title_segment = re.sub(r'[\s.,;:]+$', '', title_segment).strip() # Clean trailing punctuation/spaces from the segment AFTER slicing
 
-                    # Only add ellipsis if the title was actually cut
-                    # (Check against original first_line length before cleaning segment)
-                    if len(first_line[:cut_index]) < len(first_line):
-                       processed_title = f"{title_segment}..."
+                    if len(first_line[:cut_index]) < len(first_line): # Only add ellipsis if the title was actually cut
+                        processed_title = f"{title_segment}..."
                     else: # Safeguard
-                       processed_title = title_segment
+                        processed_title = title_segment
                 else:
-                    # Length <= cut_at, use as is
-                    processed_title = first_line
-                # --- End Trim long strings (REVISED LOGIC) ---
+                    processed_title = first_line # Length <= cut_at, use as is
 
         # --- Decision Logic --- (Phase 2: Decide whether to use processed text or fallback)
 
