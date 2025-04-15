@@ -325,6 +325,10 @@ class PostParser:
         if message.media == MessageMediaType.STICKER:
             flags.append("sticker")
 
+        # Add flag for poll messages
+        if message.media == MessageMediaType.POLL:
+            flags.append("poll")
+
         # Check if the message text contains variations of the word "стрим", "вебинар" 
         # or "онлайн-лекция" in a case-insensitive manner.
         if re.search(r'(?i)\b(стрим\w*|livestream|онлайн-лекци[яю]|вебинар\w*)\b', message_text_str):

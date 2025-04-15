@@ -381,6 +381,54 @@ class TestPostParserExtractFlags(unittest.TestCase):
         flags = self.parser._extract_flags(message)
         self.assertEqual(flags, []) # Expect an empty list
 
+    # --- Tests for poll flag ---
+    
+    def test_flag_poll_basic(self):
+        """Test that messages with poll media have poll flag."""
+        mock_poll = MagicMock()
+        mock_poll.question = "A basic poll question?"
+        message = self._create_mock_message(media=MessageMediaType.POLL)
+        message.poll = mock_poll
+        self.assertIn("poll", self.parser._extract_flags(message))
+    
+    def test_flag_poll_with_options(self):
+        """Test poll flag with poll that has options."""
+        mock_poll = MagicMock()
+        mock_poll.question = "Which option do you prefer?"
+        # Create mock options
+        option1 = MagicMock()
+        option1.text = "Option 1"
+        option2 = MagicMock()
+        option2.text = "Option 2"
+        mock_poll.options = [option1, option2]
+        
+        message = self._create_mock_message(media=MessageMediaType.POLL)
+        message.poll = mock_poll
+        flags = self.parser._extract_flags(message)
+        self.assertIn("poll", flags)
+        self.assertIn("no_image", flags)  # Polls should also have no_image flag
+    
+    def test_flag_poll_with_text(self):
+        """Test poll flag with poll that has accompanying text."""
+        mock_poll = MagicMock()
+        mock_poll.question = "Poll with text?"
+        
+        message = self._create_mock_message(media=MessageMediaType.POLL, text="This is a poll about something important")
+        message.poll = mock_poll
+        self.assertIn("poll", self.parser._extract_flags(message))
+    
+    def test_flag_poll_with_advert(self):
+        """Test that poll with advert text has both flags."""
+        mock_poll = MagicMock()
+        mock_poll.question = "What do you think about our product?"
+        
+        message = self._create_mock_message(media=MessageMediaType.POLL, text="#реклама Проголосуйте в опросе!")
+        message.poll = mock_poll
+        
+        flags = self.parser._extract_flags(message)
+        self.assertIn("poll", flags)
+        self.assertIn("advert", flags)
+
     # --- Additional Multiple Flags Tests ---
 
     def test_flag_multiple_fwd_link_mention(self):
