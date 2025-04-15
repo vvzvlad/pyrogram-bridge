@@ -184,13 +184,16 @@ async def _render_messages_groups(messages_groups, post_parser, exclude_flags: s
                 for msg in processed_messages:
                     if msg.get('flags'): # Check if flags exist and are not empty
                         all_flags.update(msg['flags'])
-                combined_flags = list(all_flags) # Convert back to list if needed, or keep as set
+                merged_flags = list(all_flags) # Convert back to list if needed, or keep as set
+
+                main_message['flags'] = merged_flags
+                footer_html = post_parser.generate_html_footer(main_message)
 
                 html_parts = [
                     f'<div class="message-header">{main_message["html"]["header"]}</div>',
                     f'<div class="message-media">{combined_media}</div>',
                     f'<div class="message-text">{combined_html_body}</div>',
-                    f'<div class="message-footer">{main_message["html"]["footer"]}</div>'
+                    f'<div class="message-footer">{footer_html}</div>'
                 ]
 
                 rendered_posts.append({
@@ -200,7 +203,7 @@ async def _render_messages_groups(messages_groups, post_parser, exclude_flags: s
                     'title': main_message['html']['title'],
                     'text': combined_text,
                     'author': main_message['author'],
-                    'flags': combined_flags # Use the combined flags
+                    'flags': merged_flags
                 })
                 
         except Exception as e:

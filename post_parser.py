@@ -440,14 +440,13 @@ class PostParser:
         html_content = '\n'.join(html_content)
         return html_content
 
-    def _format_flags(self, message: Message) -> str:
+    def _format_flags(self, flags_list: list) -> str:
         if not Config['show_post_flags']:
             return ''
         
-        flags = self._extract_flags(message)
-        if flags:
+        if flags_list:
             flags_html = ['<div class="message-flags">']
-            for flag in flags:
+            for flag in flags_list:
                 flags_html.append(f'🏷 {flag}')
             flags_html.append('</div>')
             return ' '.join(flags_html)
@@ -465,7 +464,7 @@ class PostParser:
                 'header': self._generate_html_header(message),
                 'body': self._generate_html_body(message),
                 'media': self._generate_html_media(message),
-                'footer': self._generate_html_footer(message)
+                'footer': self.generate_html_footer(message)
             },
             'flags': self._extract_flags(message),
             'author': self._get_author_info(message),
@@ -663,12 +662,14 @@ class PostParser:
             return None
 
 
-    def _generate_html_footer(self, message: Message) -> str:
+    def generate_html_footer(self, message: Message) -> str:
         content_footer = []
         content_footer.append('<br>')
         if reactions_views_html := self._reactions_views_links(message):  # Add reactions, views, date and links
             content_footer.append(reactions_views_html)
-        if flags_html := self._format_flags(message):  # Add flags
+        flags_list = self._extract_flags(message)
+        if flags_list:
+            flags_html = self._format_flags(flags_list)
             content_footer.append('<br>' + flags_html)
         html_footer = '\n'.join(content_footer)
         html_footer = self._sanitize_html(html_footer)
