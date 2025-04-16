@@ -325,23 +325,7 @@ async def generate_channel_rss(channel: str,
             post_link = f"https://t.me/{channel_username}/{post['message_id']}"
             fe.link(href=post_link)
             
-            # Combine header (reply/forward info) and main text for description
-            # Strip HTML tags from header and text for plain text description
-            header_text = re.sub('<[^<]+?>', '', post['html']['header']).strip() if post['html']['header'] else ''
-            main_text = re.sub('<[^<]+?>', '', post['text']).strip() if post['text'] else ''
-
-            # Prepare description with optional header
-            description_parts = []
-            if header_text:
-                description_parts.append(header_text)
-            if main_text:
-                description_parts.append(main_text)
-            
-            # Combine parts, handling cases where one might be empty
-            full_description = "\\n\\n".join(filter(None, description_parts)) # Use double newline as separator if both exist
-            full_description = full_description.replace('\\n', ' ') # Replace remaining newlines with spaces for RSS
-
-            fe.description(full_description)
+            fe.description(post['text'].replace('\n', ' '))
             fe.content(content=post['html'], type='CDATA')
             
             pub_date = datetime.fromtimestamp(post['date'], tz=timezone.utc)
