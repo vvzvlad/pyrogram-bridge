@@ -786,7 +786,7 @@ class PostParser:
             return self._sanitize_html(result_html) if result_html else None
             
         except Exception as e:
-            logger.error(f"reactions_views_parsing_error: {str(e)}")
+            logger.error(f"reactions_views_parsing_error: {str(e)}", exc_info=True)
             return None
 
     def _format_poll(self, poll) -> str:
