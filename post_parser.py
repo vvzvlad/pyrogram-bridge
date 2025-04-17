@@ -142,7 +142,14 @@ class PostParser:
         return "Unknown author"
 
     def truncate_title(self, first_line: str) -> str:
-        """Truncate the title according to the rules from _generate_title."""
+        """Truncate the title """
+        # Step 1: Cut at the first period followed by a space, if present
+        period_match = re.search(r'\.(?=\s)', first_line)
+        if period_match:
+            first_line = first_line[:period_match.start()]
+            first_line = first_line.rstrip()  # Remove trailing spaces after cut
+
+        # Step 2: Apply the old logic
         cut_at = 37
         max_extra_chars = 15
         limit_index = cut_at + max_extra_chars  # 52

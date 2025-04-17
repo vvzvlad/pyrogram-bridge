@@ -377,7 +377,6 @@ class TestPostParserGenerateTitle(unittest.TestCase):
             title = self.parser._generate_title(message)
             self.assertEqual(title, expected_output, f"Ошибка при обработке '{input_text}': получено '{title}', ожидалось '{expected_output}'")
 
-    # --- New tests for text length logic ---
 
     def test_generate_title_media_with_short_caption(self):
         """Media title should be used if caption is short (< 10 chars)."""
@@ -433,7 +432,13 @@ class TestPostParserGenerateTitle(unittest.TestCase):
         message = self._create_mock_message(web_page=web_page_mock, text="Short txt")
         self.assertEqual(self.parser._generate_title(message), "Short txt")
 
-# --- End new tests ---
+    def test_generate_title_truncate_at_first_period(self):
+        """Title should be truncated at the first period if present."""
+        text = "⚡️ OpenAI сегодня представила o3/o4-mini. кажется, они сделали очень сильную ставку на \"агентскость\"."
+        message = self._create_mock_message(text=text)
+        expected_title = "⚡️ OpenAI сегодня представила o3/o4-mini"
+        self.assertEqual(self.parser._generate_title(message), expected_title)
+
 
 if __name__ == '__main__':
     unittest.main() 
