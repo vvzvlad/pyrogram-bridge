@@ -43,33 +43,28 @@ class TestPostParserGenerateTitle(unittest.TestCase):
 
         return message
 
+    def gen_title(self, text):
+        message = self._create_mock_message(text=text)
+        return self.parser._generate_title(message)
+    
+    def gen_media_title(self, media):
+        message = self._create_mock_message(media=media)
+        return self.parser._generate_title(message)
+
     def test_generate_title_media_photo(self):
-        message = self._create_mock_message(media=MessageMediaType.PHOTO)
-        self.assertEqual(self.parser._generate_title(message), "📷 Photo")
-
+        self.assertEqual(self.gen_media_title(MessageMediaType.PHOTO), "📷 Photo")
     def test_generate_title_media_video(self):
-        message = self._create_mock_message(media=MessageMediaType.VIDEO)
-        self.assertEqual(self.parser._generate_title(message), "🎥 Video")
-
+        self.assertEqual(self.gen_media_title(MessageMediaType.VIDEO), "🎥 Video")
     def test_generate_title_media_animation(self):
-        message = self._create_mock_message(media=MessageMediaType.ANIMATION)
-        self.assertEqual(self.parser._generate_title(message), "🎞 GIF")
-
+        self.assertEqual(self.gen_media_title(MessageMediaType.ANIMATION), "🎞 GIF")
     def test_generate_title_media_audio(self):
-        message = self._create_mock_message(media=MessageMediaType.AUDIO)
-        self.assertEqual(self.parser._generate_title(message), "🎵 Audio")
-
+        self.assertEqual(self.gen_media_title(MessageMediaType.AUDIO), "🎵 Audio")
     def test_generate_title_media_voice(self):
-        message = self._create_mock_message(media=MessageMediaType.VOICE)
-        self.assertEqual(self.parser._generate_title(message), "🎤 Voice")
-
+        self.assertEqual(self.gen_media_title(MessageMediaType.VOICE), "🎤 Voice")
     def test_generate_title_media_video_note(self):
-        message = self._create_mock_message(media=MessageMediaType.VIDEO_NOTE)
-        self.assertEqual(self.parser._generate_title(message), "📱 Video circle")
-
+        self.assertEqual(self.gen_media_title(MessageMediaType.VIDEO_NOTE), "📱 Video circle")
     def test_generate_title_media_sticker(self):
-        message = self._create_mock_message(media=MessageMediaType.STICKER)
-        self.assertEqual(self.parser._generate_title(message), "🎯 Sticker")
+        self.assertEqual(self.gen_media_title(MessageMediaType.STICKER), "🎯 Sticker")
 
     def test_generate_title_media_pdf_document(self):
         message = self._create_mock_message(media=MessageMediaType.DOCUMENT, document_mime_type='application/pdf')
@@ -166,86 +161,54 @@ class TestPostParserGenerateTitle(unittest.TestCase):
         self.assertEqual(self.parser._generate_title(message), "Жизнь на обоях") #downcase 
 
 
-    def test_generate_title_long_text_trimming_with_spaces(self):
-        #cut_at = 37
-        #max_extra = 15
-        #limit = cut_at + max_extra # 52
+    def test_generate_title_long_text_trimming_exact_37(self):
+        text = "This text is exactly thirty-seven chars"
+        self.assertEqual(self.gen_title(text), text)
 
-        # --- Test Cases Based on Correct Logic ---
+    def test_generate_title_long_text_trimming_38_no_space(self):
+        text = "This text is exactly thirty-seven charsX"
+        self.assertEqual(self.gen_title(text), text)
 
-        # 1. Length <= cut_at (37) -> No trim
-        text = "This text is exactly thirty-seven chars" # len 37
-        message = self._create_mock_message(text=text)
-        self.assertEqual(self.parser._generate_title(message), text)
+    def test_generate_title_long_text_trimming_space_at_37(self):
+        text = "This text is exactly thirty-seven chars next"
+        self.assertEqual(self.gen_title(text), "This text is exactly thirty-seven chars...")
 
-        # 2. Length = 38, no space in check range -> NO Trim (cut index == len)
-        text = "This text is exactly thirty-seven charsX" # len 38
-        message = self._create_mock_message(text=text)
-        self.assertEqual(self.parser._generate_title(message), text) 
+    def test_generate_title_long_text_trimming_space_at_43(self):
+        text = "This text is quite a bit longer now space_here_herehere"
+        self.assertEqual(self.gen_title(text), "This text is quite a bit longer now space_here_hereh...")
 
-        # 3. Space found within range [cut_at, limit)
-        # 3a. Space exactly at cut_at (index 37)
-        text = "This text is exactly thirty-seven chars next" # len 42. Space at 37.
-        message = self._create_mock_message(text=text)
-        # Loop range(37, 42) -> i=37. first_line[37]==' '. Break. ext_cut=37. Slice [:37].
-        self.assertEqual(self.parser._generate_title(message), "This text is exactly thirty-seven chars...")
+    def test_generate_title_long_text_trimming_space_at_51(self):
+        text = "This is fifty-one characters long with the space1 here X"
+        self.assertEqual(self.gen_title(text), "This is fifty-one characters long with the space1...")
 
-        # 3b. 
-        text = "This text is quite a bit longer now space_here_herehere" 
-        message = self._create_mock_message(text=text)
-        # Loop range(37, 49). Finds space at i=43. Breaks. ext_cut=43. Slice [:43].
-        self.assertEqual(self.parser._generate_title(message), "This text is quite a bit longer now space_here_hereh...")
+    def test_generate_title_long_text_trimming_space_at_51_alt(self):
+        text = "This is fifty-one chara the space1 here1 X"
+        self.assertEqual(self.gen_title(text), "This is fifty-one chara the space1 here1...")
 
-        # 3c. Space exactly at limit - 1 (index 51)
-        text = "This is fifty-one characters long with the space1 here X" # len 54. Space at 51.
-        message = self._create_mock_message(text=text)
-        # Loop range(37, 52). Finds space at i=51. Breaks. ext_cut=51. Slice [:51].
-        self.assertEqual(self.parser._generate_title(message), "This is fifty-one characters long with the space1...")
+    def test_generate_title_long_text_trimming_no_space_cut_at_48(self):
+        text = "JGHJHKJHKJDHfushdkjfskjdfhnksjdvnskjdnkjsdfjksdhfsdlfijoirukjvnsdkjvskufh"
+        self.assertEqual(self.gen_title(text), "JGHJHKJHKJDHfushdkjfskjdfhnksjdvnskjdnkjsdfjksdhfsdl...")
 
-        # 3c. Space exactly at limit - 1 (index 51)
-        text = "This is fifty-one chara the space1 here1 X" # len 54. Space at 51.
-        message = self._create_mock_message(text=text)
-        # Loop range(37, 52). Finds space at i=51. Breaks. ext_cut=51. Slice [:51].
-        self.assertEqual(self.parser._generate_title(message), "This is fifty-one chara the space1 here1...")
+    def test_generate_title_long_text_trimming_no_space_cut_at_49(self):
+        text = "JGHJHKJHKJDHfushdkjfskjdfhnksjdvnskjdnkjsdfjksdhfs"
+        self.assertEqual(self.gen_title(text), "JGHJHKJHKJDHfushdkjfskjdfhnksjdvnskjdnkjsdfjksdhfs")
 
-        # 4. No space found within range [cut_at, limit)
-        # 4a. Length > cut_at, Length < limit. No space in [cut_at, len). -> Cut at len-1
-        text = "JGHJHKJHKJDHfushdkjfskjdfhnksjdvnskjdnkjsdfjksdhfsdlfijoirukjvnsdkjvskufh" # len 49. cut_at=37. limit=52.
-        message = self._create_mock_message(text=text)
-        # Loop range(37, 49). No space. Finishes. ext_cut=48. Slice [:48].
-        self.assertEqual(self.parser._generate_title(message), "JGHJHKJHKJDHfushdkjfskjdfhnksjdvnskjdnkjsdfjksdhfsdl...")
+    def test_generate_title_long_text_trimming_no_space_cut_at_51(self):
+        text = "ThisIsAnEvenLongerWordWithoutAnySpacesAndDefinitelyMoreThan52Chars"
+        self.assertEqual(self.gen_title(text), "ThisIsAnEvenLongerWordWithoutAnySpacesAndDefinitelyM...")
 
-        text = "JGHJHKJHKJDHfushdkjfskjdfhnksjdvnskjdnkjsdfjksdhfs" # len 49. cut_at=37. limit=52.
-        message = self._create_mock_message(text=text)
-        self.assertEqual(self.parser._generate_title(message), "JGHJHKJHKJDHfushdkjfskjdfhnksjdvnskjdnkjsdfjksdhfs")
-
-        # 4b. Length >= limit. No space in [cut_at, limit). -> Cut at limit-1 = 51
-        text = "ThisIsAnEvenLongerWordWithoutAnySpacesAndDefinitelyMoreThan52Chars" # len 66. cut_at=37. limit=52.
-        message = self._create_mock_message(text=text)
-        # Loop range(37, 52). No space. Finishes. ext_cut=51. Slice [:51].
-        self.assertEqual(self.parser._generate_title(message), "ThisIsAnEvenLongerWordWithoutAnySpacesAndDefinitelyM...")
-
-        # 5. Trailing space/punctuation removal check
-        # 5a. Space found, cut segment ends with space/punct
-        text = "This text is quite a bit longer now, space .,;: here" # len 54. Space at 43.
-        message = self._create_mock_message(text=text)
-        # Loop range(37, 54). Finds space at i=43. Breaks. ext_cut=43. Slice [:43] is "This text is quite a bit longer now, space ".
-        # re.sub removes trailing " .,;: ". Result "This text is quite a bit longer now, space".
-        self.assertEqual(self.parser._generate_title(message), "This text is quite a bit longer now, space...")
+    def test_generate_title_long_text_trimming_trailing_punct(self):
+        text = "This text is quite a bit longer now, space .,;: here"
+        self.assertEqual(self.gen_title(text), "This text is quite a bit longer now, space...")
 
     def test_generate_title_break_word_after_limit(self):
-        # Test with a specific text example from the user's query
-        text = "На прошлой неделе предложил своим подписчикам рассказать, как бы они хотели улучшить функциональность государственного сервиса"
-        message = self._create_mock_message(text=text)
-        expected_title = "На прошлой неделе предложил своим подписчикам..."
-        self.assertEqual(self.parser._generate_title(message), expected_title)
+        message = self._create_mock_message(text="На прошлой неделе предложил своим подписчикам рассказать, как бы они хотели ул")
+        self.assertEqual(self.parser._generate_title(message), "На прошлой неделе предложил своим подписчикам...")
 
     def test_generate_title_long_text_no_space_trimming(self):
         long_text = "Thisisaverylonglineoftextthatdefinitelyexceedsthemaximumlengthallowedforatitlesoitshouldbetrimmedatthelimitbecausehasnospaces."
         message = self._create_mock_message(text=long_text)
-        # Corrected expected title based on new logic: cut at index 52 (min(52, len)) -> slice[:52]
-        expected_title = "Thisisaverylonglineoftextthatdefinitelyexceedsthemax..."
-        self.assertEqual(self.parser._generate_title(message), expected_title)
+        self.assertEqual(self.parser._generate_title(message), "Thisisaverylonglineoftextthatdefinitelyexceedsthemax...")
 
     def test_generate_title_text_with_only_html_and_urls(self):
         message = self._create_mock_message(text="<a href='https://example.com'>Link name</a> https://another.link")
@@ -301,82 +264,100 @@ class TestPostParserGenerateTitle(unittest.TestCase):
         message = self._create_mock_message(web_page=web_page_mock) # Text is whitespace only
         self.assertEqual(self.parser._generate_title(message), "🔗 Web page title")
 
-    def test_generate_title_punctuation_removal(self):
-        """Test removing punctuation marks from the end of titles."""
-        test_cases = {
-            # Одиночные символы
-            "Привет.": "Привет",
-            "Привет,": "Привет",
-            "Привет;": "Привет",
-            "Привет:": "Привет",
-            "Привет!": "Привет!",
-            
-            # Комбинация символов
-            "Привет...": "Привет",
-            "Привет.,;:": "Привет",
-            "Привет.!": "Привет.!",
-            "Строка.....": "Строка",
-            
-            # Символы не в конце не должны удаляться
-            "При.вет": "При.вет",
-            "При,вет": "При,вет",
-            "При;вет": "При;вет",
-            "При:вет": "При:вет",
-            "При!вет": "При!вет",
-            "При\"вет": "При\"вет",
-            "При'вет": "При'вет",
-            "Привет": "Привет",
-            
-            # Строки с пробелами после пунктуации
-            "Привет. ": "Привет",
-            "Привет, ": "Привет",
-            
-            # Языки
-            "Привет на русском.": "Привет на русском",
-            "Hello.": "Hello",
-            "Hello,": "Hello",
-            "Привіт українською.": "Привіт українською",
-            "Hola en español.": "Hola en español",
-            
-            # Цифры
-            "Число 123.": "Число 123",
-            
-            # Многострочный текст
-            "Привет.\nКак дела?": "Привет",
-            
-            # Сложные случаи с кавычками
-            "Текст с \"кавычками внутри\".": "Текст с \"кавычками внутри\"",
-            "Текст с 'одинарными' кавычками.": "Текст с 'одинарными' кавычками",
-            "Текст с \"вложенными 'кавычками'\".": "Текст с \"вложенными 'кавычками'\"",
-            "Цитата: \"Это цитата.\".": "Цитата: \"Это цитата.\"",
-            
-            # Специальные случаи
-            "Предложение с восклицанием!": "Предложение с восклицанием!",
-            "Предложение с вопросом?": "Предложение с вопросом?", 
-            "Эллипсис...": "Эллипсис",
-            
-            "Конец текста.,;:": "Конец текста",
-            "Много точек....": "Много точек",
-            "Разные знаки.,;": "Разные знаки",
-            
-            # Реальные примеры
-            "Анонс конференции:": "Анонс конференции",
-            "Новый релиз v1.0!": "Новый релиз v1.0!",
-            "Важная информация!!!": "Важная информация!!!",
-            "Автор сказал: \"Это важно\".": "Автор сказал: \"Это важно\"",
-            "Код программы: function() { return true; }": "Код программы: function() { return true...",
-            
-            # Проверяем краевые случаи
-            "Статья...": "Статья",
-            "Вопросы и ответы.": "Вопросы и ответы",
-            "Конец,": "Конец",
-        }
-        
-        for input_text, expected_output in test_cases.items():
-            message = self._create_mock_message(text=input_text)
-            title = self.parser._generate_title(message)
-            self.assertEqual(title, expected_output, f"Ошибка при обработке '{input_text}': получено '{title}', ожидалось '{expected_output}'")
+    def test_generate_title_punctuation_removal_dot(self):
+        self.assertEqual(self.gen_title("Привет."), "Привет")
 
+    def test_generate_title_punctuation_removal_comma(self):
+        self.assertEqual(self.gen_title("Привет,"), "Привет")
+
+    def test_generate_title_punctuation_removal_semicolon(self):
+        self.assertEqual(self.gen_title("Привет;"), "Привет")
+
+    def test_generate_title_punctuation_removal_colon(self):
+        self.assertEqual(self.gen_title("Привет:"), "Привет")
+
+    def test_generate_title_punctuation_removal_exclamation(self):
+        self.assertEqual(self.gen_title("Привет!"), "Привет!")
+
+    def test_generate_title_punctuation_removal_ellipsis(self):
+        self.assertEqual(self.gen_title("Привет..."), "Привет")
+
+    def test_generate_title_punctuation_removal_combo(self):
+        self.assertEqual(self.gen_title("Привет.,;:"), "Привет")
+
+    def test_generate_title_punctuation_removal_dot_exclamation(self):
+        self.assertEqual(self.gen_title("Привет.!"), "Привет.!")
+
+    def test_generate_title_punctuation_removal_many_dots(self):
+        self.assertEqual(self.gen_title("Строка....."), "Строка")
+
+    def test_generate_title_punctuation_removal_inner_punctuation_dot(self):
+        self.assertEqual(self.gen_title("При.вет"), "При.вет")
+    def test_generate_title_punctuation_removal_inner_punctuation_comma(self):
+        self.assertEqual(self.gen_title("При,вет"), "При,вет")
+    def test_generate_title_punctuation_removal_inner_punctuation_semicolon(self):
+        self.assertEqual(self.gen_title("При;вет"), "При;вет")
+    def test_generate_title_punctuation_removal_inner_punctuation_colon(self):
+        self.assertEqual(self.gen_title("При:вет"), "При:вет")
+    def test_generate_title_punctuation_removal_inner_punctuation_exclamation(self):
+        self.assertEqual(self.gen_title("При!вет"), "При!вет")
+    def test_generate_title_punctuation_removal_inner_punctuation_doublequote(self):
+        self.assertEqual(self.gen_title("При\"вет"), "При\"вет")
+    def test_generate_title_punctuation_removal_inner_punctuation_singlequote(self):
+        self.assertEqual(self.gen_title("При'вет"), "При'вет")
+    def test_generate_title_punctuation_removal_inner_punctuation_plain(self):
+        self.assertEqual(self.gen_title("Привет"), "Привет")
+
+    def test_generate_title_punctuation_removal_languages_ru(self):
+        self.assertEqual(self.gen_title("Привет на русском."), "Привет на русском")
+    def test_generate_title_punctuation_removal_languages_en(self):
+        self.assertEqual(self.gen_title("Hello."), "Hello")
+    def test_generate_title_punctuation_removal_languages_en_comma(self):
+        self.assertEqual(self.gen_title("Hello,"), "Hello")
+    def test_generate_title_punctuation_removal_languages_ua(self):
+        self.assertEqual(self.gen_title("Привіт українською."), "Привіт українською")
+    def test_generate_title_punctuation_removal_languages_es(self):
+        self.assertEqual(self.gen_title("Hola en español."), "Hola en español")
+
+    def test_generate_title_punctuation_removal_quotes_double(self):
+        self.assertEqual(self.gen_title('Текст с "кавычками внутри".'), 'Текст с "кавычками внутри"')
+    def test_generate_title_punctuation_removal_quotes_single(self):
+        self.assertEqual(self.gen_title("Текст с 'одинарными' кавычками."), "Текст с 'одинарными' кавычками")
+    def test_generate_title_punctuation_removal_quotes_nested(self):
+        self.assertEqual(self.gen_title('Текст с "вложенными \'кавычками\'".'), 'Текст с "вложенными \'кавычками\'"')
+    def test_generate_title_punctuation_removal_quotes_citation(self):
+        self.assertEqual(self.gen_title('Цитата: "Это цитата.".'), 'Цитата: "Это цитата."')
+
+    def test_generate_title_punctuation_removal_special_exclamation(self):
+        self.assertEqual(self.gen_title("Предложение с восклицанием!"), "Предложение с восклицанием!")
+    def test_generate_title_punctuation_removal_special_question(self):
+        self.assertEqual(self.gen_title("Предложение с вопросом?"), "Предложение с вопросом?")
+    def test_generate_title_punctuation_removal_special_ellipsis(self):
+        self.assertEqual(self.gen_title("Эллипсис..."), "Эллипсис")
+    def test_generate_title_punctuation_removal_special_combo(self):
+        self.assertEqual(self.gen_title("Конец текста.,;:"), "Конец текста")
+    def test_generate_title_punctuation_removal_special_manydots(self):
+        self.assertEqual(self.gen_title("Много точек...."), "Много точек")
+    def test_generate_title_punctuation_removal_special_mix(self):
+        self.assertEqual(self.gen_title("Разные знаки.,;"), "Разные знаки")
+
+    def test_generate_title_punctuation_removal_real_examples_announce(self):
+        self.assertEqual(self.gen_title("Анонс конференции:"), "Анонс конференции")
+    def test_generate_title_punctuation_removal_real_examples_release(self):
+        self.assertEqual(self.gen_title("Новый релиз v1.0!"), "Новый релиз v1.0!")
+    def test_generate_title_punctuation_removal_real_examples_info(self):
+        self.assertEqual(self.gen_title("Важная информация!!!"), "Важная информация!!!")
+    def test_generate_title_punctuation_removal_real_examples_author(self):
+        self.assertEqual(self.gen_title('Автор сказал: "Это важно".'), 'Автор сказал: "Это важно"')
+    def test_generate_title_punctuation_removal_real_examples_code(self):
+        self.assertEqual(self.gen_title("Код программы: function() { return true; }"), "Код программы: function() { return true...")
+
+    def test_generate_title_punctuation_removal_edge_cases_article(self):
+        self.assertEqual(self.gen_title("Статья..."), "Статья")
+    def test_generate_title_punctuation_removal_edge_cases_qa(self):
+        self.assertEqual(self.gen_title("Вопросы и ответы."), "Вопросы и ответы")
+    def test_generate_title_punctuation_removal_edge_cases_end(self):
+        self.assertEqual(self.gen_title("Конец,"), "Конец")
 
     def test_generate_title_media_with_short_caption(self):
         """Media title should be used if caption is short (< 10 chars)."""
