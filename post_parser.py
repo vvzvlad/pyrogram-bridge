@@ -141,6 +141,31 @@ class PostParser:
                 return name
         return "Unknown author"
 
+    def truncate_title(self, first_line: str) -> str:
+        """Truncate the title according to the rules from _generate_title."""
+        cut_at = 37
+        max_extra_chars = 15
+        limit_index = cut_at + max_extra_chars  # 52
+
+        if len(first_line) > cut_at:
+            cut_limit = min(len(first_line), limit_index)
+            last_space_index = first_line.rfind(' ', 0, cut_limit)
+
+            if last_space_index != -1 and last_space_index >= cut_at:
+                cut_index = last_space_index
+            else:
+                cut_index = cut_limit
+
+            title_segment = first_line[:cut_index]
+            title_segment = re.sub(r'[\s.,;:]+$', '', title_segment).strip()
+
+            if len(first_line[:cut_index]) < len(first_line):
+                return f"{title_segment}..."
+            else:
+                return title_segment
+        else:
+            return first_line
+
     def _generate_title(self, message: Message) -> str: #Tests: tests/postparser_gen_title.py
         """Generate a title for a message, based on its content."""
 
@@ -187,29 +212,7 @@ class PostParser:
                     first_line = first_line.lower().capitalize()
 
                 # --- Trim long strings ---
-                cut_at = 37
-                max_extra_chars = 15
-                limit_index = cut_at + max_extra_chars # 52
-
-                if len(first_line) > cut_at:
-                    cut_limit = min(len(first_line), limit_index) # Define the effective limit for searching and cutting
-                    last_space_index = first_line.rfind(' ', 0, cut_limit) # Find the LAST space before the cut_limit
-
-                    if last_space_index != -1 and last_space_index >= cut_at: # Decide the cut index
-                        cut_index = last_space_index # Found a suitable space within [cut_at, cut_limit)
-                    else:
-                        cut_index = cut_limit # No suitable space found, cut at the hard limit
-
-                    title_segment = first_line[:cut_index] # Slice the string
-
-                    title_segment = re.sub(r'[\s.,;:]+$', '', title_segment).strip() # Clean trailing punctuation/spaces from the segment AFTER slicing
-
-                    if len(first_line[:cut_index]) < len(first_line): # Only add ellipsis if the title was actually cut
-                        processed_title = f"{title_segment}..."
-                    else: # Safeguard
-                        processed_title = title_segment
-                else:
-                    processed_title = first_line # Length <= cut_at, use as is
+                processed_title = self.truncate_title(first_line)
 
         # --- Decision Logic --- (Phase 2: Decide whether to use processed text or fallback)
 
