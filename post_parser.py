@@ -340,8 +340,8 @@ class PostParser:
             flags.append("video")
 
         # Add flag "audio" if the message media is AUDIO
-        if (message.media == MessageMediaType.AUDIO or message.media == MessageMediaType.VOICE) and 
-            len((message.text or message.caption or '').strip()) <= 200:
+        if (message.media in [MessageMediaType.AUDIO, MessageMediaType.VOICE] and 
+            len((message.text or message.caption or '').strip()) <= 200):
             flags.append("audio")
         
         # Add flag for posts without images
@@ -457,9 +457,8 @@ class PostParser:
 
         if debug:
             html_content.append(f'<div class="title">Title: {data["title"]}</div>')
-        html_content.append(f'<div class="message-header">{data["header"]}</div>')
         html_content.append(f'<div class="message-media">{data["media"]}</div>')
-        html_content.append(f'<div class="message-text">{data["body"]}</div>')
+        html_content.append(f'<div class="message-body">{data["body"]}</div>')
         html_content.append(f'<div class="message-footer">{data["footer"]}</div>')
         
         # Add raw JSON debug output if debug is enabled
