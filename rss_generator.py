@@ -175,7 +175,9 @@ async def _render_messages_groups(messages_groups: list[list[Message]],
                 })
             else: # Multiple messages in group - merge media, text and html body
                 processed_messages = [post_parser.process_message(msg) for msg in group]
-                main_message = next(  # Determine main message for header/footer/title
+
+                # Determine main message for header/footer/title
+                main_message = next(  
                     (msg for msg in processed_messages if msg['text']),
                     processed_messages[0]  # fallback if no message contains text
                 )
@@ -224,8 +226,7 @@ async def _render_messages_groups(messages_groups: list[list[Message]],
 
     # Filter posts by exclude_flags
     if exclude_flags:
-        # Split comma-separated exclude_flags into a list.
-        exclude_flag_list = [flag.strip() for flag in exclude_flags.split(',')]
+        exclude_flag_list = [flag.strip() for flag in exclude_flags.split(',')] # Split comma-separated flags into list
         filtered_posts = []
         for post in rendered_posts:
             # If "all" is specified and the post has any flags, exclude the post.
