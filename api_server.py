@@ -709,8 +709,8 @@ async def health_check(request: Request, token: str | None = None) -> Response:
         logger.error(error_message)
         raise HTTPException(status_code=500, detail=error_message) from e
 
-@app.get("/media/{channel}/{post_id}/{file_unique_id}/{digest}")
-@app.get("/media/{channel}/{post_id}/{file_unique_id}")
+@app.get("/media/{channel}/{post_id}/{file_unique_id}/{digest}", response_model=None)
+@app.get("/media/{channel}/{post_id}/{file_unique_id}", response_model=None)
 async def get_media(channel: str, post_id: int, file_unique_id: str, digest: str | None = None) -> FileResponse|Response:
     try:
         url = f"{channel}/{post_id}/{file_unique_id}"
