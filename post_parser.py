@@ -760,7 +760,10 @@ class PostParser:
             # Add date
             if message.date:
                 formatted_date = message.date.strftime("%d/%m/%y, %H:%M:%S")
-                first_line_parts.append(formatted_date)
+                first_line_parts.append(f'<span class="date">{formatted_date}</span>')
+
+            if message.id:
+                first_line_parts.append(f'<span class="message-id">#{message.id}</span>')
 
             if first_line_parts:
                 parts.append('&nbsp;&nbsp;|&nbsp;&nbsp;'.join(first_line_parts))
