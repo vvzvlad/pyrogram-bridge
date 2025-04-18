@@ -272,37 +272,14 @@ class PostParser:
 
     def _format_forward_info(self, message: Message) -> Union[str, None]:
         if forward_origin := getattr(message, "forward_origin", None):
-            sender_name = None
-            sender_link = None
-
-            if hasattr(forward_origin, 'sender_user_name') and forward_origin.sender_user_name:
-                # Case 1: MessageOriginChannel
-                sender_name = forward_origin.sender_user_name
-            elif hasattr(forward_origin, 'sender_user') and forward_origin.sender_user:
-                # Case 2: MessageOriginUser
-                user = forward_origin.sender_user
-                first = getattr(user, 'first_name', '')
-                last = getattr(user, 'last_name', '')
-                sender_name = f"{first} {last}".strip() or "Unknown User"
-            elif hasattr(forward_origin, 'chat') and forward_origin.chat:
-                # Case 3: Logic for channels (e.g., MessageOriginChat) 
-                sender_chat = forward_origin.chat
-                sender_name = getattr(sender_chat, "title", None) or getattr(sender_chat, "username", "Unknown channel")
-                if username := getattr(sender_chat, "username", None):
-                    sender_link = f'https://t.me/{username}'
-            elif type(forward_origin).__name__ == 'MessageOriginHiddenUser':
-                # Case 4: MessageOriginHiddenUser
-                sender_name = "Hidden User"
-            else:
-                # Fallback if origin type is unexpected
-                sender_name = "Unknown Source"
-
-            if sender_name:
-                forward_info = f"Forwarded from {sender_name}"
-                if sender_link:
-                    forward_info = f'Forwarded from <a href="{sender_link}">{sender_name}</a>'
-                return f'<div class="message-forward">{forward_info}</div><br>'
-
+            if sender_chat := getattr(forward_origin, "chat", None):
+                forward_title = getattr(sender_chat, "title", "Unknown channel")
+                forward_username = getattr(sender_chat, "username", None)
+                if forward_username:
+                    forward_link = f'<a href="https://t.me/{forward_username}">{forward_title} (@{forward_username})</a>'
+                    return f'<div class="message-forward">Forwarded from {forward_link}</div><br>'
+                return f'<div class="message-forward">Forwarded from {forward_title}</div><br>'
+            
         return None
 
     def _format_reply_info(self, message: Message) -> Union[str, None]:
@@ -555,6 +532,10 @@ class PostParser:
     def _generate_html_body(self, message: Message) -> str:
         content_body = []
 
+        test_fwd = self._format_forward_info(message)
+        test_reply = self._format_reply_info(message)
+        logger.error(f"Forward info: {test_fwd}, Reply info: {test_reply}")
+
         if forward_html := self._format_forward_info(message): content_body.append(forward_html)
         elif reply_html := self._format_reply_info(message): content_body.append(reply_html)
 
@@ -573,7 +554,7 @@ class PostParser:
         if poll := getattr(message, "poll", None):
             poll_html = self._format_poll(poll)
 
-        if text_html or poll_html:
+        if text_html or poll_html: 
             content_body.append(f'<div class="message-text">')
             if message.forward_origin: content_body.append(f"--------- FWD from {forward_title} ---------<br>")
             content_body.append(f'{text_html}')
