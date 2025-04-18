@@ -90,7 +90,7 @@ class PostParser:
         else:
             return channel
 
-    async def get_post(self, channel: str, post_id: int, output_type: str = 'json', debug: bool = False) -> Union[str, Dict[Any, Any]]:
+    async def get_post(self, channel: str, post_id: int, output_type: str = 'json', debug: bool = False) -> Union[str, Dict[Any, Any], None]:
         print(f"Getting post {channel}, {post_id}")
         try:
             channel = self.channel_name_prepare(channel)
@@ -168,7 +168,7 @@ class PostParser:
             else: return title_segment
         else: return first_line
         
-    def _service_message_title(self, message: Message) -> str:
+    def _service_message_title(self, message: Message) -> Union[str, None]:
         if service := getattr(message, "service", None):
             if 'PINNED_MESSAGE'           in str(service): return "📌 Pinned message"
             elif 'NEW_CHAT_PHOTO'         in str(service): return "🖼 New chat photo"
@@ -179,17 +179,18 @@ class PostParser:
             elif 'GROUP_CHAT_CREATED'     in str(service): return "✨ Group chat created"
             elif 'CHANNEL_CHAT_CREATED'   in str(service): return "✨ Chat created"
             elif 'DELETE_CHAT_PHOTO'      in str(service): return "🗑️ Chat photo deleted"
+        return None
 
-    def _media_message_title(self, message: Message) -> str:
+    def _media_message_title(self, message: Message) -> Union[str, None]:
         if message.media:
             if message.media == MessageMediaType.POLL:
-                if hasattr(message, 'poll') and hasattr(message.poll, 'question'):
+                if message.poll is not None and hasattr(message.poll, 'question'):
                     poll_question = message.poll.question.strip()
                     if poll_question:
                         return f"📊 Poll: {poll_question}"
                 return "📊 Poll"
             if message.media == MessageMediaType.DOCUMENT:
-                if hasattr(message.document, 'mime_type') and 'pdf' in message.document.mime_type.lower():
+                if message.document is not None and hasattr(message.document, 'mime_type') and message.document.mime_type == 'application/pdf':
                     return "📄 PDF Document"
                 return "📎 Document"
             if message.media == MessageMediaType.PHOTO:       return "📷 Photo"
@@ -205,9 +206,10 @@ class PostParser:
             if message.web_page.title:
                 return f"🔗 {message.web_page.title}"
             return "🔗 Web link"
+        return None
         
 
-    def _generate_base_title(self, message: Message) -> str:
+    def _generate_base_title(self, message: Message) -> Union[str, None]:
         """Generates the base title without the FWD prefix."""
         # --- Text Processing --- (Phase 1: Process text if available)
         text = message.text or message.caption or ''
@@ -260,7 +262,8 @@ class PostParser:
                 if url_match: return f"🔗 {message.web_page.title}"
             if text_has_urls: # If original text had any URL (and wasn't YouTube/Webpage with title)
                 return  "🔗 Web link"
-
+        return None
+    
     def _generate_title(self, message: Message) -> str: #Tests: tests/postparser_gen_title.py
         """Generate a title for a message, based on its content."""
         title = None
@@ -304,7 +307,7 @@ class PostParser:
         
         return None
     
-    def _extract_reactions(self, message: Message) -> Union[str, None]:
+    def _extract_reactions(self, message: Message) -> Union[Dict[str, int], None]:
         if reactions := getattr(message, 'reactions', None):
             return {r.emoji: r.count for r in reactions.reactions}
         return None
@@ -360,8 +363,8 @@ class PostParser:
             flags.append("donat")
 
         # Check if the post's reactions contain more clown emojis (🤡) or poo emojis (💩).
-        if getattr(message, "reactions", None):
-            for reaction in message.reactions.reactions:
+        if reactions := getattr(message, "reactions", None):
+            for reaction in getattr(reactions, "reactions", []):
                 if reaction.emoji == "🤡" and reaction.count >= 30:
                     flags.append("clownpoo")
                     break
@@ -450,8 +453,8 @@ class PostParser:
         # Add raw JSON debug output if debug is enabled
         if debug:
             html_content.append(f'<pre class="debug-json" style="background: #f5f5f5; padding: 10px; margin-top: 20px; overflow-x: auto; font-size: 10px; white-space: pre-wrap;">{str(message)}</pre>')
-        html_content = '\n'.join(html_content)
-        return html_content
+        html_data = '\n'.join(html_content)
+        return html_data
 
     def _format_flags(self, flags_list: list) -> str:
         if not Config['show_post_flags']:
@@ -506,11 +509,11 @@ class PostParser:
         allowed_tags = ['p', 'a', 'b', 'i', 'strong', 'em', 'ul', 'ol', 'li', 'br', 'div', 'span', 'img', 'video', 'audio', 'source']
         allowed_attributes = {
             'a': ['href', 'title', 'target'],
-            'img': {'src': True, 'alt': True, 'style': True},
-            'video': {'controls': True, 'src': True, 'style': True},
-            'audio': {'controls': True, 'style': True},
+            'img': ['src', 'alt', 'style'],
+            'video': ['controls', 'src', 'style'],
+            'audio': ['controls', 'style'],
             'source': ['src', 'type'],
-            'div': {'class': True, 'style': True},
+            'div': ['class', 'style'],
             'span': ['class']
         }
 
@@ -551,9 +554,11 @@ class PostParser:
         if poll := getattr(message, "poll", None):
             poll_html = self._format_poll(poll)
 
+        forward_html = self._format_forward_info(message)
+
         if text_html or poll_html: 
             content_body.append(f'<div class="message-text">')
-            if message.forward_origin: content_body.append(self._format_forward_info(message)) # Forward info
+            if forward_html: content_body.append(forward_html) # Forward info
             content_body.append(f'{text_html}')
             if poll_html: content_body.append(poll_html) # Poll
             if message.forward_origin: content_body.append(f"<br>---- Forward post end ----") # Forward info end
@@ -582,7 +587,7 @@ class PostParser:
                 content_media.append(f'<div class="message-media">')
                 
                 # Check if document is a PDF file
-                if message.media == MessageMediaType.DOCUMENT and hasattr(message.document, 'mime_type') and message.document.mime_type == 'application/pdf':
+                if message.media == MessageMediaType.DOCUMENT and message.document is not None and hasattr(message.document, 'mime_type') and message.document.mime_type == 'application/pdf':
                     if channel_username.startswith('-100'): tg_link = f"https://t.me/c/{channel_username[4:]}/{message.id}"
                     else:  tg_link = f"https://t.me/{channel_username}/{message.id}"
                     content_media.append(f'<div class="document-pdf" style="padding: 10px;"><a href="{tg_link}" target="_blank">[PDF-файл]</a></div>')
@@ -829,10 +834,10 @@ class PostParser:
     def _save_media_file_ids(self, message: Message) -> None:
         try:
             file_data = {
-                'channel': None,
-                'post_id': None,
-                'file_unique_id': None,
-                'added': None
+                'channel': '',
+                'post_id': 0,
+                'file_unique_id': '',
+                'added': .0
             }
 
             channel_username = self.get_channel_username(message)
@@ -842,7 +847,7 @@ class PostParser:
 
             if message.media:
                 # Skip large videos - they shouldn't be cached permanently
-                if message.video and message.video.file_size > 100 * 1024 * 1024: return
+                if message.video and message.video.file_size and message.video.file_size > 100 * 1024 * 1024: return
                 
                 if   message.photo:         file_data['file_unique_id'] = message.photo.file_unique_id
                 elif message.video:         file_data['file_unique_id'] = message.video.file_unique_id

@@ -7,6 +7,7 @@
 # pylint: disable=broad-exception-caught, missing-function-docstring, missing-class-docstring
 # pylint: disable=f-string-without-interpolation
 # pylance: disable=reportMissingImports, reportMissingModuleSource
+# mypy: disable-error-code="import-untyped"
 
 import logging
 import re
@@ -14,6 +15,7 @@ from datetime import datetime, timezone
 from typing import Optional
 from feedgen.feed import FeedGenerator
 from pyrogram import errors
+from pyrogram.types import Message
 from post_parser import PostParser
 from config import get_settings
 
@@ -33,9 +35,9 @@ async def _create_time_based_media_groups(messages, merge_seconds: int = 5):
     Create media groups based on time difference between messages
     """
     messages_sorted = sorted(messages, key=lambda x: x.date)
-    cluster = []
-    last_msg_date = None
-    current_media_group_id = None
+    cluster: list[Message] = []
+    last_msg_date: Optional[datetime] = None
+    current_media_group_id: Optional[str] = None
 
     for msg in messages_sorted:
         
@@ -51,26 +53,32 @@ async def _create_time_based_media_groups(messages, merge_seconds: int = 5):
         
         if time_diff <= merge_seconds:
             if current_media_group_id:
-                msg.media_group_id = current_media_group_id
+                msg.media_group_id = current_media_group_id  # type: ignore
             elif msg_media_group_id:
                 current_media_group_id = msg_media_group_id
                 for m in cluster:
-                    m.media_group_id = current_media_group_id
+                    m.media_group_id = current_media_group_id  # type: ignore
             cluster.append(msg)
             last_msg_date = msg.date
         else:
             if len(cluster) >= 2 and not current_media_group_id:
-                new_group_id = f"time_{min(m.date for m in cluster)}"
-                for m in cluster:
-                    m.media_group_id = new_group_id
+                dates = [m.date for m in cluster if m.date is not None]
+                if dates:
+                    min_date = min(dates)
+                    new_group_id = f"time_{min_date}"
+                    for m in cluster:
+                        m.media_group_id = new_group_id  # type: ignore
             cluster = [msg]
             last_msg_date = msg.date
             current_media_group_id = msg_media_group_id
     
     if len(cluster) >= 2 and not current_media_group_id:
-        new_group_id = f"time_{min(m.date for m in cluster)}"
-        for m in cluster:
-            m.media_group_id = new_group_id
+        dates = [m.date for m in cluster if m.date is not None]
+        if dates:
+            min_date = min(dates)
+            new_group_id = f"time_{min_date}"
+            for m in cluster:
+                m.media_group_id = new_group_id  # type: ignore
 
     return messages
 

@@ -12,7 +12,7 @@
 import logging
 import os
 import mimetypes
-from typing import List
+from typing import List, Union
 
 import json
 from datetime import datetime
@@ -197,10 +197,10 @@ async def prepare_file_response(file_path: str, delete_after: bool = False):
     else:
         return FileResponse(path=file_path, media_type=media_type, headers=headers)
 
-async def download_media_file(channel: str, post_id: int, file_unique_id: str) -> str:
+async def download_media_file(channel: Union[str, int], post_id: int, file_unique_id: str) -> tuple[Union[str, None], bool]:
     """
     Download media file from Telegram and save to cache
-    Returns path to downloaded file
+    Returns tuple of (file path, delete_after)
     """
     base_cache_dir = os.path.abspath("./data/cache")
     
@@ -210,7 +210,7 @@ async def download_media_file(channel: str, post_id: int, file_unique_id: str) -
     os.makedirs(post_dir, exist_ok=True)
     
     # Convert numeric channel ID to int if needed
-    channel_id = channel
+    channel_id: Union[str, int] = channel
     if isinstance(channel, str) and channel.startswith('-100'):
         channel_id = int(channel)
     
@@ -467,9 +467,10 @@ def fix_corrupted_json(file_path: str) -> list:
         
         # Validate entries
         valid_entries = []
-        for entry in fixed_data:
-            if isinstance(entry, dict) and all(key in entry for key in ['channel', 'post_id', 'file_unique_id']):
-                valid_entries.append(entry)
+        if isinstance(fixed_data, list):
+            for entry in fixed_data:
+                if isinstance(entry, dict) and all(key in entry for key in ['channel', 'post_id', 'file_unique_id']):
+                    valid_entries.append(entry)
                 
         logger.info(f"Fixed JSON file: {file_path}, found {len(valid_entries)} valid entries")
         return valid_entries
@@ -584,13 +585,19 @@ def calculate_cache_stats():
         "channels": channels_stats
     }
 
+def is_local_request(request: Union[Request, None]) -> bool:
+    local_hosts = ["127.0.0.1", "localhost"]
+    if request and request.client and request.client.host:
+        if request.client.host in local_hosts:
+            return True
+    return False
 
 @app.get("/html/{channel}/{post_id}", response_class=HTMLResponse)
 @app.get("/post/html/{channel}/{post_id}", response_class=HTMLResponse)
 @app.get("/html/{channel}/{post_id}/{token}", response_class=HTMLResponse)  
 @app.get("/post/html/{channel}/{post_id}/{token}", response_class=HTMLResponse)
-async def get_post_html(channel: str, post_id: int, token: str | None = None, debug: bool = False, request: Request = None):
-    if Config["token"] and request and request.client.host not in ["127.0.0.1", "localhost"]:
+async def get_post_html(channel: str, post_id: int, request: Request, token: str | None = None, debug: bool = False):
+    if Config["token"] and is_local_request(request):
         if token != Config["token"]:
             logger.error(f"Invalid token for HTML post: {token}, expected: {Config['token']}")
             raise HTTPException(status_code=403, detail="Invalid token")
@@ -613,8 +620,8 @@ async def get_post_html(channel: str, post_id: int, token: str | None = None, de
 @app.get("/post/json/{channel}/{post_id}")
 @app.get("/json/{channel}/{post_id}/{token}")
 @app.get("/post/json/{channel}/{post_id}/{token}")
-async def get_post(channel: str, post_id: int, token: str | None = None, debug: bool = False, request: Request = None):
-    if Config["token"] and request and request.client.host not in ["127.0.0.1", "localhost"]:
+async def get_post(channel: str, post_id: int, request: Request, token: str | None = None, debug: bool = False):
+    if Config["token"] and is_local_request(request):
         if token != Config["token"]:
             logger.error(f"Invalid token for JSON post: {token}, expected: {Config['token']}")
             raise HTTPException(status_code=403, detail="Invalid token")
@@ -635,8 +642,8 @@ async def get_post(channel: str, post_id: int, token: str | None = None, debug: 
 
 @app.get("/raw_json/{channel}/{post_id}")
 @app.get("/raw_json/{channel}/{post_id}/{token}")
-async def get_raw_post_json(channel: str, post_id: int, token: str | None = None, request: Request = None):
-    if Config["token"] and request and request.client.host not in ["127.0.0.1", "localhost"]:
+async def get_raw_post_json(channel: str, post_id: int, request: Request, token: str | None = None):
+    if Config["token"] and is_local_request(request):
         if token != Config["token"]:
             logger.error(f"Invalid token for raw JSON post: {token}, expected: {Config['token']}")
             raise HTTPException(status_code=403, detail="Invalid token")
@@ -645,7 +652,7 @@ async def get_raw_post_json(channel: str, post_id: int, token: str | None = None
             
     try:
         # Convert numeric channel ID to int if needed
-        channel_id = channel
+        channel_id: Union[str, int] = channel
         if isinstance(channel, str) and channel.startswith('-100'):
             channel_id = int(channel)
             
@@ -663,8 +670,8 @@ async def get_raw_post_json(channel: str, post_id: int, token: str | None = None
 
 @app.get("/health")
 @app.get("/health/{token}")
-async def health_check(token: str | None = None, request: Request = None):
-    if Config["token"] and request and request.client.host not in ["127.0.0.1", "localhost"]:
+async def health_check(request: Request, token: str | None = None):
+    if Config["token"] and is_local_request(request):
         if token != Config["token"]:
             logger.error(f"Invalid token for health check: {token}, expected: {Config['token']}")
             raise HTTPException(status_code=403, detail="Invalid token")
@@ -712,13 +719,16 @@ async def get_media(channel: str, post_id: int, file_unique_id: str, digest: str
             logger.info(f"Valid digest for media {url}: {digest}")   
             
         # Convert numeric channel ID to int if needed
-        channel_id = channel
+        channel_id: Union[str, int] = channel
         if isinstance(channel, str) and channel.startswith('-100'):
             channel_id = int(channel)
             
         try: # Wrap the download and prepare call
             file_path, delete_after = await download_media_file(channel_id, post_id, file_unique_id)
-            return await prepare_file_response(file_path, delete_after=delete_after)
+            if not file_path:
+                raise HTTPException(status_code=404, detail="File not found")
+            if file_path:
+                return await prepare_file_response(file_path, delete_after=delete_after)
         except ZeroSizeFileError as e: # Catch zero-size file errors
             logger.warning(f"zero_size_file_encountered: {str(e)}. Instructing client to retry.")
             return Response(
@@ -744,15 +754,15 @@ async def get_media(channel: str, post_id: int, file_unique_id: str, digest: str
 @app.get("/rss/{channel}", response_class=Response)
 @app.get("/rss/{channel}/{token}", response_class=Response)
 async def get_rss_feed(channel: str, 
+                        request: Request,
                         token: str | None = None, 
                         limit: int = 50, 
                         output_type: str = 'rss', 
                         exclude_flags: str | None = None,
                         exclude_text: str | None = None,
                         merge_seconds: int = 5,
-                        request: Request = None
                         ):
-    if Config["token"] and request and request.client.host not in ["127.0.0.1", "localhost"]:
+    if Config["token"] and is_local_request(request):
         if token != Config["token"]:
             logger.error(f"invalid_token_error: token {token}, expected {Config['token']}")
             raise HTTPException(status_code=403, detail="Invalid token")
@@ -798,9 +808,9 @@ async def get_rss_feed(channel: str,
 
 @app.get("/flags", response_model=List[str])
 @app.get("/flags/{token}", response_model=List[str])
-async def get_available_flags(token: str | None = None, request: Request = None):
+async def get_available_flags(request: Request, token: str | None = None):
     """Returns a list of all possible flags that can be assigned to posts."""
-    if Config["token"] and request and request.client.host not in ["127.0.0.1", "localhost"]:
+    if Config["token"] and is_local_request(request):
         if token != Config["token"]:
             logger.error(f"Invalid token for flags endpoint: {token}, expected: {Config['token']}")
             raise HTTPException(status_code=403, detail="Invalid token")
