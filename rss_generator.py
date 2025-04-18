@@ -12,13 +12,13 @@
 import logging
 import re
 from datetime import datetime, timezone
-from typing import Optional, Dict, Any, List
+from types import SimpleNamespace
+from typing import Optional
 from feedgen.feed import FeedGenerator
 from pyrogram import errors, Client
 from pyrogram.types import Message
 from post_parser import PostParser
 from config import get_settings
-from types import SimpleNamespace
 
 Config = get_settings()
 
