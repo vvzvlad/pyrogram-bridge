@@ -12,7 +12,7 @@
 import logging
 import os
 import mimetypes
-from typing import List, Union
+from typing import List, Union, Any
 
 import json
 from datetime import datetime
@@ -28,6 +28,7 @@ import json_repair
 
 import magic
 from pyrogram import errors
+from pyrogram.types import Message
 from fastapi import FastAPI, HTTPException, Response, Request
 from fastapi.responses import HTMLResponse, FileResponse
 from telegram_client import TelegramClient
@@ -114,7 +115,7 @@ if __name__ == "__main__":
         loop="uvloop"
     )
 
-async def find_file_id_in_message(message, file_unique_id: str):
+async def find_file_id_in_message(message: Message, file_unique_id: str) -> Union[str, None]:
     """Find file_id by checking all possible media types in message"""
     if message.media == "MessageMediaType.POLL":
         logger.debug(f"Message {message.id} is a poll, skipping media search")
@@ -159,11 +160,12 @@ async def find_file_id_in_message(message, file_unique_id: str):
             return message.document.file_id
             
     # If we reached here, the file_unique_id was not found
-    logger.warning(f"Could not find media with file_unique_id '{file_unique_id}' in message {message.id} (channel: {message.chat.id}). Found media: {', '.join(media_found) or 'None'}")
+    channel_id_log = message.chat.id if message.chat else 'unknown_chat'
+    logger.warning(f"Could not find media with file_unique_id '{file_unique_id}' in message {message.id} (channel: {channel_id_log}). Found media: {', '.join(media_found) or 'None'}")
     return None
 
 
-def delayed_delete_file(file_path: str, delay: int = 300):
+def delayed_delete_file(file_path: str, delay: int = 300) -> None:
     """
     Delete temporary file after a delay to ensure complete file delivery.
     Delay is set to 5 minutes by default.
@@ -176,7 +178,7 @@ def delayed_delete_file(file_path: str, delay: int = 300):
         logger.error(f"Failed to delete temporary file {file_path}: {str(e)}")
 
 
-async def prepare_file_response(file_path: str, delete_after: bool = False):
+async def prepare_file_response(file_path: str, delete_after: bool = False) -> FileResponse:
     """Prepare file response with proper headers"""
     if not os.path.exists(file_path): raise HTTPException(status_code=404, detail="File not found")
     
@@ -410,7 +412,7 @@ async def remove_old_cached_files(media_files: list, cache_dir: str) -> tuple[li
     return updated_media_files, files_removed
 
 
-async def download_new_files(media_files: list, cache_dir: str):
+async def download_new_files(media_files: list, cache_dir: str) -> None:
     """
     Download files that are not in cache yet
     """
@@ -479,7 +481,7 @@ def fix_corrupted_json(file_path: str) -> list:
         logger.error(f"Failed to fix JSON file {file_path}: {str(e)}")
         return []
 
-async def cache_media_files():
+async def cache_media_files() -> None:
     """Background task for cache management: removes old files and downloads new ones"""
     delay = 60
     while True:
@@ -522,7 +524,7 @@ async def cache_media_files():
             await asyncio.sleep(delay)
 
 
-def calculate_cache_stats():
+def calculate_cache_stats() -> dict[str, Any]:
     """
     Calculate cache statistics including file count, total size in MB, and time difference in days.
     Returns a dictionary with keys: 'cache_files_count', 'cache_total_size_mb', 'cache_time_diff_days', 'channels'.
@@ -535,8 +537,8 @@ def calculate_cache_stats():
     if os.path.isdir(base_cache_dir):
         # Recursively walk through all subdirectories
         for root, _, files in os.walk(base_cache_dir):
-            for f in files:
-                file_path = os.path.join(root, f)
+            for current_file in files:
+                file_path = os.path.join(root, current_file)
                 file_size = os.path.getsize(file_path)
                 cache_files_count += 1
                 cache_total_size_bytes += file_size
@@ -548,7 +550,7 @@ def calculate_cache_stats():
                 if channel not in channels_stats:
                     channels_stats[channel] = {
                         'files_count': 0,
-                        'size_mb': 0
+                        'size_mb': 0.0
                     }
                 
                 channels_stats[channel]['files_count'] += 1
@@ -565,8 +567,8 @@ def calculate_cache_stats():
     cache_times = []
     if os.path.exists(media_file_ids_path):
         try:
-            with open(media_file_ids_path, "r", encoding="utf-8") as f:
-                media_files = json.load(f)
+            with open(media_file_ids_path, "r", encoding="utf-8") as json_file:
+                media_files = json.load(json_file)
             for entry in media_files:
                 if "added" in entry:
                     cache_times.append(entry["added"])
@@ -596,7 +598,7 @@ def is_local_request(request: Union[Request, None]) -> bool:
 @app.get("/post/html/{channel}/{post_id}", response_class=HTMLResponse)
 @app.get("/html/{channel}/{post_id}/{token}", response_class=HTMLResponse)  
 @app.get("/post/html/{channel}/{post_id}/{token}", response_class=HTMLResponse)
-async def get_post_html(channel: str, post_id: int, request: Request, token: str | None = None, debug: bool = False):
+async def get_post_html(channel: str, post_id: int, request: Request, token: str | None = None, debug: bool = False) -> HTMLResponse:
     if Config["token"] and is_local_request(request):
         if token != Config["token"]:
             logger.error(f"Invalid token for HTML post: {token}, expected: {Config['token']}")
@@ -609,7 +611,7 @@ async def get_post_html(channel: str, post_id: int, request: Request, token: str
         html_content = await parser.get_post(channel, post_id, 'html', debug)
         if not html_content:
             raise HTTPException(status_code=404, detail="Post not found")
-        return html_content
+        return HTMLResponse(content=html_content)
     except Exception as e:
         error_message = f"Failed to get HTML post for channel {channel}, post_id {post_id}: {str(e)}"
         logger.error(error_message)
@@ -620,7 +622,7 @@ async def get_post_html(channel: str, post_id: int, request: Request, token: str
 @app.get("/post/json/{channel}/{post_id}")
 @app.get("/json/{channel}/{post_id}/{token}")
 @app.get("/post/json/{channel}/{post_id}/{token}")
-async def get_post(channel: str, post_id: int, request: Request, token: str | None = None, debug: bool = False):
+async def get_post(channel: str, post_id: int, request: Request, token: str | None = None, debug: bool = False) -> Response:
     if Config["token"] and is_local_request(request):
         if token != Config["token"]:
             logger.error(f"Invalid token for JSON post: {token}, expected: {Config['token']}")
@@ -633,7 +635,7 @@ async def get_post(channel: str, post_id: int, request: Request, token: str | No
         json_content = await parser.get_post(channel, post_id, 'json', debug)
         if not json_content:
             raise HTTPException(status_code=404, detail="Post not found")
-        return json_content
+        return Response(content=json_content, media_type="application/json")
     except Exception as e:
         error_message = f"Failed to get JSON post for channel {channel}, post_id {post_id}: {str(e)}"
         logger.error(error_message)
@@ -642,7 +644,7 @@ async def get_post(channel: str, post_id: int, request: Request, token: str | No
 
 @app.get("/raw_json/{channel}/{post_id}")
 @app.get("/raw_json/{channel}/{post_id}/{token}")
-async def get_raw_post_json(channel: str, post_id: int, request: Request, token: str | None = None):
+async def get_raw_post_json(channel: str, post_id: int, request: Request, token: str | None = None) -> Response:
     if Config["token"] and is_local_request(request):
         if token != Config["token"]:
             logger.error(f"Invalid token for raw JSON post: {token}, expected: {Config['token']}")
@@ -670,7 +672,7 @@ async def get_raw_post_json(channel: str, post_id: int, request: Request, token:
 
 @app.get("/health")
 @app.get("/health/{token}")
-async def health_check(request: Request, token: str | None = None):
+async def health_check(request: Request, token: str | None = None) -> Response:
     if Config["token"] and is_local_request(request):
         if token != Config["token"]:
             logger.error(f"Invalid token for health check: {token}, expected: {Config['token']}")
@@ -690,7 +692,7 @@ async def health_check(request: Request, token: str | None = None):
             else:
                 config_info[config_key] = config_value
 
-        return {
+        data = {
             "status": "ok",
             "tg_connected": client.client.is_connected,
             "tg_name": me.username,
@@ -701,6 +703,7 @@ async def health_check(request: Request, token: str | None = None):
             "config": config_info,
             **cache_stats
         }
+        return Response(content=json.dumps(data), media_type="application/json")    
     except Exception as e:
         error_message = f"Failed to get health check: {str(e)}"
         logger.error(error_message)
@@ -708,7 +711,7 @@ async def health_check(request: Request, token: str | None = None):
 
 @app.get("/media/{channel}/{post_id}/{file_unique_id}/{digest}")
 @app.get("/media/{channel}/{post_id}/{file_unique_id}")
-async def get_media(channel: str, post_id: int, file_unique_id: str, digest: str | None = None):
+async def get_media(channel: str, post_id: int, file_unique_id: str, digest: str | None = None) -> FileResponse|Response:
     try:
         url = f"{channel}/{post_id}/{file_unique_id}"
         if not verify_media_digest(url, digest):
@@ -751,6 +754,11 @@ async def get_media(channel: str, post_id: int, file_unique_id: str, digest: str
         logger.error(error_message)
         raise HTTPException(status_code=500, detail=error_message) from e
 
+    # If the code reaches here, something is wrong with the logic above.
+    # This part should theoretically be unreachable.
+    logger.error(f"get_media reached unexpected state for {channel}/{post_id}/{file_unique_id}")
+    raise HTTPException(status_code=500, detail="Internal server error: Unexpected state reached in media handling.")
+
 @app.get("/rss/{channel}", response_class=Response)
 @app.get("/rss/{channel}/{token}", response_class=Response)
 async def get_rss_feed(channel: str, 
@@ -761,7 +769,7 @@ async def get_rss_feed(channel: str,
                         exclude_flags: str | None = None,
                         exclude_text: str | None = None,
                         merge_seconds: int = 5,
-                        ):
+                        ) -> Response:
     if Config["token"] and is_local_request(request):
         if token != Config["token"]:
             logger.error(f"invalid_token_error: token {token}, expected {Config['token']}")
@@ -808,7 +816,7 @@ async def get_rss_feed(channel: str,
 
 @app.get("/flags", response_model=List[str])
 @app.get("/flags/{token}", response_model=List[str])
-async def get_available_flags(request: Request, token: str | None = None):
+async def get_available_flags(request: Request, token: str | None = None) -> Response:
     """Returns a list of all possible flags that can be assigned to posts."""
     if Config["token"] and is_local_request(request):
         if token != Config["token"]:
@@ -819,7 +827,7 @@ async def get_available_flags(request: Request, token: str | None = None):
 
     try:
         flags = PostParser.get_all_possible_flags()
-        return flags
+        return Response(content=flags, media_type="text/plain")
     except Exception as e:
         error_message = f"Failed to get flags list: {str(e)}"
         logger.error(error_message)

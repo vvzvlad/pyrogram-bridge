@@ -14,7 +14,7 @@ import re
 from datetime import datetime, timezone
 from typing import Optional
 from feedgen.feed import FeedGenerator
-from pyrogram import errors
+from pyrogram import errors, Client
 from pyrogram.types import Message
 from post_parser import PostParser
 from config import get_settings
@@ -30,24 +30,24 @@ if not logger.handlers:
     logger.addHandler(handler)
 
 
-async def _create_time_based_media_groups(messages, merge_seconds: int = 5):
+async def _create_time_based_media_groups(messages: list[Message], merge_seconds: int = 5) -> list[Message]:
     """
     Create media groups based on time difference between messages
     """
-    messages_sorted = sorted(messages, key=lambda x: x.date)
+    messages_sorted = sorted(messages, key=lambda msg: msg.date) # type: ignore
     cluster: list[Message] = []
-    last_msg_date: Optional[datetime] = None
+    last_msg_date: datetime = datetime.now(timezone.utc)
     current_media_group_id: Optional[str] = None
 
     for msg in messages_sorted:
         
         if not cluster:
             cluster.append(msg)
-            last_msg_date = msg.date
+            last_msg_date = msg.date # type: ignore
             current_media_group_id = getattr(msg, "media_group_id", None)
             continue
         
-        time_diff = (msg.date - last_msg_date).total_seconds()
+        time_diff = (msg.date - last_msg_date).total_seconds() # type: ignore
         
         msg_media_group_id = getattr(msg, "media_group_id", None)
         
@@ -59,7 +59,7 @@ async def _create_time_based_media_groups(messages, merge_seconds: int = 5):
                 for m in cluster:
                     m.media_group_id = current_media_group_id  # type: ignore
             cluster.append(msg)
-            last_msg_date = msg.date
+            last_msg_date = msg.date # type: ignore
         else:
             if len(cluster) >= 2 and not current_media_group_id:
                 dates = [m.date for m in cluster if m.date is not None]
@@ -69,7 +69,7 @@ async def _create_time_based_media_groups(messages, merge_seconds: int = 5):
                     for m in cluster:
                         m.media_group_id = new_group_id  # type: ignore
             cluster = [msg]
-            last_msg_date = msg.date
+            last_msg_date = msg.date # type: ignore
             current_media_group_id = msg_media_group_id
     
     if len(cluster) >= 2 and not current_media_group_id:
@@ -82,12 +82,12 @@ async def _create_time_based_media_groups(messages, merge_seconds: int = 5):
 
     return messages_sorted
 
-async def _create_messages_groups(messages):
+async def _create_messages_groups(messages: list[Message]) -> list[list[Message]]:
     """
     Process messages into formatted posts, handling media groups
     """
-    processing_groups = []
-    media_groups = {}
+    processing_groups: list[list[Message]] = []
+    media_groups: dict[str | int, list[Message]] = {}
     
     # First pass - collect messages and organize into processing groups
     for message in messages:
@@ -113,7 +113,8 @@ async def _create_messages_groups(messages):
                 processing_groups.append([message]) # Single message becomes its own processing group
                 
         except Exception as e:
-            logger.error(f"_create_messages_groups: channel {message.chat.username}, message_id {message.id}, error {str(e)}")
+            username = message.chat.username if message.chat else 'unknown_chat'
+            logger.error(f"_create_messages_groups: channel {username}, message_id {message.id}, error {str(e)}")
             continue
     
     # Sort messages within media groups by message ID in descending order
@@ -122,11 +123,11 @@ async def _create_messages_groups(messages):
         processing_groups.append(media_group)
     
     # Sort processing groups by date of first message in each group
-    processing_groups.sort( key=lambda group: group[0].date, reverse=True )
+    processing_groups.sort(key=lambda group: group[0].date if group[0].date else datetime.now(timezone.utc), reverse=True)
     
     return processing_groups
 
-async def _trim_messages_groups(messages_groups, limit):
+async def _trim_messages_groups(messages_groups: list[list[Message]], limit: int):
     """
     Trim messages groups to limit
     """
@@ -138,7 +139,10 @@ async def _trim_messages_groups(messages_groups, limit):
     
     return messages_groups
 
-async def _render_messages_groups(messages_groups, post_parser, exclude_flags: str | None = None, exclude_text: str | None = None):
+async def _render_messages_groups(messages_groups: list[list[Message]], 
+                                    post_parser: PostParser, 
+                                    exclude_flags: str | None = None, 
+                                    exclude_text: str | None = None):
     """
     Render message groups into HTML format
     Args:
@@ -193,7 +197,7 @@ async def _render_messages_groups(messages_groups, post_parser, exclude_flags: s
                 for msg in processed_messages:
                     if msg.get('flags'): # Check if flags exist and are not empty
                         all_flags.update(msg['flags'])
-                all_flags.update("merged")
+                all_flags.add("merged")
                 merged_flags = list(all_flags) # Convert back to list if needed, or keep as set
 
                 footer_html = post_parser.generate_html_footer(main_message, flags_list=merged_flags)
@@ -250,9 +254,8 @@ async def _render_messages_groups(messages_groups, post_parser, exclude_flags: s
     rendered_posts.sort(key=lambda x: x['date'], reverse=True)
     return rendered_posts
 
-async def generate_channel_rss(channel: str, 
-                                post_parser: Optional[PostParser] = None, #TODO избавиться от post_parser в аргументах
-                                client = None, 
+async def generate_channel_rss(channel: str | int, 
+                                client: Client, 
                                 limit: int = 20, 
                                 exclude_flags: str | None = None,
                                 exclude_text: str | None = None,
@@ -276,16 +279,14 @@ async def generate_channel_rss(channel: str,
         raise ValueError(f"limit cannot exceed 200, got {limit}")
 
     try:
-        if post_parser is None:
-            post_parser = PostParser(client=client)
+        post_parser = PostParser(client=client)
             
         fg = FeedGenerator()
         fg.load_extension('dc')
         base_url = Config['pyrogram_bridge_url']
         
         try:
-            channel = post_parser.channel_name_prepare(channel)
-            logger.debug(f"Prepared channel identifier: {channel} (type: {type(channel)})") # Log prepared channel
+            channel  = post_parser.channel_name_prepare(channel)
             channel_info = await post_parser.client.get_chat(channel)
             channel_title = channel_info.title or f"Telegram: {channel}"
             channel_username = post_parser.get_channel_username(channel_info)
@@ -354,9 +355,8 @@ async def generate_channel_rss(channel: str,
         raise
 
 
-async def generate_channel_html(channel: str, 
-                                post_parser: Optional[PostParser] = None, 
-                                client = None, 
+async def generate_channel_html(channel: str | int, 
+                                client: Client,
                                 limit: int = 20, 
                                 exclude_flags: str | None = None,
                                 exclude_text: str | None = None,
@@ -380,8 +380,7 @@ async def generate_channel_html(channel: str,
         raise ValueError(f"limit cannot exceed 200, got {limit}")
 
     try:
-        if post_parser is None:
-            post_parser = PostParser(client=client)
+        post_parser = PostParser(client=client)
             
         base_url = Config['pyrogram_bridge_url']
         
@@ -427,7 +426,7 @@ async def generate_channel_html(channel: str,
         logger.error(f"html_generation_error: channel {channel}, error {str(e)}")
         raise
 
-def create_error_feed(channel: str, base_url: str) -> str:
+def create_error_feed(channel: str | int, base_url: str) -> str:
     """
     Create an empty RSS feed with metadata indicating an error when the channel is not found.
     Args:

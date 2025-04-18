@@ -83,23 +83,26 @@ class PostParser:
             # but for now, we return an empty list.
             return []
 
-    def channel_name_prepare(self, channel: str):
+    def channel_name_prepare(self, channel: str | int) -> Union[str, int]:
         if isinstance(channel, str) and channel.startswith('-100'): # Convert numeric channel ID to int
             channel_id = int(channel)
             return channel_id
         else:
             return channel
 
-    async def get_post(self, channel: str, post_id: int, output_type: str = 'json', debug: bool = False) -> Union[str, Dict[Any, Any], None]:
+    async def get_post(self, channel: str,
+                        post_id: int, 
+                        output_type: str = 'json', 
+                        debug: bool = False) -> Union[str, Dict[Any, Any], None]:
         print(f"Getting post {channel}, {post_id}")
         try:
-            channel = self.channel_name_prepare(channel)
-            message = await self.client.get_messages(channel, post_id)
+            prepared_channel_id: Union[str, int] = self.channel_name_prepare(channel)
+            message = await self.client.get_messages(prepared_channel_id, post_id)
 
             if Config["debug"]: print(message)
 
             if not message or getattr(message, 'empty', False):
-                logger.error(f"post_not_found_or_empty: channel {channel}, post_id {post_id}")
+                logger.error(f"post_not_found_or_empty: channel {prepared_channel_id}, post_id {post_id}")
                 return None
             
             if output_type == 'html':
@@ -111,7 +114,7 @@ class PostParser:
                 return None
             
         except Exception as e:
-            logger.error(f"post_parsing_error: channel {channel}, post_id {post_id}, error {str(e)}")
+            logger.error(f"post_parsing_error: channel {prepared_channel_id}, post_id {post_id}, error {str(e)}")
             raise
 
     def _get_author_info(self, message: Message) -> str: #Tests: tests/postparser_author_info.py
@@ -588,9 +591,15 @@ class PostParser:
                 
                 # Check if document is a PDF file
                 if message.media == MessageMediaType.DOCUMENT and message.document is not None and hasattr(message.document, 'mime_type') and message.document.mime_type == 'application/pdf':
-                    if channel_username.startswith('-100'): tg_link = f"https://t.me/c/{channel_username[4:]}/{message.id}"
-                    else:  tg_link = f"https://t.me/{channel_username}/{message.id}"
-                    content_media.append(f'<div class="document-pdf" style="padding: 10px;"><a href="{tg_link}" target="_blank">[PDF-файл]</a></div>')
+                    # Only attempt to create link if channel_username is available
+                    if channel_username:
+                        if channel_username.startswith('-100'): tg_link = f"https://t.me/c/{channel_username[4:]}/{message.id}"
+                        else:  tg_link = f"https://t.me/{channel_username}/{message.id}"
+                        content_media.append(f'<div class="document-pdf" style="padding: 10px;"><a href="{tg_link}" target="_blank">[PDF-файл]</a></div>')
+                    else:
+                        # Handle case where channel_username is None (e.g., log or add placeholder)
+                        logger.warning(f"Could not generate PDF link for message {message.id} because channel username is missing.")
+                        content_media.append(f'<div class="document-pdf" style="padding: 10px;">[PDF-файл]</div>') # Add placeholder without link
                 elif message.media in [MessageMediaType.PHOTO, MessageMediaType.DOCUMENT]:
                     content_media.append(f'<img src="{url}" style="max-width:100%; width:auto; height:auto; max-height:400px; object-fit:contain;">')
                 elif message.media == MessageMediaType.VIDEO:
@@ -894,7 +903,7 @@ class PostParser:
         except Exception as e:
             logger.error(f"file_id_collection_error: message_id {message.id}, error {str(e)}")
 
-    def get_channel_username(self, message):
+    def get_channel_username(self, message: Message) -> Union[str, None]:
         """Extract channel username or ID from message"""
         chat = message.chat if hasattr(message, 'chat') else message
         if not chat: return None

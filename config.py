@@ -9,8 +9,9 @@
 # pylance: disable=reportMissingImports, reportMissingModuleSource
 
 import os
+from typing import Any
 
-def get_settings():
+def get_settings() -> dict[str, Any]:
     tg_api_id = os.getenv("TG_API_ID")
     tg_api_hash = os.getenv("TG_API_HASH")
     if not tg_api_id or not tg_api_hash:
