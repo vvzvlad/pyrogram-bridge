@@ -534,7 +534,7 @@ class PostParser:
 
         test_fwd = self._format_forward_info(message)
         test_reply = self._format_reply_info(message)
-        logger.debug(f"Forward info: {test_fwd}, Reply info: {test_reply}")
+        logger.error(f"Forward info: {test_fwd}, Reply info: {test_reply}")
 
         if forward_html := self._format_forward_info(message): content_body.append(forward_html)
         elif reply_html := self._format_reply_info(message): content_body.append(reply_html)
