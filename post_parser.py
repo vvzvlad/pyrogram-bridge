@@ -141,7 +141,7 @@ class PostParser:
                 return name
         return "Unknown author"
 
-    def truncate_title(self, first_line: str) -> str:
+    def _truncate_title(self, first_line: str) -> str:
         """Truncate the title """
         # Step 1: Cut at the first period followed by a space, if present
         period_match = re.search(r'\.(?=\s)', first_line)
@@ -219,7 +219,7 @@ class PostParser:
                     first_line = first_line.lower().capitalize()
 
                 # --- Trim long strings ---
-                processed_title = self.truncate_title(first_line)
+                processed_title = self._truncate_title(first_line)
 
         # --- Decision Logic --- (Phase 2: Decide whether to use processed text or fallback)
 
