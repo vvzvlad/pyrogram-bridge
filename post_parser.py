@@ -779,6 +779,7 @@ class PostParser:
             
         except Exception as e:
             logger.error(f"reactions_views_parsing_error: {str(e)}", exc_info=True)
+            logger.error(f"message: {message}")
             return None
 
     def _format_poll(self, poll) -> str:
