@@ -184,6 +184,7 @@ async def _render_messages_groups(messages_groups, post_parser, exclude_flags: s
                 for msg in processed_messages:
                     if msg.get('flags'): # Check if flags exist and are not empty
                         all_flags.update(msg['flags'])
+                all_flags.update("merged")
                 merged_flags = list(all_flags) # Convert back to list if needed, or keep as set
 
                 footer_html = post_parser.generate_html_footer(main_message, flags_list=merged_flags)
