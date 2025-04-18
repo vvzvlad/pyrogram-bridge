@@ -291,6 +291,7 @@ class PostParser:
         return None
 
     def _format_reply_info(self, message: Message) -> Union[str, None]:
+        logger.error(f"Reply info: {str(message)}")
         if getattr(message, "service", None) and 'PINNED_MESSAGE' in str(message.service) and (reply_to := getattr(message, "reply_to_message", None)):
             reply_text = reply_to.text or reply_to.caption or ''
             if len(reply_text) > 100:
