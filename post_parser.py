@@ -172,11 +172,8 @@ class PostParser:
                 return title_segment
         else:
             return first_line
-
-    def _generate_title(self, message: Message) -> str: #Tests: tests/postparser_gen_title.py
-        """Generate a title for a message, based on its content."""
-
-        # Check for service messages first
+        
+    def _service_message_title(self, message: Message) -> str:
         if service := getattr(message, "service", None):
             if 'PINNED_MESSAGE'           in str(service): return "📌 Pinned message"
             elif 'NEW_CHAT_PHOTO'         in str(service): return "🖼 New chat photo"
@@ -187,6 +184,40 @@ class PostParser:
             elif 'GROUP_CHAT_CREATED'     in str(service): return "✨ Group chat created"
             elif 'CHANNEL_CHAT_CREATED'   in str(service): return "✨ Chat created"
             elif 'DELETE_CHAT_PHOTO'      in str(service): return "🗑️ Chat photo deleted"
+
+    def _media_message_title(self, message: Message) -> str:
+        if message.media:
+            if message.media == MessageMediaType.POLL:
+                if hasattr(message, 'poll') and hasattr(message.poll, 'question'):
+                    poll_question = message.poll.question.strip()
+                    if poll_question:
+                        return f"📊 Poll: {poll_question}"
+                return "📊 Poll"
+            if message.media == MessageMediaType.DOCUMENT:
+                if hasattr(message.document, 'mime_type') and 'pdf' in message.document.mime_type.lower():
+                    return "📄 PDF Document"
+                return "📎 Document"
+            if message.media == MessageMediaType.PHOTO:       return "📷 Photo"
+            if message.media == MessageMediaType.VIDEO:       return "🎥 Video"
+            if message.media == MessageMediaType.ANIMATION:   return "🎞 GIF"
+            if message.media == MessageMediaType.AUDIO:       return "🎵 Audio"
+            if message.media == MessageMediaType.VOICE:       return "🎤 Voice"
+            if message.media == MessageMediaType.VIDEO_NOTE:  return "📱 Video circle"
+            if message.media == MessageMediaType.STICKER:     return "🎯 Sticker"
+
+        # Web pages (if no text or media title)
+        if message.web_page:
+            if message.web_page.title:
+                return f"🔗 {message.web_page.title}"
+            return "🔗 Web link"
+        
+
+    def _generate_title(self, message: Message) -> str: #Tests: tests/postparser_gen_title.py
+        """Generate a title for a message, based on its content."""
+
+        # Check for service messages first
+        service_message_title = self._service_message_title(message)
+        if service_message_title: return service_message_title
 
         # --- Text Processing --- (Phase 1: Process text if available)
         text = message.text or message.caption or ''
@@ -227,49 +258,23 @@ class PostParser:
         # Webpage presence doesn't prevent using short text if there's no media.
         use_text_title = processed_title and (len(processed_title) >= min_title_length or not message.media)
 
-        if use_text_title:
-            return processed_title
+        if use_text_title: return processed_title
 
         # --- Fallback Processing --- (Phase 3: If text wasn't suitable or was discarded)
 
         # Handle specific cases for non-meaningful original text (if text block was entered but didn't yield a usable title)
         if text_was_processed and not use_text_title:
-            if re.search(r'(?:youtube\.com|youtu\.be)', text_stripped.lower()):
-                return "🎥 YouTube Link"
+            if re.search(r'(?:youtube\.com|youtu\.be)', text_stripped.lower()): return "🎥 YouTube Link"
             # Check if original text was just a URL and there's a webpage title
             if message.web_page and message.web_page.title:
                 url_match = re.match(r'^\s*(https?://[^\s<>"\']+)\s*$', text_stripped)
-                if url_match:
-                    return f"🔗 {message.web_page.title}"
+                if url_match: return f"🔗 {message.web_page.title}"
             if text_has_urls: # If original text had any URL (and wasn't YouTube/Webpage with title)
                 return "🔗 Web link"
-            # If it only had tags or was short/whitespace, proceed to media/poll check
 
         # Process media content (if no suitable text title)
-        if message.media:
-            if message.media == MessageMediaType.POLL:
-                if hasattr(message, 'poll') and hasattr(message.poll, 'question'):
-                    poll_question = message.poll.question.strip()
-                    if poll_question:
-                        return f"📊 Poll: {poll_question}"
-                return "📊 Poll"
-            if message.media == MessageMediaType.DOCUMENT:
-                if hasattr(message.document, 'mime_type') and 'pdf' in message.document.mime_type.lower():
-                    return "📄 PDF Document"
-                return "📎 Document"
-            if message.media == MessageMediaType.PHOTO:       return "📷 Photo"
-            if message.media == MessageMediaType.VIDEO:       return "🎥 Video"
-            if message.media == MessageMediaType.ANIMATION:   return "🎞 GIF"
-            if message.media == MessageMediaType.AUDIO:       return "🎵 Audio"
-            if message.media == MessageMediaType.VOICE:       return "🎤 Voice"
-            if message.media == MessageMediaType.VIDEO_NOTE:  return "📱 Video circle"
-            if message.media == MessageMediaType.STICKER:     return "🎯 Sticker"
-
-        # Web pages (if no text or media title)
-        if message.web_page:
-            if message.web_page.title:
-                return f"🔗 {message.web_page.title}"
-            return "🔗 Web link"
+        media_title = self._media_message_title(message)
+        if media_title: return media_title
 
         # If nothing matches
         return "❓ Unknown Post"
