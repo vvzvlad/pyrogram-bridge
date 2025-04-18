@@ -146,9 +146,8 @@ async def _render_messages_groups(messages_groups, post_parser, exclude_flags: s
             if len(group) == 1: # Single message - simple case
                 message_data = post_parser.process_message(group[0])
                 html_parts = [
-                    f'<div class="message-header">{message_data["html"]["header"]}</div>',
                     f'<div class="message-media">{message_data["html"]["media"]}</div>',
-                    f'<div class="message-text">{message_data["html"]["body"]}</div>',
+                    f'<div class="message-body">{message_data["html"]["body"]}</div>',
                     f'<div class="message-footer">{message_data["html"]["footer"]}</div>'
                 ]
                 rendered_posts.append({
@@ -190,9 +189,8 @@ async def _render_messages_groups(messages_groups, post_parser, exclude_flags: s
                 footer_html = post_parser.generate_html_footer(main_message, flags_list=merged_flags)
 
                 html_parts = [
-                    f'<div class="message-header">{main_message["html"]["header"]}</div>',
                     f'<div class="message-media">{combined_media}</div>',
-                    f'<div class="message-text">{combined_html_body}</div>',
+                    f'<div class="message-body">{combined_html_body}</div>',
                     f'<div class="message-footer">{footer_html}</div>'
                 ]
 

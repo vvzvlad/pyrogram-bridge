@@ -484,7 +484,6 @@ class PostParser:
             'text': message.text or message.caption or '',
             'html': {
                 'title': self._generate_title(message),
-                'header': self._generate_html_header(message),
                 'body': self._generate_html_body(message),
                 'media': self._generate_html_media(message),
                 'footer': self.generate_html_footer(message)
@@ -542,17 +541,12 @@ class PostParser:
             logger.error(f"html_sanitization_error: {str(e)}")
             return html_raw
 
-    def _generate_html_header(self, message: Message) -> str:
-        content_header = []
-        # Add forwarded from or reply info if present
-        if forward_html := self._format_forward_info(message): content_header.append(forward_html)
-        elif reply_html := self._format_reply_info(message): content_header.append(reply_html)
-        html_header = '\n'.join(content_header)
-        html_header = self._sanitize_html(html_header)
-        return html_header
-
     def _generate_html_body(self, message: Message) -> str:
         content_body = []
+
+        if forward_html := self._format_forward_info(message): content_body.append(forward_html)
+        elif reply_html := self._format_reply_info(message): content_body.append(reply_html)
+
         if message.text: text = message.text.html
         elif message.caption: text = message.caption.html
         else: text = ''
