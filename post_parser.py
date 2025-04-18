@@ -773,8 +773,20 @@ class PostParser:
             return self._sanitize_html(result_html) if result_html else None
             
         except Exception as e:
-            logger.error(f"reactions_views_parsing_error: {str(e)}", exc_info=True)
-            logger.error(f"message: {message}")
+            # Log the type of the object causing the error
+            obj_type = type(message).__name__
+            # Try to get an identifier safely
+            log_id = None
+            try:
+                if isinstance(message, dict):
+                    log_id = message.get('message_id', 'unknown_dict_id')
+                else:
+                    log_id = getattr(message, 'id', 'unknown_object_id')
+            except Exception:
+                log_id = "id_retrieval_failed"
+
+            logger.error(f"reactions_views_parsing_error: Type '{obj_type}', MsgID '{log_id}', Error: {str(e)}", exc_info=True)
+            logger.error(f"Problematic object data: {str(message)}")
             return None
 
     def _format_poll(self, poll) -> str:
