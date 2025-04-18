@@ -145,9 +145,7 @@ class PostParser:
         """Truncate the title """
         # Step 1: Cut at the first period followed by a space, if present
         period_match = re.search(r'\.(?=\s)', first_line)
-        if period_match:
-            first_line = first_line[:period_match.start()]
-            first_line = first_line.rstrip()  # Remove trailing spaces after cut
+        if period_match: first_line = first_line[:period_match.start()].rstrip()
 
         # Step 2: Apply the old logic
         cut_at = 37
@@ -158,20 +156,15 @@ class PostParser:
             cut_limit = min(len(first_line), limit_index)
             last_space_index = first_line.rfind(' ', 0, cut_limit)
 
-            if last_space_index != -1 and last_space_index >= cut_at:
-                cut_index = last_space_index
-            else:
-                cut_index = cut_limit
+            if last_space_index != -1 and last_space_index >= cut_at: cut_index = last_space_index
+            else: cut_index = cut_limit
 
             title_segment = first_line[:cut_index]
             title_segment = re.sub(r'[\s.,;:]+$', '', title_segment).strip()
 
-            if len(first_line[:cut_index]) < len(first_line):
-                return f"{title_segment}..."
-            else:
-                return title_segment
-        else:
-            return first_line
+            if len(first_line[:cut_index]) < len(first_line): return f"{title_segment}..."
+            else: return title_segment
+        else: return first_line
         
     def _service_message_title(self, message: Message) -> str:
         if service := getattr(message, "service", None):
@@ -211,22 +204,6 @@ class PostParser:
                 return f"🔗 {message.web_page.title}"
             return "🔗 Web link"
         
-
-    def _generate_title(self, message: Message) -> str: #Tests: tests/postparser_gen_title.py
-        """Generate a title for a message, based on its content."""
-        title = None
-
-        title = self._service_message_title(message)
-
-        if title is None: title = self._generate_base_title(message)
-
-        if title is None: title = self._media_message_title(message)
-
-        if title is None: title = "❓ Unknown Post"
-
-        if message.forward_origin: title = f"FWD: {title}"
-        
-        return title
 
     def _generate_base_title(self, message: Message) -> str:
         """Generates the base title without the FWD prefix."""
@@ -282,7 +259,21 @@ class PostParser:
             if text_has_urls: # If original text had any URL (and wasn't YouTube/Webpage with title)
                 return  "🔗 Web link"
 
+    def _generate_title(self, message: Message) -> str: #Tests: tests/postparser_gen_title.py
+        """Generate a title for a message, based on its content."""
+        title = None
 
+        title = self._service_message_title(message)
+
+        if title is None: title = self._generate_base_title(message)
+
+        if title is None: title = self._media_message_title(message)
+
+        if title is None: title = "❓ Unknown Post"
+
+        if message.forward_origin: title = f"FWD: {title}"
+        
+        return title
 
     def _format_forward_info(self, message: Message) -> Union[str, None]:
         if forward_origin := getattr(message, "forward_origin", None):
