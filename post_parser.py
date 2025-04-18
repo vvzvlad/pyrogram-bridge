@@ -230,10 +230,10 @@ class PostParser:
             text_was_processed = True
             text_has_urls = bool(re.search(r'https?://[^\\s<>\"\\\']+', text_stripped))
 
-            clean_text = html.unescape(text)
-            clean_text = re.sub(r'<[^>]+?>', '', clean_text)
-            clean_text = re.sub(r'https?://[^\s<>"\']+', '', clean_text)
-            clean_text = clean_text.strip()
+            clean_text = html.unescape(text) # Remove HTML entities 
+            clean_text = re.sub(r'<[^>]+?>', '', clean_text) # Remove HTML tags
+            clean_text = re.sub(r'https?://[^\s<>"\']+', '', clean_text) # Remove URLs
+            clean_text = clean_text.strip() # Remove whitespaces
 
             if clean_text: # If text remains after cleaning
                 # Process URL at the beginning
@@ -241,23 +241,22 @@ class PostParser:
                     clean_text = clean_text.split("://")[0].strip()
 
                 # Process line breaks & punctuation
-                first_line = clean_text.split('\n', 1)[0]
-                first_line = re.sub(r'[.,;:]+$', '', first_line)
-                first_line = first_line.strip()
+                first_line = clean_text.split('\n', 1)[0] # Get first line  
+                first_line = re.sub(r'[.,;:]+$', '', first_line) # Remove trailing punctuation
+                first_line = first_line.strip() # Remove whitespaces
 
                 # Handle uppercase
                 if first_line.isupper() and len(first_line) > 1:
-                    first_line = first_line.lower().capitalize()
+                    first_line = first_line.lower().capitalize() # Downcase and capitalize first letter
 
                 # --- Trim long strings ---
-                processed_title = self._truncate_title(first_line)
+                processed_title = self._truncate_title(first_line) # Truncate title
 
         # --- Decision Logic --- (Phase 2: Decide whether to use processed text or fallback)
 
         # Condition to use processed_title: It exists AND (it's long enough OR there's no media)
         # Webpage presence doesn't prevent using short text if there's no media.
         use_text_title = processed_title and (len(processed_title) >= min_title_length or not message.media)
-
         if use_text_title: return processed_title
 
         # --- Fallback Processing --- (Phase 3: If text wasn't suitable or was discarded)
@@ -270,7 +269,7 @@ class PostParser:
                 url_match = re.match(r'^\s*(https?://[^\s<>"\']+)\s*$', text_stripped)
                 if url_match: return f"🔗 {message.web_page.title}"
             if text_has_urls: # If original text had any URL (and wasn't YouTube/Webpage with title)
-                return "🔗 Web link"
+                return  "🔗 Web link"
 
         # Process media content (if no suitable text title)
         media_title = self._media_message_title(message)
