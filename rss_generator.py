@@ -139,6 +139,12 @@ async def _trim_messages_groups(messages_groups: list[list[Message]], limit: int
     
     return messages_groups
 
+def processed_message_to_tg_message(processed_message: dict) -> Message:
+    """
+    Convert processed message to tg-message
+    """
+
+
 async def _render_messages_groups(messages_groups: list[list[Message]], 
                                     post_parser: PostParser, 
                                     exclude_flags: str | None = None, 
@@ -202,7 +208,11 @@ async def _render_messages_groups(messages_groups: list[list[Message]],
                 all_flags.add("merged")
                 merged_flags = list(all_flags) # Convert back to list if needed, or keep as set
 
-                footer_html = post_parser.generate_html_footer(main_message, flags_list=merged_flags)
+                # generate tg-message from processed message
+                tg_message = processed_message_to_tg_message(main_message)
+
+
+                footer_html = post_parser.generate_html_footer(tg_message, flags_list=merged_flags)
 
                 html_parts = [
                     f'<div class="message-media">{combined_media}</div>',
