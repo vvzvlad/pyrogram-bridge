@@ -41,6 +41,9 @@ class TestPostParserGenerateTitle(unittest.TestCase):
         else:
             message.document = None # Ensure document is None if no mime type provided
 
+        # Ensure forward_origin is always present
+        message.forward_origin = None
+
         return message
 
     def gen_title(self, text):
