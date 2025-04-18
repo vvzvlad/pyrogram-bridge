@@ -338,6 +338,11 @@ class PostParser:
         if (message.media in [MessageMediaType.VIDEO, MessageMediaType.ANIMATION, MessageMediaType.VIDEO_NOTE] and 
             len((message.text or message.caption or '').strip()) <= 200):
             flags.append("video")
+
+        # Add flag "audio" if the message media is AUDIO
+        if (message.media == MessageMediaType.AUDIO or message.media == MessageMediaType.VOICE) and 
+            len((message.text or message.caption or '').strip()) <= 200:
+            flags.append("audio")
         
         # Add flag for posts without images
         if not message.media or message.media == MessageMediaType.POLL:
