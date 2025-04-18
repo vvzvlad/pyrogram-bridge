@@ -262,22 +262,17 @@ class PostParser:
     def _generate_title(self, message: Message) -> str: #Tests: tests/postparser_gen_title.py
         """Generate a title for a message, based on its content."""
         title = None
-
         title = self._service_message_title(message)
-
         if title is None: title = self._generate_base_title(message)
-
         if title is None: title = self._media_message_title(message)
-
         if title is None: title = "❓ Unknown Post"
-
         if message.forward_origin: title = f"FWD: {title}"
-        
+    
         return title
 
     def _format_forward_info(self, message: Message) -> Union[str, None]:
         if forward_origin := getattr(message, "forward_origin", None):
-            if sender_chat := getattr(forward_origin, "sender_chat", None):
+            if sender_chat := getattr(forward_origin, "chat", None):
                 forward_title = getattr(sender_chat, "title", "Unknown channel")
                 forward_username = getattr(sender_chat, "username", None)
                 if forward_username:
@@ -285,17 +280,6 @@ class PostParser:
                     return f'<div class="message-forward">Forwarded from {forward_link}</div><br>'
                 return f'<div class="message-forward">Forwarded from {forward_title}</div><br>'
             
-            elif sender_user := getattr(forward_origin, "sender_user", None):
-                forward_name = f"{getattr(sender_user, 'first_name', '')} {getattr(sender_user, 'last_name', '')}".strip()
-                forward_username = getattr(sender_user, "username", None)
-                if forward_username:
-                    forward_link = f'<a href="https://t.me/{forward_username}">{forward_name} (@{forward_username})</a>'
-                    return f'<div class="message-forward">Forwarded from {forward_link}</div><br>'
-                return f'<div class="message-forward">Forwarded from {forward_name}</div><br>'
-            
-            elif sender_user_name := getattr(forward_origin, "sender_user_name", None):
-                return f'<div class="message-forward">Forwarded from {sender_user_name}</div><br>'
-        
         return None
 
     def _format_reply_info(self, message: Message) -> Union[str, None]:
@@ -548,6 +532,10 @@ class PostParser:
     def _generate_html_body(self, message: Message) -> str:
         content_body = []
 
+        test_fwd = self._format_forward_info(message)
+        test_reply = self._format_reply_info(message)
+        logger.debug(f"Forward info: {test_fwd}, Reply info: {test_reply}")
+
         if forward_html := self._format_forward_info(message): content_body.append(forward_html)
         elif reply_html := self._format_reply_info(message): content_body.append(reply_html)
 
@@ -556,20 +544,23 @@ class PostParser:
         else: text = ''
 
         text = text.replace('\n', '<br>') # Replace newlines with <br>
-        text = self._add_hyperlinks_to_raw_urls(text)
+        text_html = self._add_hyperlinks_to_raw_urls(text)
+
         forward_title = 'Unknown channel'
         if message.forward_origin and message.forward_origin.chat:
             forward_title = message.forward_origin.chat.title or message.forward_origin.chat.username or 'Unknown channel'
-        if text: 
+
+        poll_html = ''
+        if poll := getattr(message, "poll", None):
+            poll_html = self._format_poll(poll)
+
+        if text_html or poll_html: 
             content_body.append(f'<div class="message-text">')
             if message.forward_origin: content_body.append(f"--------- FWD from {forward_title} ---------<br>")
-            content_body.append(f'{text}')
+            content_body.append(f'{text_html}')
+            if poll_html: content_body.append(poll_html)
             if message.forward_origin: content_body.append(f"<br>--------- FWD END from {forward_title} ---------")
             content_body.append(f'</div><br>')
-
-        if poll := getattr(message, "poll", None): # Poll message
-            if poll_html := self._format_poll(poll):
-                content_body.append(poll_html)
 
         html_body = '\n'.join(content_body)
         html_body = self._sanitize_html(html_body)
