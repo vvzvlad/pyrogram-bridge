@@ -562,14 +562,15 @@ class PostParser:
         text = text.replace('\n', '<br>') # Replace newlines with <br>
         text = self._add_hyperlinks_to_raw_urls(text)
         if text: # Message text
-            content_body.append(f'<div class="message-text">{text}</div><br>')
+            content_body.append(f'<div class="message-text">')
+            if message.forward_origin: content_body.append(f"--------- FWD from {message.forward_origin.sender_chat.title} ---------")
+            content_body.append(f'{text}')
+            if message.forward_origin: content_body.append(f"--------- FWD END from {message.forward_origin.sender_chat.title} ---------")
+            content_body.append(f'</div><br>')
 
         if poll := getattr(message, "poll", None): # Poll message
             if poll_html := self._format_poll(poll):
                 content_body.append(poll_html)
-
-        if getattr(message, "channel_chat_created", False): # Create service message for "channel created"
-            content_body.append('<div class="message-service">Channel created</div>')
 
         html_body = '\n'.join(content_body)
         html_body = self._sanitize_html(html_body)
