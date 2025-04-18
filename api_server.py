@@ -32,7 +32,7 @@ from pyrogram.types import Message
 from fastapi import FastAPI, HTTPException, Response, Request
 from fastapi.responses import HTMLResponse, FileResponse
 from telegram_client import TelegramClient
-from config import get_settings
+from config import get_settings, setup_logging
 from rss_generator import generate_channel_rss, generate_channel_html
 from post_parser import PostParser
 from url_signer import verify_media_digest, generate_media_digest
@@ -58,18 +58,15 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             raise
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-
-if not logger.handlers:
-    handler = logging.StreamHandler()
-    handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
-    logger.addHandler(handler)
+if not logger.handlers: pass  
 
 client = TelegramClient()
 Config = get_settings()
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    setup_logging(Config["log_level"])
+    
     base_cache_dir = os.path.abspath("./data/cache")
     os.makedirs(base_cache_dir, exist_ok=True) # Create cache directory
     
@@ -96,6 +93,8 @@ def mask_sensitive_value(input_str: str) -> str:
 
 if __name__ == "__main__":
     import uvicorn
+    
+    setup_logging(Config["log_level"])
     
     logger.info("Starting server with configuration:")
     for key, value in Config.items():

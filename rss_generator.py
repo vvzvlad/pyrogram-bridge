@@ -23,13 +23,6 @@ from types import SimpleNamespace
 Config = get_settings()
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-
-if not logger.handlers:
-    handler = logging.StreamHandler()
-    handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
-    logger.addHandler(handler)
-
 
 async def _create_time_based_media_groups(messages: list[Message], merge_seconds: int = 5) -> list[Message]:
     """
