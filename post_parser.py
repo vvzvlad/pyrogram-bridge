@@ -806,15 +806,15 @@ class PostParser:
     def _get_file_unique_id(self, message: Message) -> Union[str, None]:
         try:
             media_mapping = {
-                MessageMediaType.PHOTO: lambda m: m.photo.file_unique_id,
-                MessageMediaType.VIDEO: lambda m: m.video.file_unique_id,
-                MessageMediaType.DOCUMENT: lambda m: m.document.file_unique_id,
-                MessageMediaType.AUDIO: lambda m: m.audio.file_unique_id,
-                MessageMediaType.VOICE: lambda m: m.voice.file_unique_id,
-                MessageMediaType.VIDEO_NOTE: lambda m: m.video_note.file_unique_id,
-                MessageMediaType.ANIMATION: lambda m: m.animation.file_unique_id,
-                MessageMediaType.STICKER: lambda m: m.sticker.file_unique_id,
-                MessageMediaType.WEB_PAGE: lambda m: m.web_page.photo.file_unique_id if m.web_page and m.web_page.photo else None
+                MessageMediaType.PHOTO:         lambda m: m.photo.file_unique_id,
+                MessageMediaType.VIDEO:         lambda m: m.video.file_unique_id,
+                MessageMediaType.DOCUMENT:      lambda m: m.document.file_unique_id,
+                MessageMediaType.AUDIO:         lambda m: m.audio.file_unique_id,
+                MessageMediaType.VOICE:         lambda m: m.voice.file_unique_id,
+                MessageMediaType.VIDEO_NOTE:    lambda m: m.video_note.file_unique_id,
+                MessageMediaType.ANIMATION:     lambda m: m.animation.file_unique_id,
+                MessageMediaType.STICKER:       lambda m: m.sticker.file_unique_id,
+                MessageMediaType.WEB_PAGE:      lambda m: m.web_page.photo.file_unique_id if m.web_page and m.web_page.photo else None
             }
             
             if message.media in media_mapping:
@@ -844,14 +844,14 @@ class PostParser:
                 # Skip large videos - they shouldn't be cached permanently
                 if message.video and message.video.file_size > 100 * 1024 * 1024: return
                 
-                if message.photo: file_data['file_unique_id'] = message.photo.file_unique_id
-                elif message.video: file_data['file_unique_id'] = message.video.file_unique_id
-                elif message.document: file_data['file_unique_id'] = message.document.file_unique_id
-                elif message.audio: file_data['file_unique_id'] = message.audio.file_unique_id
-                elif message.voice: file_data['file_unique_id'] = message.voice.file_unique_id
-                elif message.video_note: file_data['file_unique_id'] = message.video_note.file_unique_id
-                elif message.animation: file_data['file_unique_id'] = message.animation.file_unique_id
-                elif message.sticker: file_data['file_unique_id'] = message.sticker.file_unique_id
+                if   message.photo:         file_data['file_unique_id'] = message.photo.file_unique_id
+                elif message.video:         file_data['file_unique_id'] = message.video.file_unique_id
+                elif message.document:      file_data['file_unique_id'] = message.document.file_unique_id
+                elif message.audio:         file_data['file_unique_id'] = message.audio.file_unique_id
+                elif message.voice:         file_data['file_unique_id'] = message.voice.file_unique_id
+                elif message.video_note:    file_data['file_unique_id'] = message.video_note.file_unique_id
+                elif message.animation:     file_data['file_unique_id'] = message.animation.file_unique_id
+                elif message.sticker:       file_data['file_unique_id'] = message.sticker.file_unique_id
                 elif message.web_page and message.web_page.photo: file_data['file_unique_id'] = message.web_page.photo.file_unique_id
 
                 if file_data['file_unique_id']:
