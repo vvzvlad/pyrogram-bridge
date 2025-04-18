@@ -80,7 +80,7 @@ async def _create_time_based_media_groups(messages, merge_seconds: int = 5):
             for m in cluster:
                 m.media_group_id = new_group_id  # type: ignore
 
-    return messages
+    return messages_sorted
 
 async def _create_messages_groups(messages):
     """
