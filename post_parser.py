@@ -285,8 +285,8 @@ class PostParser:
                 forward_username = getattr(sender_chat, "username", None)
                 if forward_username:
                     forward_link = f'<a href="https://t.me/{forward_username}">{forward_title} (@{forward_username})</a>'
-                    return f'<div class="message-forward">Forwarded from {forward_link}</div><br>'
-                return f'<div class="message-forward">Forwarded from {forward_title}</div><br>'
+                    return f'<div class="message-forward">--- Forwarded from {forward_link} ---</div><br>'
+                return f'<div class="message-forward">--- Forwarded from {forward_title} ---</div><br>'
             
         return None
 
@@ -540,9 +540,8 @@ class PostParser:
     def _generate_html_body(self, message: Message) -> str:
         content_body = []
 
-        test_fwd = self._format_forward_info(message)
         test_reply = self._format_reply_info(message)
-        logger.error(f"Forward info: {test_fwd}, Reply info: {test_reply}")
+        logger.error(f"Reply info: {test_reply}")
 
         if reply_html := self._format_reply_info(message): content_body.append(reply_html)
 
@@ -564,7 +563,7 @@ class PostParser:
             if forward_html: content_body.append(forward_html) # Forward info
             content_body.append(f'{text_html}')
             if poll_html: content_body.append(poll_html) # Poll
-            if message.forward_origin: content_body.append(f"<br>---- Forward post end ----") # Forward info end
+            if message.forward_origin: content_body.append(f"<br>--- Forwarded post end ---") # Forward info end
             content_body.append(f'</div><br>')
 
         html_body = '\n'.join(content_body)
