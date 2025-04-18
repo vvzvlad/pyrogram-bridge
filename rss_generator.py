@@ -241,7 +241,7 @@ async def _render_messages_groups(messages_groups, post_parser, exclude_flags: s
     return rendered_posts
 
 async def generate_channel_rss(channel: str, 
-                                post_parser: Optional[PostParser] = None, 
+                                post_parser: Optional[PostParser] = None, #TODO избавиться от post_parser в аргументах
                                 client = None, 
                                 limit: int = 20, 
                                 exclude_flags: str | None = None,
