@@ -258,7 +258,11 @@ class PostParser:
 
         # Handle specific cases for non-meaningful original text (if text block was entered but didn't yield a usable title)
         if text_was_processed and not use_text_title:
-            if re.search(r'(?:youtube\.com|youtu\.be)', text_stripped.lower()): return "🎥 YouTube Link"
+            if re.search(r'(?:youtube\.com|youtu\.be)', text_stripped.lower()):
+                if message.web_page and message.web_page.title:
+                    return f"🎥 YouTube: {message.web_page.title}"
+                else:
+                    return "🎥 YouTube Link"
             # Check if original text was just a URL and there's a webpage title
             if message.web_page and message.web_page.title:
                 url_match = re.match(r'^\s*(https?://[^\s<>"\']+)\s*$', text_stripped)

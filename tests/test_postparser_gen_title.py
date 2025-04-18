@@ -1,5 +1,10 @@
-# pylint: disable=protected-access, wrong-import-position
 
+# flake8: noqa
+# pylint: disable=broad-exception-raised, raise-missing-from, too-many-arguments, redefined-outer-name
+# pylint: disable=multiple-statements, logging-fstring-interpolation, trailing-whitespace, line-too-long
+# pylint: disable=broad-exception-caught, missing-function-docstring, missing-class-docstring
+# pylint: disable=f-string-without-interpolation, protected-access
+# pylance: disable=reportMissingImports, reportMissingModuleSource
 import unittest
 from unittest.mock import MagicMock, PropertyMock
 import sys
@@ -156,12 +161,24 @@ class TestPostParserGenerateTitle(unittest.TestCase):
         self.assertEqual(self.parser._generate_title(message), "🔗 Web link")
 
     def test_generate_title_text_only_youtube_url(self):
-        message = self._create_mock_message(text="https://www.youtube.com/watch?v=dQw4w9WgXcQ")
-        self.assertEqual(self.parser._generate_title(message), "🎥 YouTube Link")
+        # Create mock web_page with title
+        web_page_mock = MagicMock()
+        web_page_mock.title = "Rick Astley - Never Gonna Give You Up"
+        message = self._create_mock_message(
+            text="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            web_page=web_page_mock
+        )
+        self.assertEqual(self.parser._generate_title(message), "🎥 YouTube: Rick Astley - Never Gonna Give You Up")
 
     def test_generate_title_text_only_youtu_be_url(self):
-        message = self._create_mock_message(text="https://youtu.be/dQw4w9WgXcQ")
-        self.assertEqual(self.parser._generate_title(message), "🎥 YouTube Link")
+        # Create mock web_page with title
+        web_page_mock = MagicMock()
+        web_page_mock.title = "Rick Astley - Never Gonna Give You Up"
+        message = self._create_mock_message(
+            text="https://youtu.be/dQw4w9WgXcQ",
+            web_page=web_page_mock
+        )
+        self.assertEqual(self.parser._generate_title(message), "🎥 YouTube: Rick Astley - Never Gonna Give You Up")
 
     def test_generate_title_caption_with_url_and_text(self):
         message = self._create_mock_message(media=MessageMediaType.PHOTO, caption="Look at this photo! https://example.com/image.jpg")
