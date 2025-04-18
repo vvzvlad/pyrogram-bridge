@@ -12,12 +12,13 @@
 import logging
 import re
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Dict, Any, List
 from feedgen.feed import FeedGenerator
 from pyrogram import errors, Client
 from pyrogram.types import Message
 from post_parser import PostParser
 from config import get_settings
+from types import SimpleNamespace
 
 Config = get_settings()
 
@@ -141,8 +142,50 @@ async def _trim_messages_groups(messages_groups: list[list[Message]], limit: int
 
 def processed_message_to_tg_message(processed_message: dict) -> Message:
     """
-    Convert processed message to tg-message
+    Convert processed message dictionary into a Message-like object
+    containing only the attributes needed by generate_html_footer.
     """
+    # Create a simple chat object
+    chat_info = SimpleNamespace()
+    channel_identifier = processed_message.get('channel')
+    if isinstance(channel_identifier, str) and channel_identifier.startswith('-100'):
+        setattr(chat_info, 'id', int(channel_identifier))
+        setattr(chat_info, 'username', None)
+    else:
+        setattr(chat_info, 'id', None) # Or some placeholder if needed
+        setattr(chat_info, 'username', channel_identifier)
+
+
+    # Convert reactions dict to list of objects
+    reactions_list = []
+    if reactions_dict := processed_message.get('reactions'):
+        for emoji, count in reactions_dict.items():
+            # Assuming no custom/paid reactions in this simplified structure
+            reactions_list.append(SimpleNamespace(emoji=emoji, count=count, is_paid=False, custom_emoji_id=None))
+    
+    # Recreate reactions structure expected by Pyrogram's reaction handling
+    reactions_obj = SimpleNamespace(reactions=reactions_list) if reactions_list else None
+
+    # Create the message-like object
+    tg_message_mock = SimpleNamespace(
+        id=processed_message.get('message_id'),
+        date=datetime.fromtimestamp(processed_message['date'], tz=timezone.utc) if processed_message.get('date') else None,
+        views=processed_message.get('views'),
+        reactions=reactions_obj,
+        chat=chat_info,
+        # Add other attributes if generate_html_footer or its dependencies need them
+        # For now, these seem sufficient based on the analysis of generate_html_footer
+        # and _reactions_views_links.
+        text=processed_message.get('text'), # Add text just in case
+        caption=None, # Assume caption is merged into text by process_message
+        forward_origin=None, # Not directly needed by footer generation logic itself
+        reply_to_message=None, # Not directly needed by footer generation logic itself
+        media=None, # Not needed by footer
+        service=processed_message.get('service') # Potentially needed? Added just in case.
+    )
+
+    # Cast to Message type hint for static analysis, although it's a mock object
+    return tg_message_mock # type: ignore
 
 
 async def _render_messages_groups(messages_groups: list[list[Message]], 
