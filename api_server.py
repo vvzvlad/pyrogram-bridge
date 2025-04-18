@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+
 # flake8: noqa
-# pylint: disable=broad-exception-raised, raise-missing-from, too-many-arguments, redefined-outer-name, wrong-import-position
-# pylance: disable=reportMissingImports, reportMissingModuleSource, reportGeneralTypeIssues
-# type: ignore
+# pylint: disable=broad-exception-raised, raise-missing-from, too-many-arguments, redefined-outer-name
+# pylint: disable=multiple-statements, logging-fstring-interpolation, trailing-whitespace, line-too-long
+# pylint: disable=broad-exception-caught, missing-function-docstring, missing-class-docstring
+# pylint: disable=f-string-without-interpolation
+# pylance: disable=reportMissingImports, reportMissingModuleSource
 
 import logging
 import os
