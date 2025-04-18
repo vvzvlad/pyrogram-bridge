@@ -310,7 +310,7 @@ class PostParser:
             if len(reply_text) > 100:
                 reply_text = reply_text[:100] + '...'
             
-            channel_username = getattr(reply_to.chat, "username", None)
+            channel_username = getattr(reply_to.sender_chat, "username", None)
             if channel_username:
                 reply_link = f'<a href="https://t.me/{channel_username}/{reply_to.id}">#{reply_to.id}</a>'
                 return f'<div class="message-reply">Reply to {reply_link}: {reply_text}</div><br>'
