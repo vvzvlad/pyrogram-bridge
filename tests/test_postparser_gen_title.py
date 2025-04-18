@@ -434,9 +434,32 @@ class TestPostParserGenerateTitle(unittest.TestCase):
     def test_generate_title_forwarded_post(self):
         """Forwarded post should have title 'FWD: ...'"""
         forward_origin_mock = MagicMock()
-        message = self._create_mock_message(text="Forwarded post", forward_origin=forward_origin_mock)
+        message = self._create_mock_message(text="Forwarded post text line 1.\nLine 2", forward_origin=forward_origin_mock)
         title = self.parser._generate_title(message)
-        self.assertTrue(title.startswith("FWD:"), f"Title for forwarded post should start with 'FWD:', got: {title}")
+        self.assertEqual(title, "FWD: Forwarded post text line 1")
+
+    def test_generate_title_forwarded_photo(self):
+        """Forwarded photo should have title 'FWD: ...'"""
+        forward_origin_mock = MagicMock()
+        message = self._create_mock_message(media=MessageMediaType.PHOTO, caption="Short cap", forward_origin=forward_origin_mock)
+        title = self.parser._generate_title(message)
+        # Media title is used because caption is short
+        self.assertEqual(title, "FWD: 📷 Photo")
+
+    def test_generate_title_forwarded_photo_long_caption(self):
+        """Forwarded photo with long caption should use caption for title 'FWD: ...'"""
+        forward_origin_mock = MagicMock()
+        message = self._create_mock_message(media=MessageMediaType.PHOTO, caption="This is a long enough caption for photo", forward_origin=forward_origin_mock)
+        title = self.parser._generate_title(message)
+        self.assertEqual(title, "FWD: This is a long enough caption for photo")
+
+    def test_generate_title_forwarded_long_text(self):
+        """Forwarded long text should use text for title 'FWD: ...'"""
+        forward_origin_mock = MagicMock()
+        message = self._create_mock_message(text="This is a long enough text to be forwarded, very long", forward_origin=forward_origin_mock)
+        title = self.parser._generate_title(message)
+        self.assertEqual(title, "FWD: This is a long enough text to be forwarded, very...")
+
 
 
 if __name__ == '__main__':

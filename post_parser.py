@@ -214,11 +214,22 @@ class PostParser:
 
     def _generate_title(self, message: Message) -> str: #Tests: tests/postparser_gen_title.py
         """Generate a title for a message, based on its content."""
+        title = None
 
-        # Check for service messages first
-        service_message_title = self._service_message_title(message)
-        if service_message_title: return service_message_title
+        title = self._service_message_title(message)
 
+        if title is None: title = self._generate_base_title(message)
+
+        if title is None: title = self._media_message_title(message)
+
+        if title is None: title = "❓ Unknown Post"
+
+        if message.forward_origin: title = f"FWD: {title}"
+        
+        return title
+
+    def _generate_base_title(self, message: Message) -> str:
+        """Generates the base title without the FWD prefix."""
         # --- Text Processing --- (Phase 1: Process text if available)
         text = message.text or message.caption or ''
         text_stripped = text.strip()
@@ -271,12 +282,7 @@ class PostParser:
             if text_has_urls: # If original text had any URL (and wasn't YouTube/Webpage with title)
                 return  "🔗 Web link"
 
-        # Process media content (if no suitable text title)
-        media_title = self._media_message_title(message)
-        if media_title: return media_title
 
-        # If nothing matches
-        return "❓ Unknown Post"
 
     def _format_forward_info(self, message: Message) -> Union[str, None]:
         if forward_origin := getattr(message, "forward_origin", None):
