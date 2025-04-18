@@ -207,7 +207,8 @@ async def _render_messages_groups(messages_groups: list[list[Message]],
     for group in messages_groups:
         try:
             if len(group) == 1: # Single message - simple case
-                message_data = post_parser.process_message(group[0])
+                one_message = group[0]
+                message_data = post_parser.process_message(one_message)
                 html_parts = [
                     f'<div class="message-media">{message_data["html"]["media"]}</div>',
                     f'<div class="message-body">{message_data["html"]["body"]}</div>',

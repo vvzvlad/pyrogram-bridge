@@ -105,10 +105,11 @@ class PostParser:
                 logger.error(f"post_not_found_or_empty: channel {prepared_channel_id}, post_id {post_id}")
                 return None
             
+            processed_message = self.process_message(message)
             if output_type == 'html':
-                return self._format_html(message, debug)
+                return self._format_html(processed_message, debug)
             elif output_type == 'json':
-                return self.process_message(message)
+                return processed_message
             else:
                 logger.error(f"Invalid output type: {output_type}")
                 return None
@@ -447,9 +448,8 @@ class PostParser:
 
         return flags
 
-    def _format_html(self, message: Message, debug: bool = False) -> str:
+    def _format_html(self, data: Dict[str, Any], debug: bool = False) -> str:
         html_content = []
-        data = self.process_message(message)['html']
 
         if debug:
             html_content.append(f'<div class="title">Title: {data["title"]}</div>')
@@ -459,7 +459,7 @@ class PostParser:
         
         # Add raw JSON debug output if debug is enabled
         if debug:
-            html_content.append(f'<pre class="debug-json" style="background: #f5f5f5; padding: 10px; margin-top: 20px; overflow-x: auto; font-size: 10px; white-space: pre-wrap;">{str(message)}</pre>')
+            html_content.append(f'<pre class="debug-json" style="background: #f5f5f5; padding: 10px; margin-top: 20px; overflow-x: auto; font-size: 10px; white-space: pre-wrap;">{data["raw_message"]}</pre>')
         html_data = '\n'.join(html_content)
         return html_data
 
@@ -476,7 +476,6 @@ class PostParser:
         return ''
 
     def process_message(self, message: Message) -> Dict[Any, Any]:
-        logger.error(f"process_message message: {str(message)}")
         result = {
             'channel': self.get_channel_username(message),
             'message_id': message.id,
@@ -494,7 +493,8 @@ class PostParser:
             'views': message.views,
             'reactions': self._extract_reactions(message),
             'media_group_id': message.media_group_id,
-            'service': getattr(message, "service", None)
+            'service': getattr(message, "service", None),
+            'raw_message': str(message)
         }
         
         # Add webpage data if available
