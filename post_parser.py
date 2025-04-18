@@ -536,8 +536,7 @@ class PostParser:
         test_reply = self._format_reply_info(message)
         logger.error(f"Forward info: {test_fwd}, Reply info: {test_reply}")
 
-        if forward_html := self._format_forward_info(message): content_body.append(forward_html)
-        elif reply_html := self._format_reply_info(message): content_body.append(reply_html)
+        if reply_html := self._format_reply_info(message): content_body.append(reply_html)
 
         if message.text: text = message.text.html
         elif message.caption: text = message.caption.html
@@ -546,20 +545,16 @@ class PostParser:
         text = text.replace('\n', '<br>') # Replace newlines with <br>
         text_html = self._add_hyperlinks_to_raw_urls(text)
 
-        forward_title = 'Unknown channel'
-        if message.forward_origin and message.forward_origin.chat:
-            forward_title = message.forward_origin.chat.title or message.forward_origin.chat.username or 'Unknown channel'
-
         poll_html = ''
         if poll := getattr(message, "poll", None):
             poll_html = self._format_poll(poll)
 
         if text_html or poll_html: 
             content_body.append(f'<div class="message-text">')
-            if message.forward_origin: content_body.append(f"--------- FWD from {forward_title} ---------<br>")
+            if message.forward_origin: content_body.append(self._format_forward_info(message)) # Forward info
             content_body.append(f'{text_html}')
-            if poll_html: content_body.append(poll_html)
-            if message.forward_origin: content_body.append(f"<br>--------- FWD END from {forward_title} ---------")
+            if poll_html: content_body.append(poll_html) # Poll
+            if message.forward_origin: content_body.append(f"<br>---- Forward post end ----") # Forward info end
             content_body.append(f'</div><br>')
 
         html_body = '\n'.join(content_body)
