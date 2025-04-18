@@ -459,8 +459,6 @@ class PostParser:
         
         # Add raw JSON debug output if debug is enabled
         if debug:
-            #debug_json = json.dumps(message, indent=2, ensure_ascii=False, default=str)
-            #debug_json = debug_json.replace('\\n', '<br>').replace('\\"', '"')
             html_content.append(f'<pre class="debug-json" style="background: #f5f5f5; padding: 10px; margin-top: 20px; overflow-x: auto; font-size: 10px; white-space: pre-wrap;">{str(message)}</pre>')
         html_content = '\n'.join(html_content)
         return html_content
@@ -562,7 +560,10 @@ class PostParser:
         text = text.replace('\n', '<br>') # Replace newlines with <br>
         text = self._add_hyperlinks_to_raw_urls(text)
         if message.forward_origin:
-            forward_title = message.forward_origin.sender_chat.title or message.forward_origin.sender_chat.username or 'Unknown channel'
+            if message.forward_origin.sender_chat:
+                forward_title = message.forward_origin.sender_chat.title or message.forward_origin.sender_chat.username or 'Unknown channel'
+            else:
+                forward_title = 'Unknown channel'
         if text: # Message text
             content_body.append(f'<div class="message-text">')
             if message.forward_origin: content_body.append(f"--------- FWD from {forward_title} ---------")
