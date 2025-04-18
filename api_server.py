@@ -587,7 +587,7 @@ def calculate_cache_stats() -> dict[str, Any]:
         "channels": channels_stats
     }
 
-def is_local_request(request: Union[Request, None]) -> bool:
+def is_local_request(request: Request) -> bool:
     local_hosts = ["127.0.0.1", "localhost"]
     if request and request.client and request.client.host:
         if request.client.host in local_hosts:
@@ -599,13 +599,15 @@ def is_local_request(request: Union[Request, None]) -> bool:
 @app.get("/html/{channel}/{post_id}/{token}", response_class=HTMLResponse)  
 @app.get("/post/html/{channel}/{post_id}/{token}", response_class=HTMLResponse)
 async def get_post_html(channel: str, post_id: int, request: Request, token: str | None = None, debug: bool = False) -> HTMLResponse:
-    if Config["token"] and is_local_request(request):
+    if Config["token"] and not is_local_request(request):
         if token != Config["token"]:
             logger.error(f"Invalid token for HTML post: {token}, expected: {Config['token']}")
             raise HTTPException(status_code=403, detail="Invalid token")
         else:
             logger.info(f"Valid token for HTML post: {token}")
-            
+    elif Config["token"] and is_local_request(request):
+        logger.info(f"Local request, skipping token check for HTML post.")
+        
     try:
         parser = PostParser(client.client)
         html_content = await parser.get_post(channel, post_id, 'html', debug)
@@ -623,12 +625,14 @@ async def get_post_html(channel: str, post_id: int, request: Request, token: str
 @app.get("/json/{channel}/{post_id}/{token}")
 @app.get("/post/json/{channel}/{post_id}/{token}")
 async def get_post(channel: str, post_id: int, request: Request, token: str | None = None, debug: bool = False) -> Response:
-    if Config["token"] and is_local_request(request):
+    if Config["token"] and not is_local_request(request):
         if token != Config["token"]:
             logger.error(f"Invalid token for JSON post: {token}, expected: {Config['token']}")
             raise HTTPException(status_code=403, detail="Invalid token")
         else:
             logger.info(f"Valid token for JSON post: {token}")
+    elif Config["token"] and is_local_request(request):
+        logger.info(f"Local request, skipping token check for JSON post.")
             
     try:
         parser = PostParser(client.client)
@@ -645,12 +649,14 @@ async def get_post(channel: str, post_id: int, request: Request, token: str | No
 @app.get("/raw_json/{channel}/{post_id}")
 @app.get("/raw_json/{channel}/{post_id}/{token}")
 async def get_raw_post_json(channel: str, post_id: int, request: Request, token: str | None = None) -> Response:
-    if Config["token"] and is_local_request(request):
+    if Config["token"] and not is_local_request(request):
         if token != Config["token"]:
             logger.error(f"Invalid token for raw JSON post: {token}, expected: {Config['token']}")
             raise HTTPException(status_code=403, detail="Invalid token")
         else:
             logger.info(f"Valid token for raw JSON post: {token}")
+    elif Config["token"] and is_local_request(request):
+        logger.info(f"Local request, skipping token check for raw JSON post.")
             
     try:
         # Convert numeric channel ID to int if needed
@@ -673,12 +679,14 @@ async def get_raw_post_json(channel: str, post_id: int, request: Request, token:
 @app.get("/health")
 @app.get("/health/{token}")
 async def health_check(request: Request, token: str | None = None) -> Response:
-    if Config["token"] and is_local_request(request):
+    if Config["token"] and not is_local_request(request):
         if token != Config["token"]:
             logger.error(f"Invalid token for health check: {token}, expected: {Config['token']}")
             raise HTTPException(status_code=403, detail="Invalid token")
         else:
             logger.info(f"Valid token for health check: {token}")
+    elif Config["token"] and is_local_request(request):
+        logger.info(f"Local request, skipping token check for health check.")
             
     try:
         me = await client.client.get_me()
@@ -770,10 +778,15 @@ async def get_rss_feed(channel: str,
                         exclude_text: str | None = None,
                         merge_seconds: int = 5,
                         ) -> Response:
-    if Config["token"] and is_local_request(request):
+    if Config["token"] and not is_local_request(request):
         if token != Config["token"]:
             logger.error(f"invalid_token_error: token {token}, expected {Config['token']}")
             raise HTTPException(status_code=403, detail="Invalid token")
+        else:
+            logger.info(f"Valid token for RSS endpoint: {token}")
+    elif Config["token"] and is_local_request(request):
+        logger.info(f"Local request, skipping token check for RSS endpoint.")
+        
     while True:
         try:
 
@@ -818,12 +831,14 @@ async def get_rss_feed(channel: str,
 @app.get("/flags/{token}", response_model=List[str])
 async def get_available_flags(request: Request, token: str | None = None) -> Response:
     """Returns a list of all possible flags that can be assigned to posts."""
-    if Config["token"] and is_local_request(request):
+    if Config["token"] and not is_local_request(request):
         if token != Config["token"]:
             logger.error(f"Invalid token for flags endpoint: {token}, expected: {Config['token']}")
             raise HTTPException(status_code=403, detail="Invalid token")
         else:
             logger.info(f"Valid token for flags endpoint: {token}")
+    elif Config["token"] and is_local_request(request):
+        logger.info(f"Local request, skipping token check for flags endpoint.")
 
     try:
         flags = PostParser.get_all_possible_flags()
