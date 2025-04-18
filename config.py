@@ -12,7 +12,6 @@ import os
 import logging
 from typing import Any
 
-# Переменная для отслеживания состояния инициализации логгирования
 _LOGGING_INITIALIZED = False
 
 def setup_logging(level_name: str = "INFO") -> None:
