@@ -559,16 +559,16 @@ class PostParser:
 
         text = text.replace('\n', '<br>') # Replace newlines with <br>
         text = self._add_hyperlinks_to_raw_urls(text)
-        if message.forward_origin:
-            if message.forward_origin.sender_chat:
-                forward_title = message.forward_origin.sender_chat.title or message.forward_origin.sender_chat.username or 'Unknown channel'
-            else:
-                forward_title = 'Unknown channel'
+        #if message.forward_origin:
+        #    if message.forward_origin.sender_chat:
+        #        forward_title = message.forward_origin.sender_chat.title or message.forward_origin.sender_chat.username or 'Unknown channel'
+        #    else:
+        #        forward_title = 'Unknown channel'
         if text: # Message text
             content_body.append(f'<div class="message-text">')
-            if message.forward_origin: content_body.append(f"--------- FWD from {forward_title} ---------")
+            if message.forward_origin: content_body.append(f"--------- FWD ---------")
             content_body.append(f'{text}')
-            if message.forward_origin: content_body.append(f"--------- FWD END from {forward_title} ---------")
+            if message.forward_origin: content_body.append(f"--------- FWD END---------")
             content_body.append(f'</div><br>')
 
         if poll := getattr(message, "poll", None): # Poll message
