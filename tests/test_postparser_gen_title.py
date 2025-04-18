@@ -23,7 +23,15 @@ class TestPostParserGenerateTitle(unittest.TestCase):
     def tearDown(self):
         pass
 
-    def _create_mock_message(self, media=None, text=None, caption=None, document_mime_type=None, channel_chat_created=False, web_page=None, poll=None, service=None):
+    def _create_mock_message(self, media=None,
+                            text=None,
+                            caption=None,
+                            document_mime_type=None,
+                            channel_chat_created=False,
+                            web_page=None,
+                            poll=None,
+                            service=None,
+                            forward_origin=None):   
         message = MagicMock(spec=Message)
         message.media = media
         message.text = text
@@ -42,7 +50,7 @@ class TestPostParserGenerateTitle(unittest.TestCase):
             message.document = None # Ensure document is None if no mime type provided
 
         # Ensure forward_origin is always present
-        message.forward_origin = None
+        message.forward_origin = forward_origin
 
         return message
 
@@ -422,6 +430,13 @@ class TestPostParserGenerateTitle(unittest.TestCase):
         message = self._create_mock_message(text=text)
         expected_title = "⚡️ OpenAI сегодня представила o3/o4-mini"
         self.assertEqual(self.parser._generate_title(message), expected_title)
+
+    def test_generate_title_forwarded_post(self):
+        """Forwarded post should have title 'FWD: ...'"""
+        forward_origin_mock = MagicMock()
+        message = self._create_mock_message(text="Forwarded post", forward_origin=forward_origin_mock)
+        title = self.parser._generate_title(message)
+        self.assertTrue(title.startswith("FWD:"), f"Title for forwarded post should start with 'FWD:', got: {title}")
 
 
 if __name__ == '__main__':
