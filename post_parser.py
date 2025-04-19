@@ -147,7 +147,7 @@ class PostParser:
         period_match = re.search(r'\.(?=\s)', first_line)
         if period_match: first_line = first_line[:period_match.start()].rstrip()
 
-        # Step 2: Apply the old logic
+        # Step 2: Apply the main cut logic
         cut_at = 37
         max_extra_chars = 15
         limit_index = cut_at + max_extra_chars  # 52
