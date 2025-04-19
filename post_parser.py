@@ -443,7 +443,7 @@ class PostParser:
         html_content = []
 
         if debug:
-            html_content.append(f'<div class="title">Title: {data["html"]["title"]}</div>')
+            html_content.append(f'<div class="title">Title: {data["html"]["title"]}</div><br>')
         html_content.append(f'<div class="message-media">{data["html"]["media"]}</div>')
         html_content.append(f'<div class="message-body">{data["html"]["body"]}</div>')
         html_content.append(f'<div class="message-footer">{data["html"]["footer"]}</div>')
