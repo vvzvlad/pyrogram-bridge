@@ -402,6 +402,21 @@ async def generate_channel_rss(channel: str | int,
         logger.error(f"generate_channel_rss: channel {channel}, error {str(e)}")
         raise
 
+async def _reply_enrichment(client: Client, messages: list[Message]) -> list[Message]:
+    """
+    Enrich messages with reply to messages
+    """
+    for message in messages:
+        if message.reply_to_message_id and message.chat:
+            full_message = await client.get_messages(message.chat.id, message.id)
+            if isinstance(full_message, list):
+                if full_message and full_message[0].reply_to_message:
+                    message.reply_to_message = full_message[0].reply_to_message
+            else:
+                if full_message and full_message.reply_to_message:
+                    message.reply_to_message = full_message.reply_to_message
+
+    return messages
 
 async def generate_channel_html(channel: str | int, 
                                 client: Client,
@@ -458,9 +473,14 @@ async def generate_channel_html(channel: str | int,
             logger.error(f"Error during get_chat_history for channel '{channel}' (type: {type(channel)}) in HTML generation: {str(e)}", exc_info=True)
             raise ValueError(f"Failed to get chat history for {channel} in HTML generation: {str(e)}") from e
 
+        # Enrich messages with reply to messages
+        messages = await _reply_enrichment(client, messages)
+
         # Process messages into groups and render them
         if Config['time_based_merge']:
             messages = await _create_time_based_media_groups(messages, merge_seconds)
+
+        # Process messages into groups and render them
         message_groups = await _create_messages_groups(messages)
         message_groups = await _trim_messages_groups(message_groups, limit)
         final_posts = await _render_messages_groups(message_groups, post_parser, exclude_flags, exclude_text)
