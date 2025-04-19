@@ -447,16 +447,16 @@ class PostParser:
         return html_data
 
     def _format_flags(self, flags_list: list) -> str:
-        if not Config['show_post_flags']:
-            return ''
+        if not Config['show_post_flags']: return ''
         
+        return_html = ""
         if flags_list:
             flags_html = ['<div class="message-flags">']
-            for flag in flags_list:
-                flags_html.append(f'🏷 {flag}')
+            for flag in flags_list: flags_html.append(f'🏷 {flag}')
             flags_html.append('</div>')
-            return ' '.join(flags_html)
-        return ''
+            return_html = ' '.join(flags_html)
+        
+        return return_html
 
     def process_message(self, message: Message) -> Dict[Any, Any]:
         result = {
