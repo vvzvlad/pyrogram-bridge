@@ -188,7 +188,8 @@ class PostParser:
                         return f"📊 Poll: {poll_question}"
                 return "📊 Poll"
             if message.media == MessageMediaType.DOCUMENT:
-                if message.document is not None and hasattr(message.document, 'mime_type') and message.document.mime_type == 'application/pdf':
+                is_mime = (message.document is not None and hasattr(message.document, 'mime_type'))
+                if is_mime and message.document is not None and message.document.mime_type == 'application/pdf':
                     return "📄 PDF Document"
                 return "📎 Document"
             if message.media == MessageMediaType.PHOTO:       return "📷 Photo"
@@ -279,13 +280,15 @@ class PostParser:
 
 
     def _format_reply_info(self, message: Message) -> Union[str, None]:
-        if getattr(message, "service", None) and 'PINNED_MESSAGE' in str(message.service) and (reply_to := getattr(message, "reply_to_message", None)):
+        is_pinned = (getattr(message, "service", None) and 'PINNED_MESSAGE' in str(message.service))
+        reply_to = getattr(message, "reply_to_message", None)
+        if is_pinned and reply_to:
             reply_text = reply_to.text or reply_to.caption or ''
             if len(reply_text) > 100:
                 reply_text = reply_text[:100] + '...'
             return f'<div class="message-pinned">Pinned: {reply_text}</div><br>'
         
-        if reply_to := getattr(message, "reply_to_message", None):
+        if reply_to:
             reply_text = reply_to.text or reply_to.caption or ''
             if len(reply_text) > 100:
                 reply_text = reply_text[:100] + '...'
@@ -363,8 +366,11 @@ class PostParser:
                     flags.append("clownpoo")
                     break
 
-        # Check if the message text contains "#реклама", "Партнерский пост", "по промокоду", "скидка на курс", "регистрируйтесь тут" in a case-insensitive manner.
-        if re.search(r'(?i)(#реклама|#промо|О\s+рекламодателе|партнерский\s+пост|по\s+промокоду|erid|скидка\s+на\s+курс|регистрируйтесь\s+тут)', message_text_str):
+        # Check if the message text contains advert.
+        if re.search(r'(?i)(#реклама|#промо|О\s+рекламодателе|партнерский\s+пост)', message_text_str):
+            flags.append("advert")
+
+        if re.search(r'(?i)(по\s+промокоду|erid|скидка\s+на\s+курс|регистрируйтесь\s+тут)', message_text_str):
             flags.append("advert")
 
         # Check for paywall-related words and tags
@@ -429,7 +435,9 @@ class PostParser:
         except Exception as e:
             logger.error(f"tme_link_extraction_error: message_id {message.id}, error {str(e)}")
 
-        return flags
+        # Deduplicate flags
+        deduplicated_flags = list(dict.fromkeys(flags))
+        return deduplicated_flags
 
     def _format_html(self, data: Dict[str, Any], debug: bool = False) -> str:
         html_content = []
@@ -442,7 +450,9 @@ class PostParser:
         
         # Add raw JSON debug output if debug is enabled
         if debug:
-            html_content.append(f'<pre class="debug-json" style="background: #f5f5f5; padding: 10px; margin-top: 20px; overflow-x: auto; font-size: 10px; white-space: pre-wrap;">{data["raw_message"]}</pre>')
+            html_content.append(f'<pre class="debug-json" style="background: #f5f5f5;'
+                                f'padding: 10px; margin-top: 20px; overflow-x: auto; font-size: 10px;'
+                                f'white-space: pre-wrap;">{data["raw_message"]}</pre>')
         html_data = '\n'.join(html_content)
         return html_data
 
@@ -497,7 +507,10 @@ class PostParser:
     
 
     def _sanitize_html(self, html_raw: str) -> str:
-        allowed_tags = ['p', 'a', 'b', 'i', 'strong', 'em', 'ul', 'ol', 'li', 'br', 'div', 'span', 'img', 'video', 'audio', 'source']
+        allowed_tags = ['p', 'a', 'b', 'i', 'strong',
+                        'em', 'ul', 'ol', 'li', 'br',
+                        'div', 'span', 'img', 'video', 'audio',
+                        'source']
         allowed_attributes = {
             'a': ['href', 'title', 'target'],
             'img': ['src', 'alt', 'style'],
@@ -622,38 +635,52 @@ class PostParser:
                 content_media.append(f'<div class="message-media">')
                 
                 # Check if document is a PDF file
-                if message.media == MessageMediaType.DOCUMENT and message.document is not None and hasattr(message.document, 'mime_type') and message.document.mime_type == 'application/pdf':
+                if (message.media == MessageMediaType.DOCUMENT and
+                    message.document is not None and hasattr(message.document, 'mime_type') and
+                    message.document.mime_type == 'application/pdf'):
                     # Only attempt to create link if channel_username is available
                     if channel_username:
-                        if channel_username.startswith('-100'): tg_link = f"https://t.me/c/{channel_username[4:]}/{message.id}"
-                        else:  tg_link = f"https://t.me/{channel_username}/{message.id}"
-                        content_media.append(f'<div class="document-pdf" style="padding: 10px;"><a href="{tg_link}" target="_blank">[PDF-файл]</a></div>')
+                        if channel_username.startswith('-100'): 
+                            tg_link = f"https://t.me/c/{channel_username[4:]}/{message.id}"
+                        else:  
+                            tg_link = f"https://t.me/{channel_username}/{message.id}"
+                        content_media.append(f'<div class="document-pdf" style="padding: 10px;">')
+                        content_media.append(f'<a href="{tg_link}" target="_blank">[PDF-файл]</a></div>')
                     else:
                         # Handle case where channel_username is None (e.g., log or add placeholder)
-                        logger.warning(f"Could not generate PDF link for message {message.id} because channel username is missing.")
+                        logger.warning(f"Could not generate PDF link for {message.id}: ch username is missing.")
                         content_media.append(f'<div class="document-pdf" style="padding: 10px;">[PDF-файл]</div>') # Add placeholder without link
                 elif message.media in [MessageMediaType.PHOTO, MessageMediaType.DOCUMENT]:
-                    content_media.append(f'<img src="{url}" style="max-width:100%; width:auto; height:auto; max-height:400px; object-fit:contain;">')
+                    content_media.append(f'<img src="{url}" style="max-width:100%; width:auto; height:auto;'
+                                        f'max-height:400px; object-fit:contain;">')
                 elif message.media == MessageMediaType.VIDEO:
-                    content_media.append(f'<video controls src="{url}" style="max-width:100%; width:auto; height:auto; max-height:400px;"></video>')
+                    content_media.append(f'<video controls src="{url}" style="max-width:100%; width:auto;'
+                                        f'height:auto; max-height:400px;"></video>')
                 elif message.media == MessageMediaType.ANIMATION:
-                    content_media.append(f'<video controls src="{url}" style="max-width:100%; width:auto; height:auto; max-height:400px;"></video>')
+                    content_media.append(f'<video controls src="{url}" style="max-width:100%; width:auto;'
+                                        f'height:auto; max-height:400px;"></video>')
                 elif message.media == MessageMediaType.VIDEO_NOTE:
-                    content_media.append(f'<video controls src="{url}" style="max-width:100%; width:auto; height:auto; max-height:400px;"></video>')
+                    content_media.append(f'<video controls src="{url}" style="max-width:100%; width:auto;'
+                                        f'height:auto; max-height:400px;"></video>')
                 elif message.media == MessageMediaType.AUDIO:
                     mime_type = getattr(message.audio, 'mime_type', 'audio/mpeg')
-                    content_media.append(f'<audio controls style="width:100%; max-width:400px;"><source src="{url}" type="{mime_type}"></audio>')
+                    content_media.append(f'<audio controls style="width:100%; max-width:400px;">'
+                                        f'<source src="{url}" type="{mime_type}"></audio>')
                     content_media.append('<br>')
                 elif message.media == MessageMediaType.VOICE:
                     mime_type = getattr(message.voice, 'mime_type', 'audio/ogg')
-                    content_media.append(f'<audio controls style="width:100%; max-width:400px;"><source src="{url}" type="{mime_type}"></audio>')
+                    content_media.append(f'<audio controls style="width:100%; max-width:400px;">'
+                                        f'<source src="{url}" type="{mime_type}"></audio>')
                     content_media.append('<br>')
                 elif message.media == MessageMediaType.STICKER:
                     emoji = getattr(message.sticker, 'emoji', '')
                     if getattr(message.sticker, 'is_video', False):
-                        content_media.append(f'<video controls autoplay loop muted src="{url}" style="max-width:100%; width:auto; height:auto; max-height:200px; object-fit:contain;"></video>')
+                        content_media.append(f'<video controls autoplay loop muted src="{url}"'
+                                            f'style="max-width:100%; width:auto; height:auto; max-height:200px;'
+                                            f'object-fit:contain;"></video>')
                     else:
-                        content_media.append(f'<img src="{url}" alt="Sticker {emoji}" style="max-width:100%; width:auto; height:auto; max-height:200px; object-fit:contain;">')
+                        content_media.append(f'<img src="{url}" alt="Sticker {emoji}" style="max-width:100%;'
+                                            f'width:auto; height:auto; max-height:200px; object-fit:contain;">')
                 content_media.append('</div>')
         
         if webpage := getattr(message, "web_page", None): # Web page preview
@@ -674,7 +701,9 @@ class PostParser:
             
             if is_telegram_message:
                 # Telegram message preview with distinctive styling
-                html_parts = ['<div class="webpage-preview telegram-preview" style="border-left: 3px solid #0088cc; padding-left: 10px; margin: 10px 0; background-color: #f5fafd;">']
+                html_parts = [("""<div class="webpage-preview telegram-preview"
+                                style="border-left: 3px solid #0088cc; padding-left: 10px;
+                                margin: 10px 0; background-color: #f5fafd;">""")]
                 html_parts.append(f'<div class="webpage-site" style="color:#0088cc; font-size:0.9em;">📱 Telegram</div>')
             else:
                 # Regular webpage preview
@@ -686,23 +715,25 @@ class PostParser:
             # Add title with link if available
             if title := getattr(webpage, "title", None):
                 url = getattr(webpage, "url", "#")
-                html_parts.append(f'<div class="webpage-title" style="font-weight:bold; margin:5px 0;"><a href="{url}" target="_blank">{title}</a></div>')
-            
+                html_parts.append(f'<div class="webpage-title" style="font-weight:bold; margin:5px 0;">')
+                html_parts.append(f'<a href="{url}" target="_blank">{title}</a></div>')
             # Add description if available
             if description := getattr(webpage, "description", None):
                 # Process the description to handle line breaks and possibly HTML
                 processed_description = description.replace('\n', '<br>')
                 processed_description = self._add_hyperlinks_to_raw_urls(processed_description)
-                html_parts.append(f'<div class="webpage-description" style="margin:5px 0;">{processed_description}</div>')
+                html_parts.append(f'<div class="webpage-description"style="margin:5px 0;">{processed_description}</div>')
             
             # Display URL for non-telegram links or when display_url is available
             if not is_telegram_message:
                 display_url = getattr(webpage, "display_url", None)
                 url = getattr(webpage, "url", None)
                 if display_url:
-                    html_parts.append(f'<div class="webpage-url" style="color:#666; font-size:0.9em; margin-bottom:5px;">{display_url}</div>')
+                    html_parts.append(f'<div class="webpage-url" style="color:#666; font-size:0.9em;'
+                                        f'margin-bottom:5px;">{display_url}</div>')
                 elif url:
-                    html_parts.append(f'<div class="webpage-url" style="color:#666; font-size:0.9em; margin-bottom:5px;">{url}</div>')
+                    html_parts.append(f'<div class="webpage-url" style="color:#666; font-size:0.9em;'
+                                        f'margin-bottom:5px;">{url}</div>')
             
             # Add photo if available
             if photo := getattr(webpage, "photo", None):
@@ -711,8 +742,10 @@ class PostParser:
                     file = f"{channel_username}/{message.id}/{file_unique_id}"
                     digest = generate_media_digest(file)
                     url = f"{base_url}/media/{file}/{digest}"
-                    html_parts.append(f'<div class="webpage-photo" style="margin-top:10px;"><a href="{webpage.url}" target="_blank">'
-                                        f'<img src="{url}" style="max-width:100%; width:auto; height:auto; max-height:200px; object-fit:contain;"></a></div>')
+                    html_parts.append(f'<div class="webpage-photo" style="margin-top:10px;">')
+                    html_parts.append(f'<a href="{webpage.url}" target="_blank">')
+                    html_parts.append(f'<img src="{url}" style="max-width:100%; width:auto;'
+                                        f'height:auto; max-height:200px; object-fit:contain;"></a></div>')
             
             html_parts.append('</div>')
             return '\n'.join(html_parts)
@@ -746,7 +779,8 @@ class PostParser:
             result = text
             offset = 0
             
-            for match in re.finditer(r'https?://[^\s<>"\']+', text): # Find all URLs that are not already in HTML tags
+            # Find all URLs that are not already in HTML tags
+            for match in re.finditer(r'https?://[^\s<>"\']+', text): 
                 start, end = match.span()
                 
                 # Check if URL is inside an <a> tag
@@ -824,20 +858,8 @@ class PostParser:
             return self._sanitize_html(result_html) if result_html else None
             
         except Exception as e:
-            # Log the type of the object causing the error
-            obj_type = type(message).__name__
-            # Try to get an identifier safely
-            log_id = None
-            try:
-                if isinstance(message, dict):
-                    log_id = message.get('message_id', 'unknown_dict_id')
-                else:
-                    log_id = getattr(message, 'id', 'unknown_object_id')
-            except Exception:
-                log_id = "id_retrieval_failed"
-
-            logger.error(f"reactions_views_parsing_error: Type '{obj_type}', MsgID '{log_id}', Error: {str(e)}", exc_info=True)
-            logger.error(f"Problematic object data: {str(message)}")
+            logger.error(f"reactions_views_links_error: message_id {message.id}, error {str(e)}")
+            logger.error(f"reactions_views_links_error message: {str(message)}")
             return None
 
     def _format_poll(self, poll) -> str:
@@ -901,7 +923,8 @@ class PostParser:
                 elif message.video_note:    file_data['file_unique_id'] = message.video_note.file_unique_id
                 elif message.animation:     file_data['file_unique_id'] = message.animation.file_unique_id
                 elif message.sticker:       file_data['file_unique_id'] = message.sticker.file_unique_id
-                elif message.web_page and message.web_page.photo: file_data['file_unique_id'] = message.web_page.photo.file_unique_id
+                elif message.web_page and message.web_page.photo: 
+                    file_data['file_unique_id'] = message.web_page.photo.file_unique_id
 
                 if file_data['file_unique_id']:
                     file_data['channel'] = channel_username
@@ -919,8 +942,8 @@ class PostParser:
                         found = False
                         for item in existing_data:
                             if (item.get('channel') == file_data['channel'] and 
-                                item.get('post_id') == file_data['post_id'] and 
-                                item.get('file_unique_id') == file_data['file_unique_id']):
+                                    item.get('post_id') == file_data['post_id'] and 
+                                    item.get('file_unique_id') == file_data['file_unique_id']):
                                 item['added'] = datetime.now().timestamp()
                                 found = True
                                 break
