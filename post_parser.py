@@ -446,10 +446,10 @@ class PostParser:
         html_content = []
 
         if debug:
-            html_content.append(f'<div class="title">Title: {data["title"]}</div>')
-        html_content.append(f'<div class="message-media">{data["media"]}</div>')
-        html_content.append(f'<div class="message-body">{data["body"]}</div>')
-        html_content.append(f'<div class="message-footer">{data["footer"]}</div>')
+            html_content.append(f'<div class="title">Title: {data["html"]["title"]}</div>')
+        html_content.append(f'<div class="message-media">{data["html"]["media"]}</div>')
+        html_content.append(f'<div class="message-body">{data["html"]["body"]}</div>')
+        html_content.append(f'<div class="message-footer">{data["html"]["footer"]}</div>')
         
         # Add raw JSON debug output if debug is enabled
         if debug:
