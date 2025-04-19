@@ -533,13 +533,13 @@ class PostParser:
                 forward_username = getattr(sender_chat, "username", None)
                 if forward_username:
                     forward_link = f'<a href="https://t.me/{forward_username}">{forward_title} (@{forward_username})</a>'
-                    return f'<div class="message-forward">--- Forwarded from {forward_link} ---</div><br>'
-                return f'<div class="message-forward">--- Forwarded from {forward_title} ---</div><br>'
+                    return f'<div class="message-forward">--- Forwarded from {forward_link} ---</div>'
+                return f'<div class="message-forward">--- Forwarded from {forward_title} ---</div>'
             
             # Case 2: Hidden user (MessageOriginHiddenUser)
             if hasattr(forward_origin, "sender_user_name") and forward_origin.sender_user_name:
                 sender_name = forward_origin.sender_user_name
-                return f'<div class="message-forward">--- Forwarded from {sender_name} ---</div><br>'
+                return f'<div class="message-forward">--- Forwarded from {sender_name} ---</div>'
             
             # Case 3: Regular user (MessageOriginUser)
             if hasattr(forward_origin, "sender_user") and forward_origin.sender_user:
@@ -555,17 +555,17 @@ class PostParser:
                 if hasattr(user, "username") and user.username:
                     sender_name = f"{sender_name} (@{user.username})"
                 
-                return f'<div class="message-forward">--- Forwarded from {sender_name} ---</div><br>'
+                return f'<div class="message-forward">--- Forwarded from {sender_name} ---</div>'
             
             # Case 4: Channel without username (MessageOriginChannel)
             if hasattr(forward_origin, "chat_id") and hasattr(forward_origin, "title"):
                 title = forward_origin.title if forward_origin.title else "Unknown channel"
-                return f'<div class="message-forward">--- Forwarded from {title} ---</div><br>'
+                return f'<div class="message-forward">--- Forwarded from {title} ---</div>'
             
             # Case 5: Default for any other type of forward_origin
             origin_type = getattr(forward_origin, "type", "unknown")
             logger.debug(f"unhandled_forward_type: {origin_type}, data: {forward_origin}")
-            return f'<div class="message-forward">--- Forwarded message ---</div><br>'
+            return f'<div class="message-forward">--- Forwarded message ---</div>'
         
         return None
 
@@ -589,7 +589,6 @@ class PostParser:
         if poll := getattr(message, "poll", None):
             poll_html = self._format_poll(poll)
 
-        logger.error(f"Forward info: {message.forward_origin}")
         forward_html = self._format_forward_info(message)
 
         if text_html or poll_html: 
