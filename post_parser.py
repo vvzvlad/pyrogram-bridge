@@ -585,12 +585,6 @@ class PostParser:
     def _generate_html_body(self, message: Message) -> str:
         content_body = []
 
-        test_reply = self._format_reply_info(message)
-        logger.error(f"Reply info: {test_reply}")
-
-        if reply_html := self._format_reply_info(message): content_body.append(reply_html)
-
-
         if message.text: text = message.text.html
         elif message.caption: text = message.caption.html
         else: text = ''
@@ -603,10 +597,12 @@ class PostParser:
             poll_html = self._format_poll(poll)
 
         forward_html = self._format_forward_info(message)
+        reply_html = self._format_reply_info(message)
 
         if text_html or poll_html: 
             content_body.append(f'<div class="message-text">')
             if forward_html: content_body.append(forward_html) # Forward info
+            if reply_html: content_body.append(reply_html) # Reply info
             content_body.append(f'{text_html}')
             if poll_html: content_body.append(poll_html) # Poll
             if message.forward_origin: content_body.append(f"<br>--- Forwarded post end ---") # Forward info end
