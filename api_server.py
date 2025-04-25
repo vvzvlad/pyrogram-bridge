@@ -841,7 +841,7 @@ async def get_available_flags(request: Request, token: str | None = None) -> Res
 
     try:
         flags = PostParser.get_all_possible_flags()
-        return Response(content=flags, media_type="text/plain")
+        return Response(content=json.dumps(flags), media_type="application/json")
     except Exception as e:
         error_message = f"Failed to get flags list: {str(e)}"
         logger.error(error_message)
