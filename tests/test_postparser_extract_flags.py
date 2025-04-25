@@ -1,4 +1,9 @@
-# pylint: disable=protected-access, wrong-import-position
+# flake8: noqa
+# pylint: disable=broad-exception-raised, raise-missing-from, too-many-arguments, redefined-outer-name
+# pylint: disable=multiple-statements, logging-fstring-interpolation, trailing-whitespace, line-too-long
+# pylint: disable=broad-exception-caught, missing-function-docstring, missing-class-docstring
+# pylint: disable=f-string-without-interpolation, protected-access, wrong-import-position
+# pylance: disable=reportMissingImports, reportMissingModuleSource
 
 import unittest
 from unittest.mock import MagicMock, PropertyMock
