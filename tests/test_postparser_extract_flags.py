@@ -503,6 +503,13 @@ class TestPostParserExtractFlags(unittest.TestCase):
         _ = self.parser._generate_html_body(message)
         self.assertIn("link", self.parser._extract_flags(message))
 
+    def test_get_all_possible_flags_returns_list(self):
+        """Test that get_all_possible_flags returns a list with more than one flag."""
+        # This method is static, so we call it on the class
+        flags = PostParser.get_all_possible_flags()
+        self.assertIsInstance(flags, list, "Should return a list")
+        self.assertGreater(len(flags), 1, "Should return more than one flag")
+
 
 if __name__ == '__main__':
     unittest.main() 
