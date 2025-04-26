@@ -203,7 +203,6 @@ async def _render_messages_groups(messages_groups: list[list[Message]],
                 one_message = group[0]
                 message_data = post_parser.process_message(one_message)
                 html_parts = [
-                    f'<div class="message-media">{message_data["html"]["media"]}</div>',
                     f'<div class="message-body">{message_data["html"]["body"]}</div>',
                     f'<div class="message-footer">{message_data["html"]["footer"]}</div>'
                 ]
@@ -216,7 +215,7 @@ async def _render_messages_groups(messages_groups: list[list[Message]],
                     'author': message_data['author'],
                     'flags': message_data['flags']
                 })
-            else: # Multiple messages in group - merge media, text and html body
+            else: # Multiple messages in group - merge text and html body
                 processed_messages = [post_parser.process_message(msg) for msg in group]
 
                 # Determine main message for header/footer/title
@@ -224,10 +223,7 @@ async def _render_messages_groups(messages_groups: list[list[Message]],
                     (msg for msg in processed_messages if msg['text']),
                     processed_messages[0]  # fallback if no message contains text
                 )
-                
-                # Collect all media sections from all messages in the group
-                all_media = [msg['html']['media'] for msg in processed_messages if msg['html']['media']]
-                combined_media = '\n<br>\n'.join(all_media)
+            
 
                 # Merge text fields from all messages
                 all_texts = [msg['text'] for msg in processed_messages if msg['text']]
@@ -252,7 +248,6 @@ async def _render_messages_groups(messages_groups: list[list[Message]],
                 footer_html = post_parser.generate_html_footer(tg_message, flags_list=merged_flags)
 
                 html_parts = [
-                    f'<div class="message-media">{combined_media}</div>',
                     f'<div class="message-body">{combined_html_body}</div>',
                     f'<div class="message-footer">{footer_html}</div>'
                 ]

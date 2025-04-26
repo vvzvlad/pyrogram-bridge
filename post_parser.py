@@ -478,7 +478,6 @@ class PostParser:
             'html': {
                 'title': self._generate_title(message),
                 'body': self._generate_html_body(message),
-                'media': self._generate_html_media(message),
                 'footer': self.generate_html_footer(message)
             },
             'flags': self._extract_flags(message),
@@ -598,12 +597,12 @@ class PostParser:
 
         forward_html = self._format_forward_info(message)
         reply_html = self._format_reply_info(message)
-
         if text_html or poll_html: 
-            content_body.append(f'<div class="message-text">')
+            content_body.append(f'<div class="post">')
             if forward_html: content_body.append(forward_html) # Forward info
             if reply_html: content_body.append(reply_html) # Reply info
             content_body.append(f'{text_html}')
+            content_body.append(f'{self._generate_html_media(message)}')
             if poll_html: content_body.append(poll_html) # Poll
             if message.forward_origin: content_body.append(f"<br>--- Forwarded post end ---") # Forward info end
             content_body.append(f'</div><br>')
