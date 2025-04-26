@@ -72,7 +72,7 @@ class PostParser:
             # Return unique flags
             return sorted(list(set(flags)))
         except Exception as e:
-            logger.error(f"flag_extraction_error: Could not extract flags dynamically: {str(e)}")
+            logger.error(f"flag_extraction_error: Could not extract flags dynamically, error {str(e)}")
             # Fallback to a manually defined list might be needed here in case of error,
             # but for now, we return an empty list.
             return []
@@ -537,7 +537,7 @@ class PostParser:
             )
             return sanitized_html
         except Exception as e:
-            logger.error(f"html_sanitization_error: {str(e)}")
+            logger.error(f"html_sanitization_error: error {str(e)}")
             return html_raw
 
     def _format_forward_info(self, message: Message) -> Union[str, None]:
@@ -857,7 +857,7 @@ class PostParser:
             
         except Exception as e:
             logger.error(f"reactions_views_links_error: message_id {message.id}, error {str(e)}")
-            logger.error(f"reactions_views_links_error message: {str(message)}")
+            logger.error(f"reactions_views_links_error message_object: {str(message)}") # Keep original log for context
             return None
 
     def _format_poll(self, poll) -> str:
@@ -954,7 +954,7 @@ class PostParser:
                             json.dump(existing_data, f, ensure_ascii=False, indent=2)
 
                     except Exception as e:
-                        logger.error(f"file_id_save_error: error writing to {file_path}: {str(e)}")
+                        logger.error(f"file_id_save_error: error writing to {file_path}, error {str(e)}")
 
         except Exception as e:
             logger.error(f"file_id_collection_error: message_id {message.id}, error {str(e)}")
