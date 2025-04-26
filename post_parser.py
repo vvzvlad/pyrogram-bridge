@@ -109,7 +109,11 @@ class PostParser:
                 return None
             
         except Exception as e:
-            logger.error(f"post_parsing_error: channel {prepared_channel_id}, post_id {post_id}, error {str(e)}")
+            # Log the specific exception type and message
+            logger.error(f"post_parsing_error: channel {prepared_channel_id}, post_id {post_id}, error_type {type(e).__name__}, error_message {str(e)}")
+            # Optional: include traceback for more detail
+            # import traceback
+            # logger.error(traceback.format_exc())
             raise
 
     def _get_author_info(self, message: Message) -> str: #Tests: tests/postparser_author_info.py
@@ -444,7 +448,6 @@ class PostParser:
 
         if debug:
             html_content.append(f'<div class="title">Title: {data["html"]["title"]}</div><br>')
-        html_content.append(f'<div class="message-media">{data["html"]["media"]}</div>')
         html_content.append(f'<div class="message-body">{data["html"]["body"]}</div>')
         html_content.append(f'<div class="message-footer">{data["html"]["footer"]}</div>')
         
