@@ -600,19 +600,19 @@ class PostParser:
 
         forward_html = self._format_forward_info(message)
         reply_html = self._format_reply_info(message)
-        if text_html or poll_html: 
-            content_body.append(f'<div class="post">')
-            if forward_html: content_body.append(forward_html) # Forward info
-            if reply_html: content_body.append(reply_html) # Reply info
-            content_body.append(f'{text_html}')
+        
+        content_body.append(f'<div class="post">')
+        if forward_html: content_body.append(forward_html) # Forward info
+        if reply_html: content_body.append(reply_html) # Reply info
+        if text_html: content_body.append(f'{text_html}')
 
-            content_body.append(f'<div class="message-media">')
-            content_body.append(f'{self._generate_html_media(message)}')
-            content_body.append(f'</div>')
+        content_body.append(f'<div class="message-media">')
+        content_body.append(f'{self._generate_html_media(message)}')
+        content_body.append(f'</div>')
 
-            if poll_html: content_body.append(poll_html) # Poll
-            if message.forward_origin: content_body.append(f"<br>--- Forwarded post end ---") # Forward info end
-            content_body.append(f'</div><br>')
+        if poll_html: content_body.append(poll_html) # Poll
+        if message.forward_origin: content_body.append(f"<br>--- Forwarded post end ---") # Forward info end
+        content_body.append(f'</div><br>')
 
         html_body = '\n'.join(content_body)
         html_body = self._sanitize_html(html_body)
@@ -634,7 +634,6 @@ class PostParser:
                 url = f"{base_url}/media/{file}/{digest}"
 
                 logger.debug(f"Collected media file: {channel_username}/{message.id}/{file_unique_id}")
-                
                 
                 # Check if document is a PDF file
                 if (message.media == MessageMediaType.DOCUMENT and
