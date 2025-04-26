@@ -605,7 +605,11 @@ class PostParser:
             if forward_html: content_body.append(forward_html) # Forward info
             if reply_html: content_body.append(reply_html) # Reply info
             content_body.append(f'{text_html}')
+
+            content_body.append(f'<div class="message-media">')
             content_body.append(f'{self._generate_html_media(message)}')
+            content_body.append(f'</div>')
+            
             if poll_html: content_body.append(poll_html) # Poll
             if message.forward_origin: content_body.append(f"<br>--- Forwarded post end ---") # Forward info end
             content_body.append(f'</div><br>')
@@ -630,7 +634,7 @@ class PostParser:
                 url = f"{base_url}/media/{file}/{digest}"
 
                 logger.debug(f"Collected media file: {channel_username}/{message.id}/{file_unique_id}")
-                content_media.append(f'<div class="message-media">')
+                
                 
                 # Check if document is a PDF file
                 if (message.media == MessageMediaType.DOCUMENT and
@@ -679,7 +683,6 @@ class PostParser:
                     else:
                         content_media.append(f'<img src="{url}" alt="Sticker {emoji}" style="max-width:100%;'
                                             f'width:auto; height:auto; max-height:200px; object-fit:contain;">')
-                content_media.append('</div>')
         
         if webpage := getattr(message, "web_page", None): # Web page preview
             if webpage_html := self._format_webpage(webpage, message):
