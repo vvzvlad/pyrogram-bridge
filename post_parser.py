@@ -609,7 +609,7 @@ class PostParser:
             content_body.append(f'<div class="message-media">')
             content_body.append(f'{self._generate_html_media(message)}')
             content_body.append(f'</div>')
-            
+
             if poll_html: content_body.append(poll_html) # Poll
             if message.forward_origin: content_body.append(f"<br>--- Forwarded post end ---") # Forward info end
             content_body.append(f'</div><br>')
@@ -651,7 +651,8 @@ class PostParser:
                     else:
                         # Handle case where channel_username is None (e.g., log or add placeholder)
                         logger.warning(f"Could not generate PDF link for {message.id}: ch username is missing.")
-                        content_media.append(f'<div class="document-pdf" style="padding: 10px;">[PDF-файл]</div>') # Add placeholder without link
+                        # Add placeholder without link
+                        content_media.append(f'<div class="document-pdf" style="padding: 10px;">[PDF-файл]</div>') 
                 elif message.media in [MessageMediaType.PHOTO, MessageMediaType.DOCUMENT]:
                     content_media.append(f'<img src="{url}" style="max-width:100%; width:auto; height:auto;'
                                         f'max-height:400px; object-fit:contain;">')
