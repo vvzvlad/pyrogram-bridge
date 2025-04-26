@@ -583,32 +583,31 @@ class PostParser:
             return f'<div class="message-forward">--- Forwarded message ---</div>'
         
         return None
+    
+    def _get_post_text_with_urls(self, message: Message) -> Union[str, None]:
+        if message.text: text = message.text.html
+        elif message.caption: text = message.caption.html
+        else: return None
+
+        text = text.replace('\n', '<br>') # Replace newlines with <br>
+        text_html = self._add_hyperlinks_to_raw_urls(text)
+        return text_html
 
     def _generate_html_body(self, message: Message) -> str:
         content_body = []
 
-        if message.text: text = message.text.html
-        elif message.caption: text = message.caption.html
-        else: text = ''
-
-        text = text.replace('\n', '<br>') # Replace newlines with <br>
-        text_html = self._add_hyperlinks_to_raw_urls(text)
-
-        poll_html = ''
-        if poll := getattr(message, "poll", None):
-            poll_html = self._format_poll(poll)
-
+        text_html = self._get_post_text_with_urls(message)
+        poll_html = self._format_poll(message)
         forward_html = self._format_forward_info(message)
         reply_html = self._format_reply_info(message)
+        media_html = self._generate_html_media(message)
         
         content_body.append(f'<div class="post">')
         if forward_html: content_body.append(forward_html) # Forward info
         if reply_html: content_body.append(reply_html) # Reply info
-        if text_html: content_body.append(f'{text_html}')
+        if text_html: content_body.append(text_html) # Post text
 
-        content_body.append(f'<div class="message-media">')
-        content_body.append(f'{self._generate_html_media(message)}')
-        content_body.append(f'</div>')
+        content_body.append(media_html) # Media
 
         if poll_html: content_body.append(poll_html) # Poll
         if message.forward_origin: content_body.append(f"<br>--- Forwarded post end ---") # Forward info end
@@ -621,9 +620,12 @@ class PostParser:
     def _generate_html_media(self, message: Message) -> str:
         self._save_media_file_ids(message) # Save media file_ids for caching
 
+
         content_media = []
         base_url = Config['pyrogram_bridge_url']
         if message.media and message.media != "MessageMediaType.POLL":
+            content_media.append(f'<div class="message-media">')
+
             file_unique_id = self._get_file_unique_id(message)
             if file_unique_id is None:
                 logger.debug(f"File unique id not found for message {message.id}")
@@ -683,11 +685,14 @@ class PostParser:
                     else:
                         content_media.append(f'<img src="{url}" alt="Sticker {emoji}" style="max-width:100%;'
                                             f'width:auto; height:auto; max-height:200px; object-fit:contain;">')
+                content_media.append('</div>')
         
         if webpage := getattr(message, "web_page", None): # Web page preview
             if webpage_html := self._format_webpage(webpage, message):
                 if len((message.text or message.caption or '').strip()) <= 10:
+                    content_media.append(f'<div class="webpage-preview">')
                     content_media.append(webpage_html)
+                    content_media.append('</div>')
 
         html_media = '\n'.join(content_media)
         html_media = self._sanitize_html(html_media)
@@ -863,14 +868,17 @@ class PostParser:
             logger.error(f"reactions_views_links_error message_object: {str(message)}") # Keep original log for context
             return None
 
-    def _format_poll(self, poll) -> str:
+    def _format_poll(self, message: Message) -> Union[str, None]: #TODO: refactoring to parts.append
+        
         try:
-            poll_text = f"📊 Poll: {poll.question}\n"
-            if hasattr(poll, "options") and poll.options:
-                for i, option in enumerate(poll.options, 1):
-                    poll_text += f"{i}. {getattr(option, 'text', '')}\n"
-            poll_text += "\n→ Vote in Telegram 🔗\n"
-            return f'<div class="message-poll">{poll_text.replace(chr(10), "<br>")}</div>'
+            if poll := getattr(message, "poll", None):
+                poll_text = f"📊 Poll: {poll.question}\n"
+                if hasattr(poll, "options") and poll.options:
+                    for i, option in enumerate(poll.options, 1):
+                        poll_text += f"{i}. {getattr(option, 'text', '')}\n"
+                poll_text += "\n→ Vote in Telegram 🔗\n"
+                return f'<div class="message-poll">{poll_text.replace(chr(10), "<br>")}</div>'
+            return None
         except Exception as e:
             logger.error(f"poll_parsing_error: {str(e)}")
             return '<div class="message-poll">[Error displaying poll]</div>'
