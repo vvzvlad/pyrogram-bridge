@@ -450,8 +450,8 @@ async def download_new_files(media_files: list, cache_dir: str) -> None:
             logger.error(f"Background download failed for {channel}/{post_id}/{file_unique_id}: {str(e)}")
             continue
 
-    if files_to_download == 0:
-        logger.info("All media files are already in cache")
+    #if files_to_download == 0:
+    #    logger.info("All media files are already in cache")
 
 
 def fix_corrupted_json(file_path: str) -> list:
