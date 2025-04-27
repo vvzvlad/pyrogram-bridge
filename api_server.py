@@ -788,7 +788,8 @@ async def get_rss_feed(channel: str,
         
     while True:
         try:
-
+            start_time = time.time()
+            
             if output_type == 'rss':
                 rss_content = await generate_channel_rss(channel,
                                                         client=client.client, 
@@ -796,6 +797,8 @@ async def get_rss_feed(channel: str,
                                                         exclude_flags=exclude_flags,
                                                         exclude_text=exclude_text,
                                                         merge_seconds=merge_seconds)
+                elapsed_time = time.time() - start_time
+                logger.info(f"rss_generation_timing: channel {channel}, generated in {elapsed_time:.3f} seconds")
                 return Response(content=rss_content, media_type="application/xml")
             elif output_type == 'html':
                 rss_content = await generate_channel_html(channel,
@@ -804,6 +807,8 @@ async def get_rss_feed(channel: str,
                                                         exclude_flags=exclude_flags,
                                                         exclude_text=exclude_text,
                                                         merge_seconds=merge_seconds)
+                elapsed_time = time.time() - start_time
+                logger.info(f"html_generation_timing: channel {channel}, generated in {elapsed_time:.3f} seconds")
                 return Response(content=rss_content, media_type="text/html")
         except ValueError as e:
             error_message = f"invalid_parameters_error: {str(e)}"
@@ -824,7 +829,7 @@ async def get_rss_feed(channel: str,
         except Exception as e:
             error_message = f"rss_generation_error: channel {channel}, error {str(e)}"
             logger.error(error_message)
-            raise HTTPException(status_code=500, detail=error_message) from e 
+            raise HTTPException(status_code=500, detail=error_message) from e
 
 @app.get("/flags", response_model=List[str])
 @app.get("/flags/{token}", response_model=List[str])

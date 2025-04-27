@@ -11,6 +11,7 @@
 
 import logging
 import re
+import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Optional
@@ -316,6 +317,8 @@ async def generate_channel_rss(channel: str | int,
     Returns:
         RSS feed as string in XML format
     """
+    total_start_time = time.time()
+    
     if limit < 1:
         raise ValueError(f"limit must be positive, got {limit}")
     if limit > 200:
@@ -328,6 +331,7 @@ async def generate_channel_rss(channel: str | int,
         fg.load_extension('dc')
         base_url = Config['pyrogram_bridge_url']
         
+        channel_info_start_time = time.time()
         try:
             channel  = post_parser.channel_name_prepare(channel)
             channel_info = await post_parser.client.get_chat(channel)
@@ -345,6 +349,9 @@ async def generate_channel_rss(channel: str | int,
             # Re-raise the original exception to be caught by the outer handler if needed,
             # but add specific logging here.
             raise ValueError(f"Failed to get chat info for {channel}: {str(e)}") from e # Raise a more specific error perhaps
+        
+        channel_info_elapsed = time.time() - channel_info_start_time
+        logger.debug(f"rss_channel_info_timing: channel {channel}, retrieved in {channel_info_elapsed:.3f} seconds")
 
         # Set feed metadata
         main_name = f"{channel_title} (@{channel_username})"
@@ -355,6 +362,7 @@ async def generate_channel_rss(channel: str | int,
         fg.id(f"{base_url}/rss/{channel_username}") # Use username for feed ID consistency
         
         # Collect messages
+        messages_start_time = time.time()
         messages = []
         try:
             async for message in post_parser.client.get_chat_history(channel, limit=limit*2):
@@ -363,14 +371,22 @@ async def generate_channel_rss(channel: str | int,
             logger.error(f"Error during get_chat_history for channel '{channel}' (type: {type(channel)}): {str(e)}", exc_info=True) # Log error specifically for get_chat_history
             raise ValueError(f"Failed to get chat history for {channel}: {str(e)}") from e # Raise a more specific error
             
+        messages_elapsed = time.time() - messages_start_time
+        logger.debug(f"rss_messages_retrieval_timing: channel {channel}, {len(messages)} messages retrieved in {messages_elapsed:.3f} seconds")
+        
         # Process messages into groups and render them
+        processing_start_time = time.time()
         if Config['time_based_merge']:
             messages = await _create_time_based_media_groups(messages, merge_seconds)
         message_groups = await _create_messages_groups(messages)
         message_groups = await _trim_messages_groups(message_groups, limit)
         final_posts = await _render_messages_groups(message_groups, post_parser, exclude_flags, exclude_text)
         
+        processing_elapsed = time.time() - processing_start_time
+        logger.debug(f"rss_messages_processing_timing: channel {channel}, {len(final_posts)} posts processed in {processing_elapsed:.3f} seconds")
+        
         # Generate feed entries
+        feed_gen_start_time = time.time()
         for post in final_posts:
             fe = fg.add_entry()
             fe.title(post['title'])
@@ -387,10 +403,16 @@ async def generate_channel_rss(channel: str | int,
             
             if post['author'] and post['author'] != main_name:
                 fe.author(name="", email=post['author'])
-                
+        
+        feed_gen_elapsed = time.time() - feed_gen_start_time
+        logger.debug(f"rss_feed_generation_timing: channel {channel}, feed generated in {feed_gen_elapsed:.3f} seconds")
+        
         rss_feed = fg.rss_str(pretty=True)
         if isinstance(rss_feed, bytes):
             return rss_feed.decode('utf-8')
+        
+        total_elapsed = time.time() - total_start_time
+        logger.debug(f"rss_total_generation_timing: channel {channel}, total time {total_elapsed:.3f} seconds")
         return rss_feed
         
     except Exception as e:
@@ -432,6 +454,8 @@ async def generate_channel_html(channel: str | int,
     Returns:
         HTML feed as string
     """
+    total_start_time = time.time()
+    
     if limit < 1:
         raise ValueError(f"limit must be positive, got {limit}")
     if limit > 200:
@@ -442,6 +466,7 @@ async def generate_channel_html(channel: str | int,
             
         base_url = Config['pyrogram_bridge_url']
         
+        channel_info_start_time = time.time()
         try:
             channel = post_parser.channel_name_prepare(channel)
             logger.debug(f"Prepared channel identifier for HTML: {channel} (type: {type(channel)})") # Log prepared channel
@@ -459,7 +484,11 @@ async def generate_channel_html(channel: str | int,
             logger.error(f"Error during get_chat for channel '{channel}' (type: {type(channel)}) in HTML generation: {str(e)}", exc_info=True)
             raise ValueError(f"Failed to get chat info for {channel} in HTML generation: {str(e)}") from e
 
+        channel_info_elapsed = time.time() - channel_info_start_time
+        logger.debug(f"html_channel_info_timing: channel {channel}, retrieved in {channel_info_elapsed:.3f} seconds")
+
         # Collect messages
+        messages_start_time = time.time()
         messages = []
         try:
             async for message in post_parser.client.get_chat_history(channel, limit=limit):
@@ -468,10 +497,17 @@ async def generate_channel_html(channel: str | int,
             logger.error(f"Error during get_chat_history for channel '{channel}' (type: {type(channel)}) in HTML generation: {str(e)}", exc_info=True)
             raise ValueError(f"Failed to get chat history for {channel} in HTML generation: {str(e)}") from e
 
+        messages_elapsed = time.time() - messages_start_time
+        logger.debug(f"html_messages_retrieval_timing: channel {channel}, {len(messages)} messages retrieved in {messages_elapsed:.3f} seconds")
+
         # Enrich messages with reply to messages
+        enrichment_start_time = time.time()
         messages = await _reply_enrichment(client, messages)
+        enrichment_elapsed = time.time() - enrichment_start_time
+        logger.debug(f"html_reply_enrichment_timing: channel {channel}, replies enriched in {enrichment_elapsed:.3f} seconds")
 
         # Process messages into groups and render them
+        processing_start_time = time.time()
         if Config['time_based_merge']:
             messages = await _create_time_based_media_groups(messages, merge_seconds)
 
@@ -479,10 +515,21 @@ async def generate_channel_html(channel: str | int,
         message_groups = await _create_messages_groups(messages)
         message_groups = await _trim_messages_groups(message_groups, limit)
         final_posts = await _render_messages_groups(message_groups, post_parser, exclude_flags, exclude_text)
+        
+        processing_elapsed = time.time() - processing_start_time
+        logger.debug(f"html_messages_processing_timing: channel {channel}, {len(final_posts)} posts processed in {processing_elapsed:.3f} seconds")
 
         # Generate HTML content
+        html_gen_start_time = time.time()
         html_posts = [post['html'] for post in final_posts]
         html = '\n<hr class="post-divider">\n'.join(html_posts)
+        
+        html_gen_elapsed = time.time() - html_gen_start_time
+        logger.debug(f"html_generation_timing: channel {channel}, HTML generated in {html_gen_elapsed:.3f} seconds")
+        
+        total_elapsed = time.time() - total_start_time
+        logger.debug(f"html_total_generation_timing: channel {channel}, total time {total_elapsed:.3f} seconds")
+        
         return html
         
     except Exception as e:
