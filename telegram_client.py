@@ -49,14 +49,14 @@ class TelegramClient:
         self.client.add_handler(DisconnectHandler(self._on_disconnect))
         logger.info("connection_handlers: connection handlers set up")
 
-    def _on_disconnect(self, _client):
+    async def _on_disconnect(self, _client):
         """Handles disconnection from Telegram servers"""
         self.disconnect_count += 1
         logger.warning(f"connection_handler: connection lost (#{self.disconnect_count})")
         
         if self.disconnect_count >= self.max_disconnects:
             logger.critical(f"connection_handler: reached disconnect limit ({self.max_disconnects})")
-            self._restart_app()
+            await self._restart_app()
 
     async def start(self):
         try:
@@ -70,14 +70,14 @@ class TelegramClient:
             logger.error(f"Failed to start Telegram client: {str(e)}")
             raise
 
-    def _restart_app(self):
+    async def _restart_app(self):
         """Restarts the application"""
         logger.warning("connection_handler: restarting application")
         try:
             # Properly shutdown client before restart
             loop = asyncio.get_event_loop()
             if loop.is_running():
-                loop.create_task(self.stop())
+                await self.stop()
             
             # Use os.execv to restart the process with the same arguments
             os.execv(sys.executable, [sys.executable] + sys.argv)
