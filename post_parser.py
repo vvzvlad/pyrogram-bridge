@@ -603,14 +603,21 @@ class PostParser:
         media_html = self._generate_html_media(message)
         
         content_body.append(f'<div class="post">')
-        if forward_html: content_body.append(forward_html) # Forward info
-        if reply_html: content_body.append(reply_html) # Reply info
-        if text_html: content_body.append(text_html) # Post text
+        if forward_html: 
+            content_body.append(forward_html) # Forward info
+            content_body.append("<br>")
+        if reply_html: 
+            content_body.append(reply_html) # Reply info
+            content_body.append("<br>")
+        if text_html: 
+            content_body.append(text_html) # Post text
+            content_body.append("<br>")
 
         content_body.append(media_html) # Media
+        content_body.append("<br>")
 
         if poll_html: content_body.append(poll_html) # Poll
-        if message.forward_origin: content_body.append(f"<br>--- Forwarded post end ---") # Forward info end
+        if message.forward_origin: content_body.append(f"--- Forwarded post end ---") # Forward info end
         content_body.append(f'</div><br>')
 
         html_body = '\n'.join(content_body)
