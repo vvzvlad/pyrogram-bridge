@@ -409,9 +409,9 @@ async def generate_channel_rss(channel: str | int,
             # Re-raise the original exception to be caught by the outer handler if needed,
             # but add specific logging here.
             raise ValueError(f"Failed to get chat info for {channel}: {str(e)}") from e # Raise a more specific error perhaps
-        
-        channel_info_elapsed = time.time() - channel_info_start_time
-        logger.info(f"rss_channel_info_timing: channel {channel}, retrieved in {channel_info_elapsed:.3f} seconds")
+        finally:
+            channel_info_elapsed = time.time() - channel_info_start_time
+            logger.info(f"rss_channel_info_timing: channel {channel}, retrieved in {channel_info_elapsed:.3f} seconds")
 
         # Set feed metadata
         main_name = f"{channel_title} (@{channel_username})"
