@@ -309,7 +309,7 @@ def _get_cache_path(channel: str | int) -> Path:
     Returns:
         Path to the cache file
     """
-    cache_dir = Path(Config.get('cache_dir', 'cache/rss'))
+    cache_dir = Path(Config.get('cache_dir', './data/rss-cache'))
     cache_dir.mkdir(parents=True, exist_ok=True)
     
     # Create a unique filename based on the channel identifier
@@ -528,7 +528,7 @@ async def generate_channel_html(channel: str | int,
         HTML feed as string
     """
     # Use different directory for html cache
-    cache_dir = Path(Config.get('cache_dir', 'cache/html'))
+    cache_dir = Path(Config.get('cache_dir', './data/html-cache'))
     cache_dir.mkdir(parents=True, exist_ok=True)
     
     # Create a unique filename for the html cache
