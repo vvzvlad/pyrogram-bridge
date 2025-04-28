@@ -35,6 +35,7 @@ class TelegramClient:
         self.disconnect_count = 0
         self.max_disconnects = 3
         self._setup_connection_handlers()
+        self._setup_signal_handlers()
 
     def _ensure_session_directory(self):
         try:
@@ -48,6 +49,12 @@ class TelegramClient:
         """Sets up connection/disconnection handlers"""
         self.client.add_handler(DisconnectHandler(self._on_disconnect))
         logger.info("connection_handlers: connection handlers set up")
+
+    def _setup_signal_handlers(self):
+        """Sets up signal handlers for graceful shutdown"""
+        loop = asyncio.get_event_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, lambda s=sig: asyncio.create_task(self._handle_shutdown(s)))
 
     async def _on_disconnect(self, _client):
         """Handles disconnection from Telegram servers"""
@@ -75,18 +82,29 @@ class TelegramClient:
         logger.warning("connection_handler: restarting application")
         try:
             # Properly shutdown client before restart
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
+            if self.client.is_connected:
                 await self.stop()
             
-            # Use os.execv to restart the process with the same arguments
-            os.execv(sys.executable, [sys.executable] + sys.argv)
+            # First terminate current process
+            logger.info("connection_handler: terminating current process")
+            os.kill(os.getpid(), signal.SIGTERM)
+            
+            # If process is still alive after 5 seconds, force kill it
+            await asyncio.sleep(5)
+            os.kill(os.getpid(), signal.SIGKILL)
         except Exception as e:
             logger.error(f"connection_handler: error during restart: {str(e)}")
             # Emergency termination in case of restart failure
-            os.kill(os.getpid(), signal.SIGTERM)
+            os.kill(os.getpid(), signal.SIGKILL)
 
     async def stop(self):
         if self.client.is_connected:
             await self.client.stop()
             logger.info("Telegram client disconnected")
+
+    async def _handle_shutdown(self, sig):
+        """Handles graceful shutdown on receiving termination signal"""
+        logger.info(f"Received signal {sig.name}, shutting down gracefully")
+        await self.stop()
+        loop = asyncio.get_event_loop()
+        loop.stop()
