@@ -411,7 +411,7 @@ async def generate_channel_rss(channel: str | int,
             raise ValueError(f"Failed to get chat info for {channel}: {str(e)}") from e # Raise a more specific error perhaps
         
         channel_info_elapsed = time.time() - channel_info_start_time
-        logger.debug(f"rss_channel_info_timing: channel {channel}, retrieved in {channel_info_elapsed:.3f} seconds")
+        logger.info(f"rss_channel_info_timing: channel {channel}, retrieved in {channel_info_elapsed:.3f} seconds")
 
         # Set feed metadata
         main_name = f"{channel_title} (@{channel_username})"
@@ -432,7 +432,7 @@ async def generate_channel_rss(channel: str | int,
             raise ValueError(f"Failed to get chat history for {channel}: {str(e)}") from e # Raise a more specific error
             
         messages_elapsed = time.time() - messages_start_time
-        logger.debug(f"rss_messages_retrieval_timing: channel {channel}, {len(messages)} messages retrieved in {messages_elapsed:.3f} seconds")
+        logger.info(f"rss_messages_retrieval_timing: channel {channel}, {len(messages)} messages retrieved in {messages_elapsed:.3f} seconds")
         
         # Process messages into groups and render them
         processing_start_time = time.time()
@@ -443,7 +443,7 @@ async def generate_channel_rss(channel: str | int,
         final_posts = await _render_messages_groups(message_groups, post_parser, exclude_flags, exclude_text)
         
         processing_elapsed = time.time() - processing_start_time
-        logger.debug(f"rss_messages_processing_timing: channel {channel}, {len(final_posts)} posts processed in {processing_elapsed:.3f} seconds")
+        logger.info(f"rss_messages_processing_timing: channel {channel}, {len(final_posts)} posts processed in {processing_elapsed:.3f} seconds")
         
         # Generate feed entries
         feed_gen_start_time = time.time()
@@ -465,7 +465,7 @@ async def generate_channel_rss(channel: str | int,
                 fe.author(name="", email=post['author'])
         
         feed_gen_elapsed = time.time() - feed_gen_start_time
-        logger.debug(f"rss_feed_generation_timing: channel {channel}, feed generated in {feed_gen_elapsed:.3f} seconds")
+        logger.info(f"rss_feed_generation_timing: channel {channel}, feed generated in {feed_gen_elapsed:.3f} seconds")
         
         rss_feed = fg.rss_str(pretty=True)
         if isinstance(rss_feed, bytes):
@@ -481,7 +481,7 @@ async def generate_channel_rss(channel: str | int,
                 logger.error(f"cache_write_error: channel {channel}, error {str(e)}")
         
         total_elapsed = time.time() - total_start_time
-        logger.debug(f"rss_total_generation_timing: channel {channel}, total time {total_elapsed:.3f} seconds")
+        logger.info(f"rss_total_generation_timing: channel {channel}, total time {total_elapsed:.3f} seconds")
         return rss_feed
         
     except Exception as e:
@@ -585,7 +585,7 @@ async def generate_channel_html(channel: str | int,
             raise ValueError(f"Failed to get chat info for {channel} in HTML generation: {str(e)}") from e
 
         channel_info_elapsed = time.time() - channel_info_start_time
-        logger.debug(f"html_channel_info_timing: channel {channel}, retrieved in {channel_info_elapsed:.3f} seconds")
+        logger.info(f"html_channel_info_timing: channel {channel}, retrieved in {channel_info_elapsed:.3f} seconds")
 
         # Collect messages
         messages_start_time = time.time()
@@ -598,13 +598,13 @@ async def generate_channel_html(channel: str | int,
             raise ValueError(f"Failed to get chat history for {channel} in HTML generation: {str(e)}") from e
 
         messages_elapsed = time.time() - messages_start_time
-        logger.debug(f"html_messages_retrieval_timing: channel {channel}, {len(messages)} messages retrieved in {messages_elapsed:.3f} seconds")
+        logger.info(f"html_messages_retrieval_timing: channel {channel}, {len(messages)} messages retrieved in {messages_elapsed:.3f} seconds")
 
         # Enrich messages with reply to messages
         enrichment_start_time = time.time()
         messages = await _reply_enrichment(client, messages)
         enrichment_elapsed = time.time() - enrichment_start_time
-        logger.debug(f"html_reply_enrichment_timing: channel {channel}, replies enriched in {enrichment_elapsed:.3f} seconds")
+        logger.info(f"html_reply_enrichment_timing: channel {channel}, replies enriched in {enrichment_elapsed:.3f} seconds")
 
         # Process messages into groups and render them
         processing_start_time = time.time()
@@ -617,7 +617,7 @@ async def generate_channel_html(channel: str | int,
         final_posts = await _render_messages_groups(message_groups, post_parser, exclude_flags, exclude_text)
         
         processing_elapsed = time.time() - processing_start_time
-        logger.debug(f"html_messages_processing_timing: channel {channel}, {len(final_posts)} posts processed in {processing_elapsed:.3f} seconds")
+        logger.info(f"html_messages_processing_timing: channel {channel}, {len(final_posts)} posts processed in {processing_elapsed:.3f} seconds")
 
         # Generate HTML content
         html_gen_start_time = time.time()
@@ -625,7 +625,7 @@ async def generate_channel_html(channel: str | int,
         html_content = '\n<hr class="post-divider">\n'.join(html_posts)
         
         html_gen_elapsed = time.time() - html_gen_start_time
-        logger.debug(f"html_generation_timing: channel {channel}, HTML generated in {html_gen_elapsed:.3f} seconds")
+        logger.info(f"html_generation_timing: channel {channel}, HTML generated in {html_gen_elapsed:.3f} seconds")
         
         # Save to cache
         if use_cache:
@@ -637,7 +637,7 @@ async def generate_channel_html(channel: str | int,
                 logger.error(f"html_cache_write_error: channel {channel}, error {str(e)}")
         
         total_elapsed = time.time() - total_start_time
-        logger.debug(f"html_total_generation_timing: channel {channel}, total time {total_elapsed:.3f} seconds")
+        logger.info(f"html_total_generation_timing: channel {channel}, total time {total_elapsed:.3f} seconds")
         
         return html_content
         
