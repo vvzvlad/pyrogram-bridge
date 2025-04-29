@@ -36,6 +36,7 @@ from config import get_settings, setup_logging
 from rss_generator import generate_channel_rss, generate_channel_html
 from post_parser import PostParser
 from url_signer import verify_media_digest, generate_media_digest
+from rss_cache import update_channel_access_time, start_cache_updater
 
 # Define custom exception for zero-size files
 class ZeroSizeFileError(Exception):
@@ -72,10 +73,13 @@ async def lifespan(_: FastAPI):
     
     await client.start()
     background_task = asyncio.create_task(cache_media_files()) # Start background task
+    cache_updater_task = asyncio.create_task(start_cache_updater(client.client)) # Start cache updater task
     yield
     background_task.cancel() # Cleanup
+    cache_updater_task.cancel()
     try:
         await background_task
+        await cache_updater_task
     except asyncio.CancelledError:
         pass
     await client.stop()
@@ -785,7 +789,10 @@ async def get_rss_feed(channel: str,
             logger.info(f"Valid token for RSS endpoint: {token}")
     elif Config["token"] and is_local_request(request):
         logger.info(f"Local request, skipping token check for RSS endpoint.")
-        
+    
+    # Обновляем время доступа к каналу в cache_access.json
+    update_channel_access_time(channel)
+    
     while True:
         try:
             

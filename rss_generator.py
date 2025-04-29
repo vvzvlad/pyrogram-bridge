@@ -15,7 +15,7 @@ import time
 import os
 import hashlib
 from pathlib import Path
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Optional
 from feedgen.feed import FeedGenerator
@@ -23,6 +23,7 @@ from pyrogram import errors, Client
 from pyrogram.types import Message
 from post_parser import PostParser
 from config import get_settings
+from rss_cache import read_cache, write_cache
 
 Config = get_settings()
 
@@ -301,47 +302,6 @@ async def _render_messages_groups(messages_groups: list[list[Message]],
     rendered_posts.sort(key=lambda x: x['date'], reverse=True)
     return rendered_posts
 
-def _get_cache_path(channel: str | int) -> Path:
-    """
-    Get the path to the cache file for a given channel
-    Args:
-        channel: Telegram channel name or id
-    Returns:
-        Path to the cache file
-    """
-    cache_dir = Path(Config.get('cache_dir', './data/rss-cache'))
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Create a unique filename based on the channel identifier
-    if isinstance(channel, int):
-        filename = f"channel_{channel}.xml"
-    else:
-        # Use hash for channel names with special characters
-        if any(c in channel for c in '/<>:"|?*\\'):
-            channel_hash = hashlib.md5(channel.encode()).hexdigest()
-            filename = f"channel_{channel_hash}.xml"
-        else:
-            filename = f"channel_{channel}.xml"
-    
-    return cache_dir / filename
-
-def _is_cache_valid(cache_path: Path, max_age_hours: int = 2) -> bool:
-    """
-    Check if the cache file exists and is recent enough
-    Args:
-        cache_path: Path to the cache file
-        max_age_hours: Maximum age of the cache in hours
-    Returns:
-        True if cache exists and is recent enough, False otherwise
-    """
-    if not cache_path.exists():
-        return False
-    
-    file_mod_time = datetime.fromtimestamp(cache_path.stat().st_mtime)
-    max_age = timedelta(hours=max_age_hours)
-    
-    return datetime.now() - file_mod_time < max_age
-
 async def generate_channel_rss(channel: str | int, 
                                 client: Client, 
                                 limit: int = 20, 
@@ -365,17 +325,11 @@ async def generate_channel_rss(channel: str | int,
     Returns:
         RSS feed as string in XML format
     """
-    cache_path = _get_cache_path(channel)
-    
     # Check if we can use cached version
-    if use_cache and _is_cache_valid(cache_path, cache_max_age_hours):
-        try:
-            logger.debug(f"using_cached_rss: channel {channel}, cache_file {cache_path}")
-            with open(cache_path, 'r', encoding='utf-8') as f:
-                return f.read()
-        except Exception as e:
-            logger.error(f"cache_read_error: channel {channel}, error {str(e)}")
-            # If reading cache fails, continue to generate new content
+    if use_cache:
+        cached_content = read_cache(channel, 'rss', cache_max_age_hours)
+        if cached_content:
+            return cached_content
     
     total_start_time = time.time()
     
@@ -473,12 +427,7 @@ async def generate_channel_rss(channel: str | int,
         
         # Save to cache
         if use_cache:
-            try:
-                with open(cache_path, 'w', encoding='utf-8') as f:
-                    f.write(rss_feed)
-                logger.debug(f"rss_cache_saved: channel {channel}, cache_file {cache_path}")
-            except Exception as e:
-                logger.error(f"cache_write_error: channel {channel}, error {str(e)}")
+            write_cache(channel, rss_feed, 'rss')
         
         total_elapsed = time.time() - total_start_time
         logger.info(f"rss_total_generation_timing: channel {channel}, total time {total_elapsed:.3f} seconds")
@@ -488,7 +437,7 @@ async def generate_channel_rss(channel: str | int,
         logger.error(f"generate_channel_rss: channel {channel}, error {str(e)}")
         raise
 
-async def _reply_enrichment(client: Client, messages: list[Message]) -> list[Message]:
+async def _reply_enrichment(client: Client, messages: list[Message]) -> list[Message]: #TODO: почему это тут?
     """
     Enrich messages with reply to messages
     """
@@ -527,32 +476,6 @@ async def generate_channel_html(channel: str | int,
     Returns:
         HTML feed as string
     """
-    # Use different directory for html cache
-    cache_dir = Path(Config.get('cache_dir', './data/html-cache'))
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Create a unique filename for the html cache
-    if isinstance(channel, int):
-        filename = f"channel_{channel}.html"
-    else:
-        # Use hash for channel names with special characters
-        if any(c in channel for c in '/<>:"|?*\\'):
-            channel_hash = hashlib.md5(channel.encode()).hexdigest()
-            filename = f"channel_{channel_hash}.html"
-        else:
-            filename = f"channel_{channel}.html"
-    
-    cache_path = cache_dir / filename
-    
-    # Check if we can use cached version
-    if use_cache and _is_cache_valid(cache_path, cache_max_age_hours):
-        try:
-            logger.debug(f"using_cached_html: channel {channel}, cache_file {cache_path}")
-            with open(cache_path, 'r', encoding='utf-8') as f:
-                return f.read()
-        except Exception as e:
-            logger.error(f"html_cache_read_error: channel {channel}, error {str(e)}")
-            # If reading cache fails, continue to generate new content
     
     total_start_time = time.time()
     
@@ -627,14 +550,6 @@ async def generate_channel_html(channel: str | int,
         html_gen_elapsed = time.time() - html_gen_start_time
         logger.info(f"html_generation_timing: channel {channel}, HTML generated in {html_gen_elapsed:.3f} seconds")
         
-        # Save to cache
-        if use_cache:
-            try:
-                with open(cache_path, 'w', encoding='utf-8') as f:
-                    f.write(html_content)
-                logger.debug(f"html_cache_saved: channel {channel}, cache_file {cache_path}")
-            except Exception as e:
-                logger.error(f"html_cache_write_error: channel {channel}, error {str(e)}")
         
         total_elapsed = time.time() - total_start_time
         logger.info(f"html_total_generation_timing: channel {channel}, total time {total_elapsed:.3f} seconds")

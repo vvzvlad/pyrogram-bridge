@@ -60,4 +60,7 @@ def get_settings() -> dict[str, Any]:
         "time_based_merge": os.getenv("TIME_BASED_MERGE", "False").strip() in ["True", "true"],
         "show_bridge_link": os.getenv("SHOW_BRIDGE_LINK", "False").strip() in ["True", "true"],
         "show_post_flags": os.getenv("SHOW_POST_FLAGS", "False").strip() in ["True", "true"],
+        "rss_cache_update_interval": int(os.getenv("RSS_CACHE_UPDATE_INTERVAL", "3600")),
+        "rss_cache_update_delay": int(os.getenv("RSS_CACHE_UPDATE_DELAY", "60")),
+        "rss_cache_max_age_days": int(os.getenv("RSS_CACHE_MAX_AGE_DAYS", "30")),
     } 
