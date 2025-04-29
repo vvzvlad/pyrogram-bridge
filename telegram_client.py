@@ -13,6 +13,7 @@ import os
 import asyncio
 import sys
 import signal
+import time
 import uvloop
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
@@ -34,6 +35,9 @@ class TelegramClient:
         )
         self.disconnect_count = 0
         self.max_disconnects = 3
+        self.last_disconnect_time = 0
+        self.disconnect_window = 60  # Reset counter if disconnects are more than 60 seconds apart
+        self.reconnect_delay = 5  # Wait 5 seconds before reconnecting
         self._setup_connection_handlers()
 
     def _ensure_session_directory(self):
@@ -49,15 +53,38 @@ class TelegramClient:
         self.client.add_handler(DisconnectHandler(self._on_disconnect))
         logger.info("connection_handlers: connection handlers set up")
 
-
     async def _on_disconnect(self, _client):
-        """Handles disconnection from Telegram servers"""
+        """Handles disconnection from Telegram servers with auto-reconnect"""
+        current_time = time.time()
+        
+        # Reset counter if disconnects are far apart
+        if self.last_disconnect_time > 0 and current_time - self.last_disconnect_time > self.disconnect_window:
+            logger.info(f"connection_handler: resetting disconnect counter (last disconnect was {current_time - self.last_disconnect_time:.1f}s ago)")
+            self.disconnect_count = 0
+            
+        self.last_disconnect_time = current_time
         self.disconnect_count += 1
+        
         logger.warning(f"connection_handler: connection lost (#{self.disconnect_count})")
         
         if self.disconnect_count >= self.max_disconnects:
-            logger.critical(f"connection_handler: reached disconnect limit ({self.max_disconnects})")
+            logger.critical(f"connection_handler: reached disconnect limit ({self.max_disconnects}) within {self.disconnect_window}s window, terminating")
+            # Explicitly stop the client before exit
+            if self.client.is_connected:
+                await self.client.stop()
+            # Exit with error code
             sys.exit(1)
+            
+        # Attempt to reconnect only if we haven't reached max_disconnects
+        logger.info(f"connection_handler: attempting reconnection in {self.reconnect_delay}s...")
+        await asyncio.sleep(self.reconnect_delay)
+        
+        try:
+            if not self.client.is_connected:
+                await self.client.start()
+                logger.info("connection_handler: reconnection successful")
+        except Exception as e:
+            logger.error(f"connection_handler: reconnection failed: {str(e)}")
 
     async def start(self):
         try:
