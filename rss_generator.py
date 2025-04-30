@@ -14,6 +14,7 @@ import re
 import time
 import os
 import hashlib
+import asyncio
 from pathlib import Path
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -28,6 +29,9 @@ from rss_cache import read_cache, write_cache
 Config = get_settings()
 
 logger = logging.getLogger(__name__)
+
+# Семафор для ограничения параллельных запросов к Telegram API при получении постов
+POSTS_REQUEST_SEMAPHORE = asyncio.Semaphore(3)
 
 async def _create_time_based_media_groups(messages: list[Message], merge_seconds: int = 5) -> list[Message]:
     """
@@ -379,8 +383,9 @@ async def generate_channel_rss(channel: str | int,
         messages_start_time = time.time()
         messages = []
         try:
-            async for message in post_parser.client.get_chat_history(channel, limit=limit*2):
-                messages.append(message)
+            async with POSTS_REQUEST_SEMAPHORE:
+                async for message in post_parser.client.get_chat_history(channel, limit=limit*2):
+                    messages.append(message)
         except Exception as e:
             logger.error(f"Error during get_chat_history for channel '{channel}' (type: {type(channel)}): {str(e)}", exc_info=True) # Log error specifically for get_chat_history
             raise ValueError(f"Failed to get chat history for {channel}: {str(e)}") from e # Raise a more specific error
