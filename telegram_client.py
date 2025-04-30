@@ -44,14 +44,7 @@ class TelegramClient:
 
     def _setup_connection_handlers(self):
         """Sets up connection/disconnection handlers"""
-        self.client.add_handler(DisconnectHandler(self._on_disconnect))
         logger.info("connection_handlers: connection handlers set up")
-
-    async def _on_disconnect(self, _client):
-        """Handles disconnection by just exiting the program"""
-        logger.error("connection_handler: connection lost, terminating program")
-        # Force exit with error code
-        sys.exit(1)
 
     async def start(self):
         try:
