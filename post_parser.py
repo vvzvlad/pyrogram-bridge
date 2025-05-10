@@ -976,6 +976,46 @@ class PostParser:
                     file_data['post_id'] = message.id
                     file_data['added'] = datetime.now().timestamp()
 
+                    # For stories, we need to save with original story ID and channel
+                    if message.media == MessageMediaType.STORY and hasattr(message, "story"):
+                        story = message.story
+                        if story and hasattr(story, "video") and story.video:
+                            story_channel = getattr(story.sender_chat, "username", None)
+                            if story_channel:
+                                # Create a separate entry for the story
+                                story_file_data = file_data.copy()
+                                story_file_data['channel'] = story_channel
+                                story_file_data['post_id'] = story.id
+                                
+                                file_path = os.path.join(os.path.abspath("./data"), 'media_file_ids.json')
+                                try:
+                                    existing_data = []
+                                    if os.path.exists(file_path):
+                                        with open(file_path, 'r', encoding='utf-8') as f:
+                                            existing_data = json.load(f)
+                                    
+                                    # Check if story file already exists by all three fields
+                                    found = False
+                                    for item in existing_data:
+                                        if (item.get('channel') == story_file_data['channel'] and 
+                                                item.get('post_id') == story_file_data['post_id'] and 
+                                                item.get('file_unique_id') == story_file_data['file_unique_id']):
+                                            item['added'] = datetime.now().timestamp()
+                                            found = True
+                                            break
+                                    
+                                    # Add new entry if not found
+                                    if not found:
+                                        existing_data.append(story_file_data)
+                                        logger.debug(f"Saved story media file: {story_channel}/{story.id}/{story_file_data['file_unique_id']}")
+                                    
+                                    with open(file_path, 'w', encoding='utf-8') as f:
+                                        json.dump(existing_data, f, ensure_ascii=False, indent=2)
+
+                                except Exception as e:
+                                    logger.error(f"story_file_id_save_error: error writing to {file_path}, error {str(e)}")
+
+                    # Standard file saving process
                     file_path = os.path.join(os.path.abspath("./data"), 'media_file_ids.json')
                     try:
                         existing_data = []
