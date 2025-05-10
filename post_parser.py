@@ -198,12 +198,12 @@ class PostParser:
                 return "📎 Document"
             if message.media == MessageMediaType.PHOTO:       return "📷 Photo"
             if message.media == MessageMediaType.VIDEO:       return "🎥 Video"
+            if message.media == MessageMediaType.STORY:       return "📱 Story"
             if message.media == MessageMediaType.ANIMATION:   return "🎞 GIF"
             if message.media == MessageMediaType.AUDIO:       return "🎵 Audio"
             if message.media == MessageMediaType.VOICE:       return "🎤 Voice"
             if message.media == MessageMediaType.VIDEO_NOTE:  return "📱 Video circle"
             if message.media == MessageMediaType.STICKER:     return "🎯 Sticker"
-            if message.media == MessageMediaType.STORY:       return "📱 Story"
 
         # Web pages (if no text or media title)
         if message.web_page:
@@ -327,9 +327,13 @@ class PostParser:
             len((message.text or message.caption or '').strip()) <= 200):
             flags.append("video")
             
-        # Add flag "story" if the message contains a story
+        # Add flag "story" if the message is a story
         if message.media == MessageMediaType.STORY:
             flags.append("story")
+            if message.story and message.story.media == MessageMediaType.VIDEO:
+                flags.append("video")
+            elif message.story and message.story.media == MessageMediaType.PHOTO:
+                flags.append("photo")
 
         # Add flag "audio" if the message media is AUDIO
         if (message.media in [MessageMediaType.AUDIO, MessageMediaType.VOICE] and 
@@ -638,25 +642,6 @@ class PostParser:
         if message.media and message.media != "MessageMediaType.POLL":
             content_media.append(f'<div class="message-media">')
 
-            # Handle stories
-            if message.media == MessageMediaType.STORY and hasattr(message, "story"):
-                story = message.story
-                if story and hasattr(story, "video") and story.video:
-                    story_file_id = story.video.file_unique_id
-                    if story_file_id:
-                        sender_username = getattr(story.sender_chat, "username", None)
-                        channel_username = sender_username or self.get_channel_username(message)
-                        if channel_username:
-                            file = f"{channel_username}/{story.id}/{story_file_id}"
-                            digest = generate_media_digest(file)
-                            url = f"{base_url}/media/{file}/{digest}"
-                            content_media.append(f'<video controls src="{url}" style="max-width:100%; width:auto;'
-                                                    f'height:auto; max-height:400px;"></video>')
-                            content_media.append(f'<div style="font-size:0.9em; color:#666;">📱 Story from @{channel_username}</div>')
-                            logger.debug(f"Collected story video file: {channel_username}/{story.id}/{story_file_id}")
-                    content_media.append('</div>')
-                    return '\n'.join(content_media)
-
             file_unique_id = self._get_file_unique_id(message)
             if file_unique_id is None:
                 logger.debug(f"File unique id not found for message {message.id}")
@@ -697,6 +682,14 @@ class PostParser:
                 elif message.media == MessageMediaType.VIDEO_NOTE:
                     content_media.append(f'<video controls src="{url}" style="max-width:100%; width:auto;'
                                         f'height:auto; max-height:400px;"></video>')
+                elif message.media == MessageMediaType.STORY:
+                    if hasattr(message, 'story') and message.story:
+                        if message.story.media == MessageMediaType.VIDEO and hasattr(message.story, 'video'):
+                            content_media.append(f'<video controls src="{url}" style="max-width:100%; width:auto;'
+                                                f'height:auto; max-height:400px;"></video>')
+                        elif message.story.media == MessageMediaType.PHOTO and hasattr(message.story, 'photo'):
+                            content_media.append(f'<img src="{url}" style="max-width:100%; width:auto; height:auto;'
+                                                f'max-height:400px; object-fit:contain;">')
                 elif message.media == MessageMediaType.AUDIO:
                     mime_type = getattr(message.audio, 'mime_type', 'audio/mpeg')
                     content_media.append(f'<audio controls style="width:100%; max-width:400px;">'
@@ -925,10 +918,9 @@ class PostParser:
                 MessageMediaType.VIDEO_NOTE:    lambda m: m.video_note.file_unique_id,
                 MessageMediaType.ANIMATION:     lambda m: m.animation.file_unique_id,
                 MessageMediaType.STICKER:       lambda m: m.sticker.file_unique_id,
-                MessageMediaType.STORY:         lambda m: m.story.video.file_unique_id if m.story and 
-                                                            hasattr(m.story, "video") else None,
-                MessageMediaType.WEB_PAGE:      lambda m: m.web_page.photo.file_unique_id if m.web_page and 
-                                                            m.web_page.photo else None
+                MessageMediaType.STORY:         lambda m: (m.story.video.file_unique_id if m.story and m.story.media == MessageMediaType.VIDEO and hasattr(m.story, 'video') and m.story.video else 
+                                                    (m.story.photo.file_unique_id if m.story and m.story.media == MessageMediaType.PHOTO and hasattr(m.story, 'photo') and m.story.photo else None)),
+                MessageMediaType.WEB_PAGE:      lambda m: m.web_page.photo.file_unique_id if m.web_page and m.web_page.photo else None
             }
             
             if message.media in media_mapping:
@@ -966,8 +958,10 @@ class PostParser:
                 elif message.video_note:    file_data['file_unique_id'] = message.video_note.file_unique_id
                 elif message.animation:     file_data['file_unique_id'] = message.animation.file_unique_id
                 elif message.sticker:       file_data['file_unique_id'] = message.sticker.file_unique_id
-                elif message.story and hasattr(message.story, "video") and message.story.video:
+                elif message.story and message.story.media == MessageMediaType.VIDEO and hasattr(message.story, 'video') and message.story.video: 
                     file_data['file_unique_id'] = message.story.video.file_unique_id
+                elif message.story and message.story.media == MessageMediaType.PHOTO and hasattr(message.story, 'photo') and message.story.photo: 
+                    file_data['file_unique_id'] = message.story.photo.file_unique_id
                 elif message.web_page and message.web_page.photo: 
                     file_data['file_unique_id'] = message.web_page.photo.file_unique_id
 
@@ -976,46 +970,6 @@ class PostParser:
                     file_data['post_id'] = message.id
                     file_data['added'] = datetime.now().timestamp()
 
-                    # For stories, we need to save with original story ID and channel
-                    if message.media == MessageMediaType.STORY and hasattr(message, "story"):
-                        story = message.story
-                        if story and hasattr(story, "video") and story.video:
-                            story_channel = getattr(story.sender_chat, "username", None)
-                            if story_channel:
-                                # Create a separate entry for the story
-                                story_file_data = file_data.copy()
-                                story_file_data['channel'] = story_channel
-                                story_file_data['post_id'] = story.id
-                                
-                                file_path = os.path.join(os.path.abspath("./data"), 'media_file_ids.json')
-                                try:
-                                    existing_data = []
-                                    if os.path.exists(file_path):
-                                        with open(file_path, 'r', encoding='utf-8') as f:
-                                            existing_data = json.load(f)
-                                    
-                                    # Check if story file already exists by all three fields
-                                    found = False
-                                    for item in existing_data:
-                                        if (item.get('channel') == story_file_data['channel'] and 
-                                                item.get('post_id') == story_file_data['post_id'] and 
-                                                item.get('file_unique_id') == story_file_data['file_unique_id']):
-                                            item['added'] = datetime.now().timestamp()
-                                            found = True
-                                            break
-                                    
-                                    # Add new entry if not found
-                                    if not found:
-                                        existing_data.append(story_file_data)
-                                        logger.debug(f"Saved story media file: {story_channel}/{story.id}/{story_file_data['file_unique_id']}")
-                                    
-                                    with open(file_path, 'w', encoding='utf-8') as f:
-                                        json.dump(existing_data, f, ensure_ascii=False, indent=2)
-
-                                except Exception as e:
-                                    logger.error(f"story_file_id_save_error: error writing to {file_path}, error {str(e)}")
-
-                    # Standard file saving process
                     file_path = os.path.join(os.path.abspath("./data"), 'media_file_ids.json')
                     try:
                         existing_data = []
