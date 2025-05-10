@@ -203,6 +203,7 @@ class PostParser:
             if message.media == MessageMediaType.VOICE:       return "🎤 Voice"
             if message.media == MessageMediaType.VIDEO_NOTE:  return "📱 Video circle"
             if message.media == MessageMediaType.STICKER:     return "🎯 Sticker"
+            if message.media == MessageMediaType.STORY:       return "📱 Story"
 
         # Web pages (if no text or media title)
         if message.web_page:
@@ -325,6 +326,10 @@ class PostParser:
         if (message.media in [MessageMediaType.VIDEO, MessageMediaType.ANIMATION, MessageMediaType.VIDEO_NOTE] and 
             len((message.text or message.caption or '').strip()) <= 200):
             flags.append("video")
+            
+        # Add flag "story" if the message contains a story
+        if message.media == MessageMediaType.STORY:
+            flags.append("story")
 
         # Add flag "audio" if the message media is AUDIO
         if (message.media in [MessageMediaType.AUDIO, MessageMediaType.VOICE] and 
@@ -633,6 +638,25 @@ class PostParser:
         if message.media and message.media != "MessageMediaType.POLL":
             content_media.append(f'<div class="message-media">')
 
+            # Handle stories
+            if message.media == MessageMediaType.STORY and hasattr(message, "story"):
+                story = message.story
+                if story and hasattr(story, "video") and story.video:
+                    story_file_id = story.video.file_unique_id
+                    if story_file_id:
+                        sender_username = getattr(story.sender_chat, "username", None)
+                        channel_username = sender_username or self.get_channel_username(message)
+                        if channel_username:
+                            file = f"{channel_username}/{story.id}/{story_file_id}"
+                            digest = generate_media_digest(file)
+                            url = f"{base_url}/media/{file}/{digest}"
+                            content_media.append(f'<video controls src="{url}" style="max-width:100%; width:auto;'
+                                                    f'height:auto; max-height:400px;"></video>')
+                            content_media.append(f'<div style="font-size:0.9em; color:#666;">📱 Story from @{channel_username}</div>')
+                            logger.debug(f"Collected story video file: {channel_username}/{story.id}/{story_file_id}")
+                    content_media.append('</div>')
+                    return '\n'.join(content_media)
+
             file_unique_id = self._get_file_unique_id(message)
             if file_unique_id is None:
                 logger.debug(f"File unique id not found for message {message.id}")
@@ -901,7 +925,10 @@ class PostParser:
                 MessageMediaType.VIDEO_NOTE:    lambda m: m.video_note.file_unique_id,
                 MessageMediaType.ANIMATION:     lambda m: m.animation.file_unique_id,
                 MessageMediaType.STICKER:       lambda m: m.sticker.file_unique_id,
-                MessageMediaType.WEB_PAGE:      lambda m: m.web_page.photo.file_unique_id if m.web_page and m.web_page.photo else None
+                MessageMediaType.STORY:         lambda m: m.story.video.file_unique_id if m.story and 
+                                                            hasattr(m.story, "video") else None,
+                MessageMediaType.WEB_PAGE:      lambda m: m.web_page.photo.file_unique_id if m.web_page and 
+                                                            m.web_page.photo else None
             }
             
             if message.media in media_mapping:
@@ -939,6 +966,8 @@ class PostParser:
                 elif message.video_note:    file_data['file_unique_id'] = message.video_note.file_unique_id
                 elif message.animation:     file_data['file_unique_id'] = message.animation.file_unique_id
                 elif message.sticker:       file_data['file_unique_id'] = message.sticker.file_unique_id
+                elif message.story and hasattr(message.story, "video") and message.story.video:
+                    file_data['file_unique_id'] = message.story.video.file_unique_id
                 elif message.web_page and message.web_page.photo: 
                     file_data['file_unique_id'] = message.web_page.photo.file_unique_id
 
