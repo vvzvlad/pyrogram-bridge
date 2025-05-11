@@ -198,7 +198,6 @@ class PostParser:
                 return "📎 Document"
             if message.media == MessageMediaType.PHOTO:       return "📷 Photo"
             if message.media == MessageMediaType.VIDEO:       return "🎥 Video"
-            if message.media == MessageMediaType.STORY:       return "📱 Story"
             if message.media == MessageMediaType.ANIMATION:   return "🎞 GIF"
             if message.media == MessageMediaType.AUDIO:       return "🎵 Audio"
             if message.media == MessageMediaType.VOICE:       return "🎤 Voice"
@@ -326,14 +325,6 @@ class PostParser:
         if (message.media in [MessageMediaType.VIDEO, MessageMediaType.ANIMATION, MessageMediaType.VIDEO_NOTE] and 
             len((message.text or message.caption or '').strip()) <= 200):
             flags.append("video")
-            
-        # Add flag "story" if the message is a story
-        if message.media == MessageMediaType.STORY:
-            flags.append("story")
-            if message.story and message.story.media == MessageMediaType.VIDEO:
-                flags.append("video")
-            elif message.story and message.story.media == MessageMediaType.PHOTO:
-                flags.append("photo")
 
         # Add flag "audio" if the message media is AUDIO
         if (message.media in [MessageMediaType.AUDIO, MessageMediaType.VOICE] and 
@@ -646,19 +637,12 @@ class PostParser:
             if file_unique_id is None:
                 logger.debug(f"File unique id not found for message {message.id}")
             elif file_unique_id:
-                # For story media, use original story sender channel, not the repost channel
-                if message.media == MessageMediaType.STORY and hasattr(message, 'story') and hasattr(message.story, 'sender_chat'):
-                    story_channel = self._get_story_channel_username(message.story)
-                    story_id = getattr(message.story, 'id', 0)
-                    file = f"{story_channel}/{story_id}/{file_unique_id}"
-                else:
-                    channel_username = self.get_channel_username(message)
-                    file = f"{channel_username}/{message.id}/{file_unique_id}"
-                
+                channel_username = self.get_channel_username(message)
+                file = f"{channel_username}/{message.id}/{file_unique_id}"
                 digest = generate_media_digest(file)
                 url = f"{base_url}/media/{file}/{digest}"
 
-                logger.debug(f"Collected media file: {file}")
+                logger.debug(f"Collected media file: {channel_username}/{message.id}/{file_unique_id}")
                 
                 # Check if document is a PDF file
                 if (message.media == MessageMediaType.DOCUMENT and
@@ -689,14 +673,6 @@ class PostParser:
                 elif message.media == MessageMediaType.VIDEO_NOTE:
                     content_media.append(f'<video controls src="{url}" style="max-width:100%; width:auto;'
                                         f'height:auto; max-height:400px;"></video>')
-                elif message.media == MessageMediaType.STORY:
-                    if hasattr(message, 'story') and message.story:
-                        if message.story.media == MessageMediaType.VIDEO and hasattr(message.story, 'video'):
-                            content_media.append(f'<video controls src="{url}" style="max-width:100%; width:auto;'
-                                                f'height:auto; max-height:400px;"></video>')
-                        elif message.story.media == MessageMediaType.PHOTO and hasattr(message.story, 'photo'):
-                            content_media.append(f'<img src="{url}" style="max-width:100%; width:auto; height:auto;'
-                                                f'max-height:400px; object-fit:contain;">')
                 elif message.media == MessageMediaType.AUDIO:
                     mime_type = getattr(message.audio, 'mime_type', 'audio/mpeg')
                     content_media.append(f'<audio controls style="width:100%; max-width:400px;">'
@@ -925,8 +901,6 @@ class PostParser:
                 MessageMediaType.VIDEO_NOTE:    lambda m: m.video_note.file_unique_id,
                 MessageMediaType.ANIMATION:     lambda m: m.animation.file_unique_id,
                 MessageMediaType.STICKER:       lambda m: m.sticker.file_unique_id,
-                MessageMediaType.STORY:         lambda m: (m.story.video.file_unique_id if m.story and m.story.media == MessageMediaType.VIDEO and hasattr(m.story, 'video') and m.story.video else 
-                                                    (m.story.photo.file_unique_id if m.story and m.story.media == MessageMediaType.PHOTO and hasattr(m.story, 'photo') and m.story.photo else None)),
                 MessageMediaType.WEB_PAGE:      lambda m: m.web_page.photo.file_unique_id if m.web_page and m.web_page.photo else None
             }
             
@@ -965,32 +939,12 @@ class PostParser:
                 elif message.video_note:    file_data['file_unique_id'] = message.video_note.file_unique_id
                 elif message.animation:     file_data['file_unique_id'] = message.animation.file_unique_id
                 elif message.sticker:       file_data['file_unique_id'] = message.sticker.file_unique_id
-                elif message.story and message.story.media == MessageMediaType.VIDEO and hasattr(message.story, 'video') and message.story.video: 
-                    file_data['file_unique_id'] = message.story.video.file_unique_id
-                    # Use story sender channel instead of the repost channel
-                    if hasattr(message.story, 'sender_chat'):
-                        story_channel = self._get_story_channel_username(message.story)
-                        if story_channel:
-                            file_data['channel'] = story_channel
-                            file_data['post_id'] = getattr(message.story, 'id', 0)
-                            channel_username = story_channel  # Override the channel for the following check
-                elif message.story and message.story.media == MessageMediaType.PHOTO and hasattr(message.story, 'photo') and message.story.photo: 
-                    file_data['file_unique_id'] = message.story.photo.file_unique_id
-                    # Use story sender channel instead of the repost channel
-                    if hasattr(message.story, 'sender_chat'):
-                        story_channel = self._get_story_channel_username(message.story)
-                        if story_channel:
-                            file_data['channel'] = story_channel
-                            file_data['post_id'] = getattr(message.story, 'id', 0)
-                            channel_username = story_channel  # Override the channel for the following check
                 elif message.web_page and message.web_page.photo: 
                     file_data['file_unique_id'] = message.web_page.photo.file_unique_id
 
-                if file_data['file_unique_id'] and not file_data['channel']:  # Only set if not already set (for story)
+                if file_data['file_unique_id']:
                     file_data['channel'] = channel_username
                     file_data['post_id'] = message.id
-                
-                if file_data['file_unique_id'] and file_data['channel'] and file_data['post_id']:
                     file_data['added'] = datetime.now().timestamp()
 
                     file_path = os.path.join(os.path.abspath("./data"), 'media_file_ids.json')
@@ -1022,24 +976,6 @@ class PostParser:
 
         except Exception as e:
             logger.error(f"file_id_collection_error: message_id {message.id}, error {str(e)}")
-
-    def _get_story_channel_username(self, story) -> Union[str, None]:
-        """Extract channel username or ID from story object"""
-        if sender_chat := getattr(story, 'sender_chat', None):
-            # First try to get username
-            if hasattr(sender_chat, 'usernames') and sender_chat.usernames:
-                active_usernames = [u.username for u in sender_chat.usernames if u.active]
-                if active_usernames:
-                    return active_usernames[0]
-            if hasattr(sender_chat, 'username') and sender_chat.username:
-                return sender_chat.username
-            
-            # Return numeric ID only if no username found
-            if hasattr(sender_chat, 'id') and isinstance(sender_chat.id, int) and str(sender_chat.id).startswith('-100'):
-                return str(sender_chat.id)
-        
-        logger.error(f"story_channel_username_error: no username or valid ID found for story")
-        return None
 
     def get_channel_username(self, message: Message) -> Union[str, None]:
         """Extract channel username or ID from message"""

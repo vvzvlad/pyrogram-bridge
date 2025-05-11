@@ -95,6 +95,10 @@ async def _create_messages_groups(messages: list[Message]) -> list[list[Message]
     # First pass - collect messages and organize into processing groups
     for message in messages:
         try:
+            # Skip story messages
+            if message.media == "MessageMediaType.STORY" or hasattr(message, "story"):
+                continue
+                
             # Skip service messages about pinned posts and new chat photos
             if message.service:
                 if 'PINNED_MESSAGE'         in str(message.service): continue
