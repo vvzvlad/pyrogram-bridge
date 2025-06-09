@@ -333,10 +333,12 @@ async def generate_channel_rss(channel: str | int,
         
         channel_info_start_time = time.time()
         try:
+            from tg_cache import cached_get_chat
+            
             channel  = post_parser.channel_name_prepare(channel)
-            channel_info = await post_parser.client.get_chat(channel)
+            channel_info = await cached_get_chat(post_parser.client, channel)
             channel_title = channel_info.title or f"Telegram: {channel}"
-            channel_username = post_parser.get_channel_username(channel_info)
+            channel_username = channel_info.username or (str(channel_info.id) if channel_info.id and str(channel_info.id).startswith('-100') else None)
             if not channel_username:
                 # Use prepared channel (which could be int) for error feed if username fails
                 logger.warning(f"Could not get username for channel {channel}, using identifier for error feed.")
@@ -468,10 +470,12 @@ async def generate_channel_html(channel: str | int,
         
         channel_info_start_time = time.time()
         try:
+            from tg_cache import cached_get_chat
+            
             channel = post_parser.channel_name_prepare(channel)
             logger.debug(f"Prepared channel identifier for HTML: {channel} (type: {type(channel)})") # Log prepared channel
-            channel_info = await post_parser.client.get_chat(channel)
-            channel_username = post_parser.get_channel_username(channel_info)
+            channel_info = await cached_get_chat(post_parser.client, channel)
+            channel_username = channel_info.username or (str(channel_info.id) if channel_info.id and str(channel_info.id).startswith('-100') else None)
             if not channel_username:
                 logger.warning(f"Could not get username for channel {channel} in HTML generation, returning error feed structure (as string). NOTE: This should ideally return HTML error page.")
                 # For HTML, returning an error feed string might not be ideal. Consider returning a dedicated HTML error page.

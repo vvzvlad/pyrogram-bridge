@@ -1,8 +1,8 @@
 fastapi==0.115.8
 uvicorn==0.34.0
 python-multipart==0.0.20
-#Kurigram
-git+https://github.com/KurimuzonAkuma/pyrogram.git@dev#egg=Kurigram
+Kurigram
+#git+https://github.com/KurimuzonAkuma/pyrogram.git@dev#egg=Kurigram
 TgCrypto
 uvloop
 pillow==11.1.0
