@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+# flake8: noqa
+# pylint: disable=broad-exception-raised, raise-missing-from, too-many-arguments, redefined-outer-name
+# pylint: disable=multiple-statements, logging-fstring-interpolation, trailing-whitespace, line-too-long
+# pylint: disable=broad-exception-caught, missing-function-docstring, missing-class-docstring
+# pylint: disable=f-string-without-interpolation
+# pylance: disable=reportMissingImports, reportMissingModuleSource
+
+
 import os
 import json
 import pickle
@@ -20,7 +28,7 @@ def _get_cache_file_path(channel_id: Union[str, int]) -> str:
     """Возвращает путь к файлу кеша для канала"""
     if not os.path.exists(CACHE_DIR):
         os.makedirs(CACHE_DIR, exist_ok=True)
-        logger.debug(f"cache_dir_created: path {CACHE_DIR}")
+        logger.info(f"cache_dir_created: path {CACHE_DIR}")
     # Преобразуем в строку для унификации
     channel_id_str = str(channel_id)
     # Заменяем потенциально проблемные символы
@@ -41,7 +49,7 @@ def _save_to_cache(channel_id: Union[str, int], chat_data: Chat) -> None:
         with open(cache_file, 'wb') as f:
             pickle.dump(cache_data, f)
         
-        logger.debug(f"chat_cache_saved: channel {channel_id}, file {cache_file}")
+        logger.info(f"chat_cache_saved: channel {channel_id}, file {cache_file}")
     except Exception as e:
         logger.error(f"cache_save_error: channel {channel_id}, error {str(e)}")
 
@@ -60,7 +68,7 @@ def _get_from_cache(channel_id: Union[str, int], max_age_seconds: int = 86400) -
         cache_file = _get_cache_file_path(channel_id)
         
         if not os.path.exists(cache_file):
-            logger.debug(f"chat_cache_miss: channel {channel_id}, cache file not found")
+            logger.info(f"chat_cache_miss: channel {channel_id}, cache file not found")
             return None
         
         with open(cache_file, 'rb') as f:
@@ -69,12 +77,12 @@ def _get_from_cache(channel_id: Union[str, int], max_age_seconds: int = 86400) -
         # Проверяем возраст кеша
         cache_age = time.time() - cache_data['timestamp']
         if cache_age > max_age_seconds:
-            logger.debug(f"chat_cache_expired: channel {channel_id}, age {cache_age:.1f}s > max {max_age_seconds}s")
+            logger.info(f"chat_cache_expired: channel {channel_id}, age {cache_age:.1f}s > max {max_age_seconds}s")
             return None
         
         # Восстанавливаем объект Chat из пикла
         chat_data = pickle.loads(cache_data['chat_data'])
-        logger.debug(f"chat_cache_hit: channel {channel_id}, age {cache_age:.1f}s")
+        logger.info(f"chat_cache_hit: channel {channel_id}, age {cache_age:.1f}s")
         return chat_data
     
     except Exception as e:
@@ -111,7 +119,7 @@ async def cached_get_chat(client: Client, channel_id: Union[str, int], cache_ttl
     
     # Если в кеше нет или кеш устарел, запрашиваем через API
     try:
-        logger.debug(f"chat_cache_request: fetching fresh data for channel {channel_id}")
+        logger.info(f"chat_cache_request: fetching fresh data for channel {channel_id}")
         chat_data = await client.get_chat(channel_id)
         
         # Сохраняем в кеш
