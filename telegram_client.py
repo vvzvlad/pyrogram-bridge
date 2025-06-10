@@ -14,6 +14,7 @@ import asyncio
 import sys
 import signal
 import uvloop
+import time
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
 from pyrogram import Client
@@ -78,6 +79,11 @@ class TelegramClient:
             loop = asyncio.get_event_loop()
             if loop.is_running():
                 loop.create_task(self.stop())
+            
+            # Добавляем задержку, чтобы предыдущий процесс успел завершиться
+            # и освободить порт и другие ресурсы
+            logger.info("connection_handler: waiting for resources to be freed before restart")
+            time.sleep(3)
             
             # Use os.execv to restart the process with the same arguments
             os.execv(sys.executable, [sys.executable] + sys.argv)
