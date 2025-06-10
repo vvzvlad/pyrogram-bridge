@@ -22,26 +22,26 @@ from pyrogram.types import Chat, Message
 
 logger = logging.getLogger(__name__)
 
-# Путь к директории кеша
+# Path to cache directory
 CACHE_DIR = os.path.join('data', 'tgcache')
 
 def _get_history_cache_file_path(channel_id: Union[str, int]) -> str:
-    """Возвращает путь к файлу кеша истории сообщений для канала"""
+    """Returns path to the message history cache file for the channel"""
     if not os.path.exists(CACHE_DIR):
         os.makedirs(CACHE_DIR, exist_ok=True)
         logger.info(f"cache_dir_created: path {CACHE_DIR}")
-    # Преобразуем в строку для унификации
+    # Convert to string for uniformity
     channel_id_str = str(channel_id)
-    # Заменяем потенциально проблемные символы
+    # Replace potentially problematic characters
     safe_filename = channel_id_str.replace('/', '_').replace('\\', '_')
     return os.path.join(CACHE_DIR, f"{safe_filename}.cache")
 
 def _save_history_to_cache(channel_id: Union[str, int], messages: List[Message], limit: int) -> None:
-    """Сохраняет историю сообщений в кеш"""
+    """Saves message history to cache"""
     try:
         cache_file = _get_history_cache_file_path(channel_id)
         
-        # Создаем метаданные кеша
+        # Create cache metadata
         cache_data = {
             'timestamp': time.time(),
             'limit': limit,
@@ -57,15 +57,15 @@ def _save_history_to_cache(channel_id: Union[str, int], messages: List[Message],
 
 def _get_history_from_cache(channel_id: Union[str, int], limit: int, max_age_hours: int = 8) -> Optional[List[Message]]:
     """
-    Получает историю сообщений из кеша если они не старше указанного возраста и соответствуют лимиту
+    Retrieves message history from cache if not older than specified age and matches the limit
     
     Args:
-        channel_id: ID или username канала
-        limit: Требуемый лимит сообщений
-        max_age_hours: Максимальный возраст кеша в часах (по умолчанию 8 час)
+        channel_id: Channel ID or username
+        limit: Required message limit
+        max_age_hours: Maximum cache age in hours (default 8 hours)
         
     Returns:
-        Список сообщений или None если кеш не найден, устарел или лимит не соответствует
+        List of messages or None if cache not found, expired or limit doesn't match
     """
     try:
         cache_file = _get_history_cache_file_path(channel_id)
@@ -77,9 +77,9 @@ def _get_history_from_cache(channel_id: Union[str, int], limit: int, max_age_hou
         with open(cache_file, 'rb') as f:
             cache_data = pickle.load(f)
         
-        # Проверяем возраст кеша с добавлением случайности
+        # Check cache age with randomization
         cache_age = time.time() - cache_data['timestamp']
-        # Добавляем случайность до 20% от max_age_seconds
+        # Add randomness up to 20% of max_age_seconds
         random_factor = 1 - random.uniform(0, 0.2)
         adjusted_max_age = max_age_hours * 3600 * random_factor
         
@@ -87,52 +87,47 @@ def _get_history_from_cache(channel_id: Union[str, int], limit: int, max_age_hou
             logger.info(f"history_cache_expired: channel {channel_id}, limit {limit}, age {cache_age:.1f}s > adjusted max {adjusted_max_age:.1f}s (random factor: {random_factor:.2f})")
             return None
         
-        # Проверяем соответствие лимита
+        # Check if limit matches
         cached_limit = cache_data.get('limit', 0)
         if cached_limit != limit:
             logger.info(f"history_cache_limit_mismatch: channel {channel_id}, cached limit {cached_limit}, requested limit {limit}")
             return None
         
-        # Восстанавливаем список сообщений из пикла
+        # Restore message list from pickle
         messages = pickle.loads(cache_data['messages'])
         logger.info(f"history_cache_hit: channel {channel_id}, limit {limit}, messages {len(messages)}, age {cache_age:.1f}s")
         return messages
     
     except Exception as e:
         logger.error(f"history_cache_read_error: channel {channel_id}, limit {limit}, error {str(e)}")
-        # В случае ошибки чтения кеша лучше вернуть None и запросить свежие данные
+        # In case of cache read error, better return None and request fresh data
         return None
 
 async def cached_get_chat_history(client: Client, channel_id: Union[str, int], limit: int = 20) -> List[Message]:
     """
-    Получает историю сообщений чата с кешированием.
+    Gets chat message history with caching.
     
     Args:
-        client: Pyrogram клиент
-        channel_id: ID или username канала
-        limit: Максимальное количество сообщений для получения
+        client: Pyrogram client
+        channel_id: Channel ID or username
+        limit: Maximum number of messages to retrieve
         
     Returns:
-        Список сообщений, как и оригинальный client.get_chat_history()
+        List of messages, same as original client.get_chat_history()
     """
-    # Пробуем получить из кеша
     cached_messages = _get_history_from_cache(channel_id, limit)
     
     if cached_messages is not None:
         return cached_messages
     
-    # Если в кеше нет или кеш устарел, запрашиваем через API
     try:
         logger.info(f"history_cache_request: fetching fresh history for channel {channel_id}, limit {limit}")
         messages = []
         async for message in client.get_chat_history(channel_id, limit=limit):
             messages.append(message)
-        
-        # Сохраняем в кеш
         _save_history_to_cache(channel_id, messages, limit)
         
         return messages
     except Exception as e:
         logger.error(f"history_cache_request_error: channel {channel_id}, limit {limit}, error {str(e)}")
-        # Пробрасываем ошибку дальше, как и оригинальный метод
         raise

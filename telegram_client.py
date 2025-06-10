@@ -72,20 +72,12 @@ class TelegramClient:
             raise
 
     def _restart_app(self):
-        """Restarts the application by exiting with non-zero code to trigger Docker container restart"""
-        logger.warning("connection_handler: restarting application by exit with error code")
+        """Restarts the application by forcefully killing the process to trigger Docker container restart"""
+        logger.warning("connection_handler: restarting application by forceful termination")
         try:
-            # Properly shutdown client before exit
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                loop.create_task(self.stop())
-            
-            logger.info("connection_handler: waiting for resources to be freed before restart")
-            time.sleep(2)
-            
-            # Выходим с ненулевым кодом, чтобы Docker перезапустил контейнер
-            logger.critical("connection_handler: forcefully exiting process with code 1")
-            sys.exit(1)
+            # Forcefully kill the process using SIGKILL to ensure immediate termination
+            logger.critical("connection_handler: sending SIGKILL to self")
+            os.kill(os.getpid(), signal.SIGKILL)
         except Exception as e:
             logger.error(f"connection_handler: error during restart: {str(e)}")
             # Emergency termination

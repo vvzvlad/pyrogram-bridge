@@ -109,10 +109,21 @@ if __name__ == "__main__":
     # Log uvloop status
     logger.info("    uvloop: enabled (asyncio speedup active)")
     
-    # Добавляем обработчик сигнала SIGTERM для корректного завершения
+    # Add a function to forcefully kill the process
+    def force_exit(exit_code=1):
+        """Force exit the process to trigger Docker container restart"""
+        logger.critical(f"Force exiting process with code {exit_code}")
+        try:
+            # Try to kill the process with SIGKILL
+            os.kill(os.getpid(), signal.SIGKILL)
+        except:
+            # If that fails, use os._exit
+            os._exit(exit_code)
+    
+    # Add SIGTERM signal handler for proper termination
     def handle_sigterm(signum, frame):
-        logger.warning("Received SIGTERM signal, shutting down gracefully")
-        sys.exit(0)
+        logger.warning("Received SIGTERM signal, shutting down forcefully")
+        force_exit(0)  # Exit with code 0 for graceful shutdown
     
     signal.signal(signal.SIGTERM, handle_sigterm)
     
@@ -127,10 +138,10 @@ if __name__ == "__main__":
     except OSError as e:
         if "[Errno 98] Address already in use" in str(e):
             logger.critical(f"Port {Config['api_port']} is already in use. Exiting with code 1 to trigger Docker restart.")
-            sys.exit(1)
+            force_exit(1)
         else:
             logger.critical(f"Failed to start server: {str(e)}")
-            sys.exit(1)
+            force_exit(1)
 
 async def find_file_id_in_message(message: Message, file_unique_id: str) -> Union[str, None]:
     """Find file_id by checking all possible media types in message"""
