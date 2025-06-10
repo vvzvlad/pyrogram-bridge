@@ -13,6 +13,7 @@ import os
 import json
 import pickle
 import logging
+import random
 import time
 from datetime import datetime, timedelta
 from typing import Any, Optional, Union
@@ -74,10 +75,14 @@ def _get_from_cache(channel_id: Union[str, int], max_age_seconds: int = 86400) -
         with open(cache_file, 'rb') as f:
             cache_data = pickle.load(f)
         
-        # Проверяем возраст кеша
+        # Проверяем возраст кеша с добавлением случайности
         cache_age = time.time() - cache_data['timestamp']
-        if cache_age > max_age_seconds:
-            logger.info(f"chat_cache_expired: channel {channel_id}, age {cache_age:.1f}s > max {max_age_seconds}s")
+        # Добавляем случайность до 20% от max_age_seconds
+        random_factor = 1 - random.uniform(0, 0.2)
+        adjusted_max_age = max_age_seconds * random_factor
+        
+        if cache_age > adjusted_max_age:
+            logger.info(f"chat_cache_expired: channel {channel_id}, age {cache_age:.1f}s > adjusted max {adjusted_max_age:.1f}s (random factor: {random_factor:.2f})")
             return None
         
         # Восстанавливаем объект Chat из пикла
