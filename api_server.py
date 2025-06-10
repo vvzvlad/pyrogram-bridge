@@ -25,6 +25,8 @@ asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.background import BackgroundTask
 import json_repair
+import signal
+import sys
 
 import magic
 from pyrogram import errors
@@ -66,6 +68,7 @@ Config = get_settings()
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     setup_logging(Config["log_level"])
+
     
     base_cache_dir = os.path.abspath("./data/cache")
     os.makedirs(base_cache_dir, exist_ok=True) # Create cache directory
@@ -105,14 +108,29 @@ if __name__ == "__main__":
     
     # Log uvloop status
     logger.info("    uvloop: enabled (asyncio speedup active)")
-            
-    uvicorn.run(
-        "api_server:app", 
-        host=Config["api_host"], 
-        port=Config["api_port"], 
-        reload=True,
-        loop="uvloop"
-    )
+    
+    # Добавляем обработчик сигнала SIGTERM для корректного завершения
+    def handle_sigterm(signum, frame):
+        logger.warning("Received SIGTERM signal, shutting down gracefully")
+        sys.exit(0)
+    
+    signal.signal(signal.SIGTERM, handle_sigterm)
+    
+    try:        
+        uvicorn.run(
+            "api_server:app", 
+            host=Config["api_host"], 
+            port=Config["api_port"], 
+            reload=True,
+            loop="uvloop"
+        )
+    except OSError as e:
+        if "[Errno 98] Address already in use" in str(e):
+            logger.critical(f"Port {Config['api_port']} is already in use. Exiting with code 1 to trigger Docker restart.")
+            sys.exit(1)
+        else:
+            logger.critical(f"Failed to start server: {str(e)}")
+            sys.exit(1)
 
 async def find_file_id_in_message(message: Message, file_unique_id: str) -> Union[str, None]:
     """Find file_id by checking all possible media types in message"""

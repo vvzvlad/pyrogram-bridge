@@ -72,34 +72,24 @@ class TelegramClient:
             raise
 
     def _restart_app(self):
-        """Restarts the application"""
-        logger.warning("connection_handler: restarting application")
+        """Restarts the application by exiting with non-zero code to trigger Docker container restart"""
+        logger.warning("connection_handler: restarting application by exit with error code")
         try:
-            # Properly shutdown client before restart
+            # Properly shutdown client before exit
             loop = asyncio.get_event_loop()
             if loop.is_running():
                 loop.create_task(self.stop())
             
-            # Добавляем задержку, чтобы предыдущий процесс успел завершиться
-            # и освободить порт и другие ресурсы
             logger.info("connection_handler: waiting for resources to be freed before restart")
-            time.sleep(5)  # Увеличиваем до 5 секунд
+            time.sleep(2)
             
-            # Принудительно завершаем текущий процесс для освобождения порта
-            logger.info("connection_handler: killing current process before restart")
-            pid = os.getpid()
-            # Используем fork и exec для более надежного перезапуска
-            if os.fork() > 0:
-                # Родительский процесс
-                sys.exit(0)
-            else:
-                # Дочерний процесс
-                time.sleep(1)  # Даем родителю умереть
-                os.execv(sys.executable, [sys.executable] + sys.argv)
+            # Выходим с ненулевым кодом, чтобы Docker перезапустил контейнер
+            logger.critical("connection_handler: forcefully exiting process with code 1")
+            sys.exit(1)
         except Exception as e:
             logger.error(f"connection_handler: error during restart: {str(e)}")
-            # Emergency termination in case of restart failure
-            os.kill(os.getpid(), signal.SIGTERM)
+            # Emergency termination
+            os._exit(1)
 
     async def stop(self):
         if self.client.is_connected:
