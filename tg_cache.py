@@ -25,8 +25,8 @@ logger = logging.getLogger(__name__)
 # Путь к директории кеша
 CACHE_DIR = os.path.join('data', 'tgcache')
 
-def _get_history_cache_file_path(channel_id: Union[str, int], limit: int) -> str:
-    """Возвращает путь к файлу кеша истории сообщений для канала с учетом лимита"""
+def _get_history_cache_file_path(channel_id: Union[str, int]) -> str:
+    """Возвращает путь к файлу кеша истории сообщений для канала"""
     if not os.path.exists(CACHE_DIR):
         os.makedirs(CACHE_DIR, exist_ok=True)
         logger.info(f"cache_dir_created: path {CACHE_DIR}")
@@ -34,12 +34,12 @@ def _get_history_cache_file_path(channel_id: Union[str, int], limit: int) -> str
     channel_id_str = str(channel_id)
     # Заменяем потенциально проблемные символы
     safe_filename = channel_id_str.replace('/', '_').replace('\\', '_')
-    return os.path.join(CACHE_DIR, f"{safe_filename}_history_{limit}.cache")
+    return os.path.join(CACHE_DIR, f"{safe_filename}_history.cache")
 
 def _save_history_to_cache(channel_id: Union[str, int], messages: List[Message], limit: int) -> None:
     """Сохраняет историю сообщений в кеш"""
     try:
-        cache_file = _get_history_cache_file_path(channel_id, limit)
+        cache_file = _get_history_cache_file_path(channel_id)
         
         # Создаем метаданные кеша
         cache_data = {
@@ -68,7 +68,7 @@ def _get_history_from_cache(channel_id: Union[str, int], limit: int, max_age_sec
         Список сообщений или None если кеш не найден, устарел или лимит не соответствует
     """
     try:
-        cache_file = _get_history_cache_file_path(channel_id, limit)
+        cache_file = _get_history_cache_file_path(channel_id)
         
         if not os.path.exists(cache_file):
             logger.info(f"history_cache_miss: channel {channel_id}, limit {limit}, cache file not found")
@@ -88,7 +88,7 @@ def _get_history_from_cache(channel_id: Union[str, int], limit: int, max_age_sec
             return None
         
         # Проверяем соответствие лимита
-        cached_limit = cache_data.get('limit')
+        cached_limit = cache_data.get('limit', 0)
         if cached_limit != limit:
             logger.info(f"history_cache_limit_mismatch: channel {channel_id}, cached limit {cached_limit}, requested limit {limit}")
             return None
