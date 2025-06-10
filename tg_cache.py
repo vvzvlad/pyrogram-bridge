@@ -34,7 +34,7 @@ def _get_history_cache_file_path(channel_id: Union[str, int]) -> str:
     channel_id_str = str(channel_id)
     # Заменяем потенциально проблемные символы
     safe_filename = channel_id_str.replace('/', '_').replace('\\', '_')
-    return os.path.join(CACHE_DIR, f"{safe_filename}_history.cache")
+    return os.path.join(CACHE_DIR, f"{safe_filename}.cache")
 
 def _save_history_to_cache(channel_id: Union[str, int], messages: List[Message], limit: int) -> None:
     """Сохраняет историю сообщений в кеш"""
