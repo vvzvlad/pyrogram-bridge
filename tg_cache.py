@@ -55,14 +55,14 @@ def _save_history_to_cache(channel_id: Union[str, int], messages: List[Message],
     except Exception as e:
         logger.error(f"history_cache_save_error: channel {channel_id}, limit {limit}, error {str(e)}")
 
-def _get_history_from_cache(channel_id: Union[str, int], limit: int, max_age_seconds: int = 300) -> Optional[List[Message]]:
+def _get_history_from_cache(channel_id: Union[str, int], limit: int, max_age_hours: int = 8) -> Optional[List[Message]]:
     """
     Получает историю сообщений из кеша если они не старше указанного возраста и соответствуют лимиту
     
     Args:
         channel_id: ID или username канала
         limit: Требуемый лимит сообщений
-        max_age_seconds: Максимальный возраст кеша в секундах (по умолчанию 5 минут)
+        max_age_hours: Максимальный возраст кеша в часах (по умолчанию 8 час)
         
     Returns:
         Список сообщений или None если кеш не найден, устарел или лимит не соответствует
@@ -81,7 +81,7 @@ def _get_history_from_cache(channel_id: Union[str, int], limit: int, max_age_sec
         cache_age = time.time() - cache_data['timestamp']
         # Добавляем случайность до 20% от max_age_seconds
         random_factor = 1 - random.uniform(0, 0.2)
-        adjusted_max_age = max_age_seconds * random_factor
+        adjusted_max_age = max_age_hours * 3600 * random_factor
         
         if cache_age > adjusted_max_age:
             logger.info(f"history_cache_expired: channel {channel_id}, limit {limit}, age {cache_age:.1f}s > adjusted max {adjusted_max_age:.1f}s (random factor: {random_factor:.2f})")
@@ -103,7 +103,7 @@ def _get_history_from_cache(channel_id: Union[str, int], limit: int, max_age_sec
         # В случае ошибки чтения кеша лучше вернуть None и запросить свежие данные
         return None
 
-async def cached_get_chat_history(client: Client, channel_id: Union[str, int], limit: int = 20, cache_ttl: int = 300) -> List[Message]:
+async def cached_get_chat_history(client: Client, channel_id: Union[str, int], limit: int = 20) -> List[Message]:
     """
     Получает историю сообщений чата с кешированием.
     
@@ -111,13 +111,12 @@ async def cached_get_chat_history(client: Client, channel_id: Union[str, int], l
         client: Pyrogram клиент
         channel_id: ID или username канала
         limit: Максимальное количество сообщений для получения
-        cache_ttl: Время жизни кеша в секундах (по умолчанию 5 минут)
         
     Returns:
         Список сообщений, как и оригинальный client.get_chat_history()
     """
     # Пробуем получить из кеша
-    cached_messages = _get_history_from_cache(channel_id, limit, cache_ttl)
+    cached_messages = _get_history_from_cache(channel_id, limit)
     
     if cached_messages is not None:
         return cached_messages
