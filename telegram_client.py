@@ -83,10 +83,19 @@ class TelegramClient:
             # Добавляем задержку, чтобы предыдущий процесс успел завершиться
             # и освободить порт и другие ресурсы
             logger.info("connection_handler: waiting for resources to be freed before restart")
-            time.sleep(3)
+            time.sleep(5)  # Увеличиваем до 5 секунд
             
-            # Use os.execv to restart the process with the same arguments
-            os.execv(sys.executable, [sys.executable] + sys.argv)
+            # Принудительно завершаем текущий процесс для освобождения порта
+            logger.info("connection_handler: killing current process before restart")
+            pid = os.getpid()
+            # Используем fork и exec для более надежного перезапуска
+            if os.fork() > 0:
+                # Родительский процесс
+                sys.exit(0)
+            else:
+                # Дочерний процесс
+                time.sleep(1)  # Даем родителю умереть
+                os.execv(sys.executable, [sys.executable] + sys.argv)
         except Exception as e:
             logger.error(f"connection_handler: error during restart: {str(e)}")
             # Emergency termination in case of restart failure
