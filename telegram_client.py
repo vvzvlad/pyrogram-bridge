@@ -72,12 +72,12 @@ class TelegramClient:
             raise
 
     def _restart_app(self):
-        """Restarts the application by forcefully killing the process to trigger Docker container restart"""
-        logger.warning("connection_handler: restarting application by forceful termination")
+        """Restarts the application by sending SIGTERM to the process"""
+        logger.warning("connection_handler: restarting application by sending SIGTERM")
         try:
-            # Forcefully kill the process using SIGKILL to ensure immediate termination
-            logger.critical("connection_handler: sending SIGKILL to self")
-            os.kill(os.getpid(), signal.SIGKILL)
+            # Use SIGTERM for proper Docker container restart
+            logger.critical("connection_handler: sending SIGTERM signal")
+            os.kill(os.getpid(), signal.SIGTERM)
         except Exception as e:
             logger.error(f"connection_handler: error during restart: {str(e)}")
             # Emergency termination
