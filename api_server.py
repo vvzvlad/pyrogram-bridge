@@ -803,50 +803,51 @@ async def get_rss_feed(channel: str,
     elif Config["token"] and is_local_request(request):
         logger.info(f"Local request, skipping token check for RSS endpoint.")
         
-    while True:
-        try:
-            start_time = time.time()
-            
-            if output_type == 'rss':
-                rss_content = await generate_channel_rss(channel,
-                                                        client=client.client, 
-                                                        limit=limit, 
-                                                        exclude_flags=exclude_flags,
-                                                        exclude_text=exclude_text,
-                                                        merge_seconds=merge_seconds)
-                elapsed_time = time.time() - start_time
-                logger.info(f"rss_generation_timing: channel {channel}, generated in {elapsed_time:.3f} seconds")
-                return Response(content=rss_content, media_type="application/xml")
-            elif output_type == 'html':
-                rss_content = await generate_channel_html(channel,
-                                                        client=client.client, 
-                                                        limit=limit, 
-                                                        exclude_flags=exclude_flags,
-                                                        exclude_text=exclude_text,
-                                                        merge_seconds=merge_seconds)
-                elapsed_time = time.time() - start_time
-                logger.info(f"html_generation_timing: channel {channel}, generated in {elapsed_time:.3f} seconds")
-                return Response(content=rss_content, media_type="text/html")
-        except ValueError as e:
-            error_message = f"invalid_parameters_error: {str(e)}"
-            logger.error(error_message)
-            raise HTTPException(status_code=400, detail=error_message) from e
-        except errors.FloodWait as e:
-            wait_time = e.value
-            random_additional_wait = random.uniform(0, wait_time * 2.5)
-            total_wait_time = wait_time + random_additional_wait
-            if total_wait_time > 190: total_wait_time = 190
+    try:
+        start_time = time.time()
 
-            logger.warning(f"flood_wait_error: channel {channel}, retry after {total_wait_time:.1f} seconds (base: {wait_time}s, random: {random_additional_wait:.1f}s)")
-            return Response(
-                status_code=429,
-                headers={"Retry-After": str(int(total_wait_time))},
-                content="Too many requests, please try again later"
-            )
-        except Exception as e:
-            error_message = f"rss_generation_error: channel {channel}, error {str(e)}"
-            logger.error(error_message)
-            raise HTTPException(status_code=500, detail=error_message) from e
+        if output_type == 'rss':
+            rss_content = await generate_channel_rss(channel,
+                                                    client=client.client, 
+                                                    limit=limit, 
+                                                    exclude_flags=exclude_flags,
+                                                    exclude_text=exclude_text,
+                                                    merge_seconds=merge_seconds)
+            elapsed_time = time.time() - start_time
+            logger.info(f"rss_generation_timing: channel {channel}, generated in {elapsed_time:.3f} seconds")
+            return Response(content=rss_content, media_type="application/xml")
+        elif output_type == 'html':
+            rss_content = await generate_channel_html(channel,
+                                                    client=client.client, 
+                                                    limit=limit, 
+                                                    exclude_flags=exclude_flags,
+                                                    exclude_text=exclude_text,
+                                                    merge_seconds=merge_seconds)
+            elapsed_time = time.time() - start_time
+            logger.info(f"html_generation_timing: channel {channel}, generated in {elapsed_time:.3f} seconds")
+            return Response(content=rss_content, media_type="text/html")
+        else:
+            raise HTTPException(status_code=400, detail=f"invalid_output_type: {output_type}")
+    except ValueError as e:
+        error_message = f"invalid_parameters_error: {str(e)}"
+        logger.error(error_message)
+        raise HTTPException(status_code=400, detail=error_message) from e
+    except errors.FloodWait as e:
+        wait_time = e.value
+        random_additional_wait = random.uniform(0, wait_time * 2.5)
+        total_wait_time = wait_time + random_additional_wait
+        if total_wait_time > 190: total_wait_time = 190
+
+        logger.warning(f"flood_wait_error: channel {channel}, retry after {total_wait_time:.1f} seconds (base: {wait_time}s, random: {random_additional_wait:.1f}s)")
+        return Response(
+            status_code=429,
+            headers={"Retry-After": str(int(total_wait_time))},
+            content="Too many requests, please try again later"
+        )
+    except Exception as e:
+        error_message = f"rss_generation_error: channel {channel}, error {str(e)}"
+        logger.error(error_message)
+        raise HTTPException(status_code=500, detail=error_message) from e
 
 @app.get("/flags", response_model=List[str])
 @app.get("/flags/{token}", response_model=List[str])
