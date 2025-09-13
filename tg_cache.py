@@ -14,6 +14,7 @@ import json
 import pickle
 import logging
 import random
+import asyncio
 import time
 from datetime import datetime, timedelta
 from typing import Any, Optional, Union, List
@@ -115,7 +116,7 @@ async def cached_get_chat_history(client: Client, channel_id: Union[str, int], l
     Returns:
         List of messages, same as original client.get_chat_history()
     """
-    cached_messages = _get_history_from_cache(channel_id, limit)
+    cached_messages = await asyncio.to_thread(_get_history_from_cache, channel_id, limit)
     
     if cached_messages is not None:
         return cached_messages
@@ -125,7 +126,7 @@ async def cached_get_chat_history(client: Client, channel_id: Union[str, int], l
         messages = []
         async for message in client.get_chat_history(channel_id, limit=limit):
             messages.append(message)
-        _save_history_to_cache(channel_id, messages, limit)
+        await asyncio.to_thread(_save_history_to_cache, channel_id, messages, limit)
         
         return messages
     except Exception as e:

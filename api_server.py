@@ -37,6 +37,7 @@ from config import get_settings, setup_logging
 from rss_generator import generate_channel_rss, generate_channel_html
 from post_parser import PostParser
 from url_signer import verify_media_digest, generate_media_digest
+from file_io import read_json_file_sync, write_json_file_sync, get_media_file_ids_lock
 
 # Global python-magic instance for MIME type detection
 magic_mime = magic.Magic(mime=True)
@@ -283,7 +284,8 @@ async def download_media_file(channel: Union[str, int], post_id: int, file_uniqu
                             file_data.get('file_unique_id') == file_unique_id):
                             file_data['added'] = datetime.now().timestamp()
                             break
-                    await asyncio.to_thread(write_json_file_sync, file_ids_path, media_files)
+                    async with get_media_file_ids_lock():
+                        await asyncio.to_thread(write_json_file_sync, file_ids_path, media_files)
             except Exception as e:
                 logger.error(f"Failed to update timestamp for {channel}/{post_id}/{file_unique_id}: {str(e)}")
             return cache_path, False
@@ -308,7 +310,8 @@ async def download_media_file(channel: Union[str, int], post_id: int, file_uniqu
                     )
                 ]
                 if len(media_files_updated) < initial_count:
-                    await asyncio.to_thread(write_json_file_sync, file_ids_path, media_files_updated)
+                    async with get_media_file_ids_lock():
+                        await asyncio.to_thread(write_json_file_sync, file_ids_path, media_files_updated)
                     logger.info(f"Removed invalid entry for {channel}/{post_id}/{file_unique_id} from media_file_ids.json")
                 else:
                     logger.warning(f"Entry for {channel}/{post_id}/{file_unique_id} not found in media_file_ids.json for removal")
@@ -515,7 +518,8 @@ async def cache_media_files() -> None:
 
             if files_removed > 0:
                 try:
-                    await asyncio.to_thread(write_json_file_sync, file_path, updated_media_files)
+                    async with get_media_file_ids_lock():
+                        await asyncio.to_thread(write_json_file_sync, file_path, updated_media_files)
                     logger.info(f"Removed {files_removed} old files from cache")
                 except Exception as e:
                     logger.error(f"Failed to update media_file_ids.json: {str(e)}")
@@ -591,16 +595,6 @@ def calculate_cache_stats() -> dict[str, Any]:
         "channels": channels_stats
     }
 
-# Synchronous JSON helpers to be used via asyncio.to_thread
-def read_json_file_sync(file_path: str) -> list:
-    with open(file_path, 'r', encoding='utf-8') as f:
-        return json.load(f)
-
-def write_json_file_sync(file_path: str, data: list) -> None:
-    temp_path = f"{file_path}.tmp"
-    with open(temp_path, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    os.replace(temp_path, file_path)
 
 def is_local_request(request: Request) -> bool:
     local_hosts = ["127.0.0.1", "localhost"]

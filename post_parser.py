@@ -9,9 +9,9 @@
 # pylance: disable=reportMissingImports, reportMissingModuleSource
 
 import logging
+import asyncio
 import re
 import os
-import json
 import html
 import inspect
 from datetime import datetime
@@ -21,6 +21,7 @@ from pyrogram.enums import MessageMediaType
 from bleach.css_sanitizer import CSSSanitizer   
 from bleach import clean as HTMLSanitizer
 from config import get_settings
+from file_io import read_json_file_sync, write_json_file_sync, get_media_file_ids_lock
 from url_signer import generate_media_digest
 
 Config = get_settings()
@@ -913,6 +914,29 @@ class PostParser:
             logger.error(f"file_id_extraction_error: media_type {message.media}, error {str(e)}")
             return None
 
+    async def _persist_media_file_id_async(self, file_path: str, file_data: dict) -> None:
+        try:
+            existing_data = []
+            if os.path.exists(file_path):
+                existing_data = await asyncio.to_thread(read_json_file_sync, file_path)
+
+            found = False
+            for item in existing_data:
+                if (item.get('channel') == file_data['channel'] and 
+                        item.get('post_id') == file_data['post_id'] and 
+                        item.get('file_unique_id') == file_data['file_unique_id']):
+                    item['added'] = datetime.now().timestamp()
+                    found = True
+                    break
+
+            if not found:
+                existing_data.append(file_data)
+
+            async with get_media_file_ids_lock():
+                await asyncio.to_thread(write_json_file_sync, file_path, existing_data)
+        except Exception as e:
+            logger.error(f"file_id_save_error: error writing to {file_path}, error {str(e)}")
+
     def _save_media_file_ids(self, message: Message) -> None:
         try:
             file_data = {
@@ -949,27 +973,25 @@ class PostParser:
 
                     file_path = os.path.join(os.path.abspath("./data"), 'media_file_ids.json')
                     try:
-                        existing_data = []
-                        if os.path.exists(file_path):
-                            with open(file_path, 'r', encoding='utf-8') as f:
-                                existing_data = json.load(f)
-                        
-                        # Check if file already exists by all three fields
-                        found = False
-                        for item in existing_data:
-                            if (item.get('channel') == file_data['channel'] and 
-                                    item.get('post_id') == file_data['post_id'] and 
-                                    item.get('file_unique_id') == file_data['file_unique_id']):
-                                item['added'] = datetime.now().timestamp()
-                                found = True
-                                break
-                        
-                        # Add new entry if not found
-                        if not found:
-                            existing_data.append(file_data)
-                        
-                        with open(file_path, 'w', encoding='utf-8') as f:
-                            json.dump(existing_data, f, ensure_ascii=False, indent=2)
+                        loop = asyncio.get_running_loop()
+                        if loop.is_running():
+                            loop.create_task(self._persist_media_file_id_async(file_path, file_data))
+                        else:
+                            # Fallback sync write (should not occur during normal FastAPI runtime)
+                            existing_data = []
+                            if os.path.exists(file_path):
+                                existing_data = read_json_file_sync(file_path)  # type: ignore
+                            found = False
+                            for item in existing_data:
+                                if (item.get('channel') == file_data['channel'] and 
+                                        item.get('post_id') == file_data['post_id'] and 
+                                        item.get('file_unique_id') == file_data['file_unique_id']):
+                                    item['added'] = datetime.now().timestamp()
+                                    found = True
+                                    break
+                            if not found:
+                                existing_data.append(file_data)
+                            write_json_file_sync(file_path, existing_data)  # type: ignore
 
                     except Exception as e:
                         logger.error(f"file_id_save_error: error writing to {file_path}, error {str(e)}")
