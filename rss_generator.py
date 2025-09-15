@@ -10,6 +10,7 @@
 # mypy: disable-error-code="import-untyped"
 
 import logging
+import asyncio
 import re
 import time
 from datetime import datetime, timezone
@@ -20,6 +21,8 @@ from pyrogram import errors, Client
 from pyrogram.types import Message
 from post_parser import PostParser
 from config import get_settings
+from bleach.css_sanitizer import CSSSanitizer
+from bleach import clean as HTMLSanitizer
 
 Config = get_settings()
 
@@ -395,7 +398,33 @@ async def generate_channel_rss(channel: str | int,
             fe.link(href=post_link)
             
             fe.description(post['text'].replace('\n', ' '))
-            fe.content(content=post['html'], type='CDATA')
+            # Sanitize heavy HTML in thread to avoid blocking the loop
+            try:
+                def _sanitize_sync(html_raw: str) -> str:
+                    css_sanitizer = CSSSanitizer(
+                        allowed_css_properties=["max-width", "max-height", "object-fit", "width", "height"]
+                    )
+                    return HTMLSanitizer(
+                        html_raw,
+                        tags=['p', 'a', 'b', 'i', 'strong', 'em', 'ul', 'ol', 'li', 'br', 'div', 'span', 'img', 'video', 'audio', 'source'],
+                        attributes={
+                            'a': ['href', 'title', 'target'],
+                            'img': ['src', 'alt', 'style'],
+                            'video': ['controls', 'src', 'style'],
+                            'audio': ['controls', 'style'],
+                            'source': ['src', 'type'],
+                            'div': ['class', 'style'],
+                            'span': ['class']
+                        },
+                        protocols=['http', 'https', 'tg'],
+                        css_sanitizer=css_sanitizer,
+                        strip=True,
+                    )
+                sanitized_html = await asyncio.to_thread(_sanitize_sync, post['html'])
+            except Exception as e:
+                logger.error(f"rss_html_sanitization_error: channel {channel}, message_id {post['message_id']}, error {str(e)}")
+                sanitized_html = post['html']
+            fe.content(content=sanitized_html, type='CDATA')
             
             pub_date = datetime.fromtimestamp(post['date'], tz=timezone.utc)
             fe.pubDate(pub_date)
@@ -407,7 +436,8 @@ async def generate_channel_rss(channel: str | int,
         feed_gen_elapsed = time.time() - feed_gen_start_time
         logger.debug(f"rss_feed_generation_timing: channel {channel}, feed generated in {feed_gen_elapsed:.3f} seconds")
         
-        rss_feed = fg.rss_str(pretty=True)
+        # Serialize RSS in thread (feedgen may be CPU-heavy)
+        rss_feed = await asyncio.to_thread(fg.rss_str, pretty=True)
         if isinstance(rss_feed, bytes):
             return rss_feed.decode('utf-8')
         
@@ -521,8 +551,37 @@ async def generate_channel_html(channel: str | int,
 
         # Generate HTML content
         html_gen_start_time = time.time()
+        # Concatenate HTML in thread to avoid blocking the loop on large payloads
         html_posts = [post['html'] for post in final_posts]
-        html = '\n<hr class="post-divider">\n'.join(html_posts)
+        def _concat_html(parts: list[str]) -> str:
+            return '\n<hr class="post-divider">\n'.join(parts)
+        html = await asyncio.to_thread(_concat_html, html_posts)
+        
+        # Optionally re-sanitize the final big HTML to ensure safety without blocking the loop
+        try:
+            def _sanitize_sync(html_raw: str) -> str:
+                css_sanitizer = CSSSanitizer(
+                    allowed_css_properties=["max-width", "max-height", "object-fit", "width", "height"]
+                )
+                return HTMLSanitizer(
+                    html_raw,
+                    tags=['p', 'a', 'b', 'i', 'strong', 'em', 'ul', 'ol', 'li', 'br', 'div', 'span', 'img', 'video', 'audio', 'source'],
+                    attributes={
+                        'a': ['href', 'title', 'target'],
+                        'img': ['src', 'alt', 'style'],
+                        'video': ['controls', 'src', 'style'],
+                        'audio': ['controls', 'style'],
+                        'source': ['src', 'type'],
+                        'div': ['class', 'style'],
+                        'span': ['class']
+                    },
+                    protocols=['http', 'https', 'tg'],
+                    css_sanitizer=css_sanitizer,
+                    strip=True,
+                )
+            html = await asyncio.to_thread(_sanitize_sync, html)
+        except Exception as e:
+            logger.error(f"html_final_sanitization_error: channel {channel}, error {str(e)}")
         
         html_gen_elapsed = time.time() - html_gen_start_time
         logger.debug(f"html_generation_timing: channel {channel}, HTML generated in {html_gen_elapsed:.3f} seconds")

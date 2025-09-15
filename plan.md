@@ -89,7 +89,7 @@ uvicorn.run(..., reload=True, loop="uvloop")
 
 - Разгрузить CPU из event loop
   - В RSS/HTML:
-    - После того как данные получены из Telegram, вынести “склейку HTML”, bleach‑санитизацию и `fg.rss_str` в `asyncio.to_thread`.
+    - [x] После того как данные получены из Telegram, вынести “склейку HTML”, bleach‑санитизацию и `fg.rss_str` в `asyncio.to_thread`.
     - Ограничить `limit` по умолчанию до 50–80. Для больших значений — отдавать 429 или 400 с рекомендацией.
     - Опционально — кэшировать итоговые RSS/HTML на пару минут.
 
