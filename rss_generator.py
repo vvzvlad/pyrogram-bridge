@@ -408,6 +408,15 @@ async def generate_channel_rss(channel: str | int,
         
         # Generate feed entries
         feed_gen_start_time = time.time()
+        
+        # Log date range of posts being added to RSS
+        if final_posts:
+            dates = [datetime.fromtimestamp(post['date'], tz=timezone.utc) for post in final_posts if post.get('date')]
+            if dates:
+                oldest_date = min(dates)
+                newest_date = max(dates)
+                logger.info(f"rss_date_range: channel {channel}, oldest_post {oldest_date.isoformat()}, newest_post {newest_date.isoformat()}, total_posts {len(final_posts)}")
+        
         for post in final_posts:
             fe = fg.add_entry()
             fe.title(post['title'])
@@ -445,6 +454,7 @@ async def generate_channel_rss(channel: str | int,
             fe.content(content=sanitized_html, type='CDATA')
             
             pub_date = datetime.fromtimestamp(post['date'], tz=timezone.utc)
+            logger.debug(f"rss_entry_date: channel {channel}, message_id {post['message_id']}, timestamp {post['date']}, pub_date {pub_date.isoformat()}")
             fe.pubDate(pub_date)
             fe.guid(post_link, permalink=True)
             
