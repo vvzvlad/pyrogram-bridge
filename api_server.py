@@ -67,6 +67,8 @@ if not logger.handlers: pass
 
 client = TelegramClient()
 Config = get_settings()
+DOWNLOAD_SEMAPHORE = asyncio.Semaphore(3)
+download_queue = asyncio.Queue(maxsize=100)
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -78,10 +80,16 @@ async def lifespan(_: FastAPI):
     
     await client.start()
     background_task = asyncio.create_task(cache_media_files()) # Start background task
+    worker_task = asyncio.create_task(background_download_worker()) # Start download worker
     yield
     background_task.cancel() # Cleanup
+    worker_task.cancel()
     try:
         await background_task
+    except asyncio.CancelledError:
+        pass
+    try:
+        await worker_task
     except asyncio.CancelledError:
         pass
     await client.stop()
@@ -218,127 +226,141 @@ async def download_media_file(channel: Union[str, int], post_id: int, file_uniqu
     Download media file from Telegram and save to cache
     Returns tuple of (file path, delete_after)
     """
-    base_cache_dir = os.path.abspath("./data/cache")
-    
-    # Create nested cache structure
-    channel_dir = os.path.join(base_cache_dir, str(channel))
-    post_dir = os.path.join(channel_dir, str(post_id))
-    os.makedirs(post_dir, exist_ok=True)
-    
-    # Convert numeric channel ID to int if needed
-    channel_id: Union[str, int] = channel
-    if isinstance(channel, str) and channel.startswith('-100'):
-        channel_id = int(channel)
-    
-    message = await client.client.get_messages(channel_id, post_id)
-    if message.media == "MessageMediaType.POLL":
-        return None, False
-    
-    # Check if it is a video and if its size exceeds 100 MB
-    is_large_video = False
-    if message.video:
+    async with DOWNLOAD_SEMAPHORE:
+        base_cache_dir = os.path.abspath("./data/cache")
+        
+        # Create nested cache structure
+        channel_dir = os.path.join(base_cache_dir, str(channel))
+        post_dir = os.path.join(channel_dir, str(post_id))
+        os.makedirs(post_dir, exist_ok=True)
+        
+        # Convert numeric channel ID to int if needed
+        channel_id: Union[str, int] = channel
+        if isinstance(channel, str) and channel.startswith('-100'):
+            channel_id = int(channel)
+        
         try:
-            if message.video.file_size > 100 * 1024 * 1024:
-                is_large_video = True
-        except Exception as e:
-            logger.error(f"Failed to get video file size for message {post_id}: {str(e)}")
-    
-    if is_large_video:
-        # For large video, download without permanent caching; use a temporary file
-        temp_file_path = os.path.join(post_dir, f"temp_{file_unique_id}")
-        if os.path.exists(temp_file_path):
-            logger.info(f"Temporary file {temp_file_path} already exists, serving cached large video")
-            return temp_file_path, False
+            message = await client.safe_get_messages(channel_id, post_id)
+        except asyncio.TimeoutError:
+            logger.error(f"Timeout getting messages for {channel}/{post_id}")
+            raise HTTPException(status_code=504, detail="Request timeout")
+        
+        if message.media == "MessageMediaType.POLL":
+            return None, False
+        
+        # Check if it is a video and if its size exceeds 100 MB
+        is_large_video = False
+        if message.video:
+            try:
+                if message.video.file_size > 100 * 1024 * 1024:
+                    is_large_video = True
+            except Exception as e:
+                logger.error(f"Failed to get video file size for message {post_id}: {str(e)}")
+        
+        if is_large_video:
+            # For large video, download without permanent caching; use a temporary file
+            temp_file_path = os.path.join(post_dir, f"temp_{file_unique_id}")
+            if os.path.exists(temp_file_path):
+                logger.info(f"Temporary file {temp_file_path} already exists, serving cached large video")
+                return temp_file_path, False
+            file_id = await find_file_id_in_message(message, file_unique_id)
+            if not file_id:
+                logger.error(f"Media with file_unique_id {file_unique_id} not found in message {post_id}")
+                raise HTTPException(status_code=404, detail="File not found in message")
+            logger.info(f"Downloading large video file {file_unique_id} to temporary path {temp_file_path}")
+            try:
+                file_path = await client.safe_download_media(file_id, temp_file_path)
+            except asyncio.TimeoutError:
+                logger.error(f"Timeout downloading large video {file_unique_id}")
+                raise HTTPException(status_code=504, detail="Download timeout")
+            logger.info(f"Downloaded large video file {file_unique_id} to temporary path {temp_file_path}")
+            return file_path, False
+
+        # Normal caching flow
+        cache_path = os.path.join(post_dir, file_unique_id)
+        if os.path.exists(cache_path):
+            # Check if the cached file is zero size
+            if os.path.getsize(cache_path) == 0:
+                logger.warning(f"zero_size_cache_found: Found zero-size cached file: {cache_path}. Deleting and attempting redownload.")
+                try:
+                    os.remove(cache_path)
+                    logger.info(f"Removed zero-size cached file: {cache_path}")
+                except OSError as e:
+                    logger.error(f"cleanup_error: Failed to remove zero-size cached file {cache_path}: {e}")
+                # Do not raise error here, proceed to download below
+            else:
+                # File exists and is not zero size, update timestamp and return
+                logger.info(f"Found cached media file: {cache_path}")
+                # Update access timestamp in media_file_ids.json
+                file_ids_path = os.path.join(os.path.abspath("./data"), 'media_file_ids.json')
+                try:
+                    if os.path.exists(file_ids_path):
+                        media_files = await asyncio.to_thread(read_json_file_sync, file_ids_path)
+                        for file_data in media_files:
+                            if (file_data.get('channel') == str(channel) and  # Ensure channel is string for comparison
+                                file_data.get('post_id') == post_id and
+                                file_data.get('file_unique_id') == file_unique_id):
+                                file_data['added'] = datetime.now().timestamp()
+                                break
+                        async with get_media_file_ids_lock():
+                            await asyncio.to_thread(write_json_file_sync, file_ids_path, media_files)
+                except Exception as e:
+                    logger.error(f"Failed to update timestamp for {channel}/{post_id}/{file_unique_id}: {str(e)}")
+                return cache_path, False
+
         file_id = await find_file_id_in_message(message, file_unique_id)
         if not file_id:
-            logger.error(f"Media with file_unique_id {file_unique_id} not found in message {post_id}")
-            raise HTTPException(status_code=404, detail="File not found in message")
-        logger.info(f"Downloading large video file {file_unique_id} to temporary path {temp_file_path}")
-        file_path = await client.client.download_media(file_id, file_name=temp_file_path)
-        logger.info(f"Downloaded large video file {file_unique_id} to temporary path {temp_file_path}")
-        return file_path, False
-
-    # Normal caching flow
-    cache_path = os.path.join(post_dir, file_unique_id)
-    if os.path.exists(cache_path):
-        # Check if the cached file is zero size
-        if os.path.getsize(cache_path) == 0:
-            logger.warning(f"zero_size_cache_found: Found zero-size cached file: {cache_path}. Deleting and attempting redownload.")
-            try:
-                os.remove(cache_path)
-                logger.info(f"Removed zero-size cached file: {cache_path}")
-            except OSError as e:
-                logger.error(f"cleanup_error: Failed to remove zero-size cached file {cache_path}: {e}")
-            # Do not raise error here, proceed to download below
-        else:
-            # File exists and is not zero size, update timestamp and return
-            logger.info(f"Found cached media file: {cache_path}")
-            # Update access timestamp in media_file_ids.json
+            error_message = f"Media with file_unique_id {file_unique_id} not found in message {post_id} for channel {channel}"
+            logger.error(error_message)
+            
+            # Attempt to remove the invalid entry from media_file_ids.json using threadpool I/O
             file_ids_path = os.path.join(os.path.abspath("./data"), 'media_file_ids.json')
             try:
                 if os.path.exists(file_ids_path):
                     media_files = await asyncio.to_thread(read_json_file_sync, file_ids_path)
-                    for file_data in media_files:
-                        if (file_data.get('channel') == str(channel) and  # Ensure channel is string for comparison
-                            file_data.get('post_id') == post_id and 
-                            file_data.get('file_unique_id') == file_unique_id):
-                            file_data['added'] = datetime.now().timestamp()
-                            break
-                    async with get_media_file_ids_lock():
-                        await asyncio.to_thread(write_json_file_sync, file_ids_path, media_files)
+                    initial_count = len(media_files)
+                    media_files_updated = [
+                        f_data for f_data in media_files
+                        if not (
+                            f_data.get('channel') == str(channel) and
+                            f_data.get('post_id') == post_id and
+                            f_data.get('file_unique_id') == file_unique_id
+                        )
+                    ]
+                    if len(media_files_updated) < initial_count:
+                        async with get_media_file_ids_lock():
+                            await asyncio.to_thread(write_json_file_sync, file_ids_path, media_files_updated)
+                        logger.info(f"Removed invalid entry for {channel}/{post_id}/{file_unique_id} from media_file_ids.json")
+                    else:
+                        logger.warning(f"Entry for {channel}/{post_id}/{file_unique_id} not found in media_file_ids.json for removal")
+
             except Exception as e:
-                logger.error(f"Failed to update timestamp for {channel}/{post_id}/{file_unique_id}: {str(e)}")
-            return cache_path, False
-
-    file_id = await find_file_id_in_message(message, file_unique_id)
-    if not file_id:
-        error_message = f"Media with file_unique_id {file_unique_id} not found in message {post_id} for channel {channel}"
-        logger.error(error_message)
-        
-        # Attempt to remove the invalid entry from media_file_ids.json using threadpool I/O
-        file_ids_path = os.path.join(os.path.abspath("./data"), 'media_file_ids.json')
-        try:
-            if os.path.exists(file_ids_path):
-                media_files = await asyncio.to_thread(read_json_file_sync, file_ids_path)
-                initial_count = len(media_files)
-                media_files_updated = [
-                    f_data for f_data in media_files 
-                    if not (
-                        f_data.get('channel') == str(channel) and 
-                        f_data.get('post_id') == post_id and 
-                        f_data.get('file_unique_id') == file_unique_id
-                    )
-                ]
-                if len(media_files_updated) < initial_count:
-                    async with get_media_file_ids_lock():
-                        await asyncio.to_thread(write_json_file_sync, file_ids_path, media_files_updated)
-                    logger.info(f"Removed invalid entry for {channel}/{post_id}/{file_unique_id} from media_file_ids.json")
-                else:
-                    logger.warning(f"Entry for {channel}/{post_id}/{file_unique_id} not found in media_file_ids.json for removal")
-
-        except Exception as e:
-            logger.error(f"Failed to remove entry for {channel}/{post_id}/{file_unique_id} from media_file_ids.json: {str(e)}")
+                logger.error(f"Failed to remove entry for {channel}/{post_id}/{file_unique_id} from media_file_ids.json: {str(e)}")
+                
+            raise HTTPException(status_code=404, detail="File not found in message")
             
-        raise HTTPException(status_code=404, detail="File not found in message")
+        try:
+            file_path = await client.safe_download_media(file_id, cache_path)
+        except asyncio.TimeoutError:
+            logger.error(f"Timeout downloading media {file_unique_id}")
+            raise HTTPException(status_code=504, detail="Download timeout")
         
-    file_path = await client.client.download_media(file_id, file_name=cache_path)
-    
-    # Check if the downloaded file exists and has a size greater than zero
-    if not file_path or not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
-        logger.error(f"download_failed_zero_size: Downloaded file {file_unique_id} for {channel}/{post_id} is zero size or missing.")
-        # Attempt to clean up the invalid file
-        if file_path and os.path.exists(file_path):
-            try:
-                os.remove(file_path)
-                logger.info(f"Removed zero-size file: {file_path}")
-            except OSError as e:
-                logger.error(f"cleanup_error: Failed to remove zero-size file {file_path}: {e}")
-        # Raise an error to indicate download failure
-        # Raise specific error
-        raise ZeroSizeFileError(f"Downloaded file {file_unique_id} for {channel}/{post_id} is zero size or missing after download attempt.")
+        # Check if the downloaded file exists and has a size greater than zero
+        if not file_path or not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+            logger.error(f"download_failed_zero_size: Downloaded file {file_unique_id} for {channel}/{post_id} is zero size or missing.")
+            # Attempt to clean up the invalid file
+            if file_path and os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                    logger.info(f"Removed zero-size file: {file_path}")
+                except OSError as e:
+                    logger.error(f"cleanup_error: Failed to remove zero-size file {file_path}: {e}")
+            # Raise an error to indicate download failure
+            # Raise specific error
+            raise ZeroSizeFileError(f"Downloaded file {file_unique_id} for {channel}/{post_id} is zero size or missing after download attempt.")
 
-    logger.info(f"Downloaded media file {file_unique_id} to {cache_path}")
-    return file_path, False
+        logger.info(f"Downloaded media file {file_unique_id} to {cache_path}")
+        return file_path, False
 
 
 def remove_old_cached_files_sync(media_files: list, cache_dir: str) -> tuple[list, int]:
@@ -424,13 +446,13 @@ def remove_old_cached_files_sync(media_files: list, cache_dir: str) -> tuple[lis
 
 async def download_new_files(media_files: list, cache_dir: str) -> None:
     """
-    Download files that are not in cache yet
+    Queue files that are not in cache yet for background download
     """
     if not media_files:
         logger.info("No media files found for download")
         return
 
-    files_to_download = 0
+    files_queued = 0
     for file_data in media_files:
         try:
             channel = file_data.get('channel')
@@ -452,17 +474,20 @@ async def download_new_files(media_files: list, cache_dir: str) -> None:
                 
             cache_path = os.path.join(post_dir, file_unique_id)
             if not os.path.exists(cache_path):
-                files_to_download += 1
-                logger.debug(f"Background download started for {channel}/{post_id}/{file_unique_id}")
-                await download_media_file(channel, post_id, file_unique_id)
-                await asyncio.sleep(1)  # Delay between downloads
+                try:
+                    await download_queue.put((channel, post_id, file_unique_id))
+                    files_queued += 1
+                    logger.debug(f"Queued for background download: {channel}/{post_id}/{file_unique_id}")
+                except asyncio.QueueFull:
+                    logger.warning(f"Download queue is full, skipping {channel}/{post_id}/{file_unique_id}")
+                    break
         
         except Exception as e:
-            logger.error(f"Background download failed for {channel}/{post_id}/{file_unique_id}: {str(e)}")
+            logger.error(f"Failed to queue download for {channel}/{post_id}/{file_unique_id}: {str(e)}")
             continue
 
-    #if files_to_download == 0:
-    #    logger.info("All media files are already in cache")
+    if files_queued > 0:
+        logger.info(f"Queued {files_queued} files for background download")
 
 
 def fix_corrupted_json(file_path: str) -> list:
@@ -490,6 +515,24 @@ def fix_corrupted_json(file_path: str) -> list:
     except Exception as e:
         logger.error(f"Failed to fix JSON file {file_path}: {str(e)}")
         return []
+
+async def background_download_worker():
+    """Worker that processes downloads from queue"""
+    while True:
+        try:
+            channel, post_id, file_unique_id = await download_queue.get()
+            logger.info(f"Background download: {channel}/{post_id}/{file_unique_id}")
+            
+            try:
+                await download_media_file(channel, post_id, file_unique_id)
+                await asyncio.sleep(2)
+            except Exception as e:
+                logger.error(f"Background download error for {channel}/{post_id}/{file_unique_id}: {e}")
+                
+        except Exception as e:
+            logger.error(f"Background download worker error: {e}")
+        finally:
+            download_queue.task_done()
 
 async def cache_media_files() -> None:
     """Background task for cache management: removes old files and downloads new ones"""

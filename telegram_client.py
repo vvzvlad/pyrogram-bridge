@@ -83,6 +83,36 @@ class TelegramClient:
             # Emergency termination
             os._exit(1)
 
+    async def safe_get_messages(self, channel_id, post_id, max_retries=2):
+        """Wrapper with retry logic for auth errors"""
+        for attempt in range(max_retries):
+            try:
+                return await asyncio.wait_for(
+                    self.client.get_messages(channel_id, post_id),
+                    timeout=30.0
+                )
+            except Exception as e:
+                if "KeyError" in str(e) and attempt < max_retries - 1:
+                    logger.warning(f"Auth error on attempt {attempt + 1}, retrying in 5s...")
+                    await asyncio.sleep(5)
+                    continue
+                raise
+
+    async def safe_download_media(self, file_id, file_name, max_retries=2):
+        """Wrapper with retry logic for download errors"""
+        for attempt in range(max_retries):
+            try:
+                return await asyncio.wait_for(
+                    self.client.download_media(file_id, file_name=file_name),
+                    timeout=120.0
+                )
+            except Exception as e:
+                if "KeyError" in str(e) and attempt < max_retries - 1:
+                    logger.warning(f"Download auth error on attempt {attempt + 1}, retrying...")
+                    await asyncio.sleep(5)
+                    continue
+                raise
+
     async def stop(self):
         if self.client.is_connected:
             await self.client.stop()
