@@ -511,7 +511,7 @@ class PostParser:
 
     def _sanitize_html(self, html_raw: str) -> str:
         allowed_tags = ['p', 'a', 'b', 'i', 'strong',
-                        'em', 'ul', 'ol', 'li', 'br',
+                        'em', 's', 'del', 'ul', 'ol', 'li', 'br',
                         'div', 'span', 'img', 'video', 'audio',
                         'source']
         allowed_attributes = {
