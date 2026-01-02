@@ -490,6 +490,7 @@ class PostParser:
             'reactions': self._extract_reactions(message),
             'media_group_id': message.media_group_id,
             'service': getattr(message, "service", None),
+            'show_caption_above_media': getattr(message, 'show_caption_above_media', False),
             'raw_message': str(message)
         }
         
@@ -604,18 +605,29 @@ class PostParser:
         media_html = self._generate_html_media(message)
         
         content_body.append(f'<div class="post">')
-        if forward_html: 
+        if forward_html:
             content_body.append(forward_html) # Forward info
             content_body.append("<br>")
-        if reply_html: 
+        if reply_html:
             content_body.append(reply_html) # Reply info
             content_body.append("<br>")
-        if text_html: 
-            content_body.append(text_html) # Post text
-            content_body.append("<br>")
+        
+        show_caption_above = getattr(message, 'show_caption_above_media', False)
 
-        content_body.append(media_html) # Media
-        content_body.append("<br>")
+        if show_caption_above:
+            if media_html:
+                content_body.append(media_html)
+                content_body.append("<br>")
+            if text_html:
+                content_body.append(text_html)
+                content_body.append("<br>")
+        else:
+            if text_html:
+                content_body.append(text_html)
+                content_body.append("<br>")
+            if media_html:
+                content_body.append(media_html)
+                content_body.append("<br>")
 
         if poll_html: content_body.append(poll_html) # Poll
         if message.forward_origin: content_body.append(f"--- Forwarded post end ---") # Forward info end
