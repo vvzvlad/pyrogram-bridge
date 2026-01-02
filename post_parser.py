@@ -615,19 +615,20 @@ class PostParser:
         show_caption_above = getattr(message, 'show_caption_above_media', False)
 
         if show_caption_above:
-            if media_html:
-                content_body.append(media_html)
-                content_body.append("<br>")
             if text_html:
                 content_body.append(text_html)
+                content_body.append("<br>")
+            if media_html:
+                content_body.append(media_html)
                 content_body.append("<br>")
         else:
-            if text_html:
-                content_body.append(text_html)
-                content_body.append("<br>")
             if media_html:
                 content_body.append(media_html)
                 content_body.append("<br>")
+            if text_html:
+                content_body.append(text_html)
+                content_body.append("<br>")
+
 
         if poll_html: content_body.append(poll_html) # Poll
         if message.forward_origin: content_body.append(f"--- Forwarded post end ---") # Forward info end
