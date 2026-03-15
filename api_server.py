@@ -68,7 +68,27 @@ if not logger.handlers: pass
 client = TelegramClient()
 Config = get_settings()
 DOWNLOAD_SEMAPHORE = asyncio.Semaphore(3)
+_semaphore_waiters = 0  # diagnostic: track how many requests wait for semaphore
 download_queue = asyncio.Queue(maxsize=100)
+
+async def _diag_event_loop_monitor():
+    """Periodic diagnostic: logs event loop tasks, semaphore state, and threadpool active threads."""
+    import threading
+    while True:
+        await asyncio.sleep(30)
+        loop = asyncio.get_event_loop()
+        all_tasks = asyncio.all_tasks(loop)
+        task_names = [t.get_name() for t in all_tasks]
+        logger.warning(
+            f"[DIAG] event_loop_monitor: "
+            f"active_tasks={len(all_tasks)}, "
+            f"semaphore_value={DOWNLOAD_SEMAPHORE._value}, "
+            f"semaphore_waiters={_semaphore_waiters}, "
+            f"download_queue_size={download_queue.qsize()}, "
+            f"active_threads={threading.active_count()}, "
+            f"tasks={task_names}"
+        )
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -81,15 +101,21 @@ async def lifespan(_: FastAPI):
     await client.start()
     background_task = asyncio.create_task(cache_media_files()) # Start background task
     worker_task = asyncio.create_task(background_download_worker()) # Start download worker
+    diag_task = asyncio.create_task(_diag_event_loop_monitor())  # Start diagnostic monitor
     yield
     background_task.cancel() # Cleanup
     worker_task.cancel()
+    diag_task.cancel()
     try:
         await background_task
     except asyncio.CancelledError:
         pass
     try:
         await worker_task
+    except asyncio.CancelledError:
+        pass
+    try:
+        await diag_task
     except asyncio.CancelledError:
         pass
     await client.stop()
@@ -192,7 +218,10 @@ def delayed_delete_file(file_path: str, delay: int = 300) -> None:
     Delay is set to 5 minutes by default.
     NOTE: Runs in a background thread via Starlette BackgroundTask.
     """
+    import threading
+    logger.warning(f"[DIAG] delayed_delete_file: starting sleep({delay}s) in thread {threading.current_thread().name}, active threads: {threading.active_count()}")
     time.sleep(delay)
+    logger.warning(f"[DIAG] delayed_delete_file: sleep finished, deleting {file_path}, active threads: {threading.active_count()}")
     try:
         os.remove(file_path)
         logger.info(f"Deleted temporary file {file_path} after delay of {delay} seconds")
@@ -226,7 +255,12 @@ async def download_media_file(channel: Union[str, int], post_id: int, file_uniqu
     Download media file from Telegram and save to cache
     Returns tuple of (file path, delete_after)
     """
+    global _semaphore_waiters
+    _semaphore_waiters += 1
+    logger.warning(f"[DIAG] download_media_file: waiting for semaphore, waiters={_semaphore_waiters}, semaphore_value={DOWNLOAD_SEMAPHORE._value}, channel={channel}, post_id={post_id}")
     async with DOWNLOAD_SEMAPHORE:
+        _semaphore_waiters -= 1
+        logger.warning(f"[DIAG] download_media_file: acquired semaphore, waiters_remaining={_semaphore_waiters}, semaphore_value={DOWNLOAD_SEMAPHORE._value}, channel={channel}, post_id={post_id}")
         base_cache_dir = os.path.abspath("./data/cache")
         
         # Create nested cache structure
@@ -522,6 +556,7 @@ async def background_download_worker():
         try:
             channel, post_id, file_unique_id = await download_queue.get()
             logger.info(f"Background download: {channel}/{post_id}/{file_unique_id}")
+            logger.warning(f"[DIAG] background_download_worker: queue_size={download_queue.qsize()}, semaphore_value={DOWNLOAD_SEMAPHORE._value}, waiters={_semaphore_waiters}")
             
             try:
                 await download_media_file(channel, post_id, file_unique_id)
