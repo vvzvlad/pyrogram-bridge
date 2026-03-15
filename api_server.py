@@ -227,6 +227,8 @@ async def download_media_file(channel: Union[str, int], post_id: int, file_uniqu
     Download media file from Telegram and save to cache
     Returns tuple of (file path, delete_after)
     """
+    import time as _time
+    _fn_start = _time.monotonic()
     base_cache_dir = os.path.abspath("./data/cache")
     
     # Create nested cache structure
@@ -789,8 +791,16 @@ async def get_media(channel: str, post_id: int, file_unique_id: str, digest: str
             channel_id = int(channel)
             
         try: # Wrap the download and prepare call
+            import time as _time
+            _sem_wait_start = _time.monotonic()
             async with HTTP_DOWNLOAD_SEMAPHORE:  # limit concurrent live HTTP downloads
+                _sem_wait = _time.monotonic() - _sem_wait_start
+                if _sem_wait > 0.5:
+                    logger.warning(f"diag_semaphore_wait: {channel}/{post_id}/{file_unique_id} waited {_sem_wait:.3f}s for HTTP_DOWNLOAD_SEMAPHORE")
+                _dl_start = _time.monotonic()
                 file_path, delete_after = await download_media_file(channel_id, post_id, file_unique_id)
+                _dl_elapsed = _time.monotonic() - _dl_start
+                logger.info(f"diag_download_timing: {channel}/{post_id}/{file_unique_id} download_media_file took {_dl_elapsed:.3f}s (semaphore_wait={_sem_wait:.3f}s)")
             if not file_path:
                 raise HTTPException(status_code=404, detail="File not found")
             if file_path:

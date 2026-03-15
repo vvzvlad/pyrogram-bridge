@@ -511,6 +511,8 @@ class PostParser:
     
 
     def _sanitize_html(self, html_raw: str) -> str:
+        import time as _time
+        sanitize_start = _time.monotonic()
         allowed_tags = ['p', 'a', 'b', 'i', 'strong',
                         'em', 's', 'del', 'ul', 'ol', 'li', 'br',
                         'div', 'span', 'img', 'video', 'audio',
@@ -537,6 +539,9 @@ class PostParser:
                 css_sanitizer=css_sanitizer,
                 strip=True,
             )
+            elapsed = _time.monotonic() - sanitize_start
+            if elapsed > 0.05:
+                logger.warning(f"diag_sanitize_slow: bleach.clean() took {elapsed:.3f}s, input_len={len(html_raw)}")
             return sanitized_html
         except Exception as e:
             logger.error(f"html_sanitization_error: error {str(e)}")
@@ -928,15 +933,24 @@ class PostParser:
             return None
 
     async def _persist_media_file_id_async(self, file_path: str, file_data: dict) -> None:
+        import time as _time
+        task_start = _time.monotonic()
+        channel = file_data.get('channel', '?')
+        post_id = file_data.get('post_id', '?')
+        file_uid = file_data.get('file_unique_id', '?')
         try:
             existing_data = []
             if os.path.exists(file_path):
+                read_start = _time.monotonic()
                 existing_data = await asyncio.to_thread(read_json_file_sync, file_path)
+                read_elapsed = _time.monotonic() - read_start
+                if read_elapsed > 0.1:
+                    logger.warning(f"diag_persist_slow_read: {channel}/{post_id}/{file_uid} read {len(existing_data)} entries in {read_elapsed:.3f}s")
 
             found = False
             for item in existing_data:
-                if (item.get('channel') == file_data['channel'] and 
-                        item.get('post_id') == file_data['post_id'] and 
+                if (item.get('channel') == file_data['channel'] and
+                        item.get('post_id') == file_data['post_id'] and
                         item.get('file_unique_id') == file_data['file_unique_id']):
                     item['added'] = datetime.now().timestamp()
                     found = True
@@ -945,10 +959,23 @@ class PostParser:
             if not found:
                 existing_data.append(file_data)
 
+            lock_wait_start = _time.monotonic()
             async with get_media_file_ids_lock():
+                lock_acquired = _time.monotonic()
+                lock_wait = lock_acquired - lock_wait_start
+                if lock_wait > 0.05:
+                    logger.warning(f"diag_persist_lock_wait: {channel}/{post_id}/{file_uid} waited {lock_wait:.3f}s for lock")
+                write_start = _time.monotonic()
                 await asyncio.to_thread(write_json_file_sync, file_path, existing_data)
+                write_elapsed = _time.monotonic() - write_start
+                if write_elapsed > 0.1:
+                    logger.warning(f"diag_persist_slow_write: {channel}/{post_id}/{file_uid} wrote {len(existing_data)} entries in {write_elapsed:.3f}s")
         except Exception as e:
             logger.error(f"file_id_save_error: error writing to {file_path}, error {str(e)}")
+        finally:
+            total = _time.monotonic() - task_start
+            if total > 0.2:
+                logger.warning(f"diag_persist_slow_total: {channel}/{post_id}/{file_uid} total {total:.3f}s")
 
     def _save_media_file_ids(self, message: Message) -> None:
         try:
@@ -976,7 +1003,7 @@ class PostParser:
                 elif message.video_note:    file_data['file_unique_id'] = message.video_note.file_unique_id
                 elif message.animation:     file_data['file_unique_id'] = message.animation.file_unique_id
                 elif message.sticker:       file_data['file_unique_id'] = message.sticker.file_unique_id
-                elif message.web_page and message.web_page.photo: 
+                elif message.web_page and message.web_page.photo:
                     file_data['file_unique_id'] = message.web_page.photo.file_unique_id
 
                 if file_data['file_unique_id']:
@@ -988,7 +1015,14 @@ class PostParser:
                     try:
                         loop = asyncio.get_running_loop()
                         if loop.is_running():
-                            loop.create_task(self._persist_media_file_id_async(file_path, file_data))
+                            task = loop.create_task(self._persist_media_file_id_async(file_path, file_data))
+                            # Диагностика: считаем сколько fire-and-forget задач висит в очереди
+                            all_tasks = asyncio.all_tasks(loop)
+                            persist_tasks = [t for t in all_tasks if '_persist_media_file_id_async' in str(t.get_coro())]
+                            task_count = len(persist_tasks)
+                            if task_count > 5:
+                                logger.warning(f"diag_persist_task_queue: {task_count} pending _persist_media_file_id_async tasks (msg {message.id})")
+                            logger.debug(f"diag_persist_task_created: queued for {channel_username}/{message.id}/{file_data['file_unique_id']}, total pending: {task_count}")
                         else:
                             # Fallback sync write (should not occur during normal FastAPI runtime)
                             existing_data = []
