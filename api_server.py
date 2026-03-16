@@ -121,12 +121,11 @@ if __name__ == "__main__":
     # Log uvloop status
     logger.info("    uvloop: enabled (asyncio speedup active)")
     
-    try:        
+    try:
         uvicorn.run(
-            "api_server:app", 
-            host=Config["api_host"], 
-            port=Config["api_port"], 
-            reload=True,
+            "api_server:app",
+            host=Config["api_host"],
+            port=Config["api_port"],
             loop="uvloop"
         )
     except OSError as e:

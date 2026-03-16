@@ -35,6 +35,7 @@ class TelegramClient:
         )
         self.disconnect_count = 0
         self.max_disconnects = 3
+        self._shutting_down = False  # Guard to prevent re-triggering restart during shutdown
         self._setup_connection_handlers()
 
     def _ensure_session_directory(self):
@@ -52,6 +53,10 @@ class TelegramClient:
 
     async def _on_disconnect(self, _client, _session=None):
         """Handles disconnection from Telegram servers"""
+        # Ignore disconnects that are caused by the intentional shutdown sequence
+        if self._shutting_down:
+            logger.debug("connection_handler: ignoring disconnect event during shutdown")
+            return
         self.disconnect_count += 1
         logger.warning(f"connection_handler: connection lost (#{self.disconnect_count})")
         
@@ -73,6 +78,7 @@ class TelegramClient:
 
     def _restart_app(self):
         """Restarts the application by sending SIGTERM to the process"""
+        self._shutting_down = True  # Set flag before sending signal to suppress subsequent disconnect events
         logger.warning("connection_handler: restarting application by sending SIGTERM")
         try:
             # Use SIGTERM for proper Docker container restart
