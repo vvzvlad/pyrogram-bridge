@@ -21,7 +21,7 @@ from pyrogram.enums import MessageMediaType
 from bleach.css_sanitizer import CSSSanitizer   
 from bleach import clean as HTMLSanitizer
 from config import get_settings
-from file_io import read_json_file_sync, write_json_file_sync, get_media_file_ids_lock
+from file_io import upsert_media_file_id_sync, DB_PATH
 from url_signer import generate_media_digest
 
 Config = get_settings()
@@ -932,60 +932,16 @@ class PostParser:
             logger.error(f"file_id_extraction_error: media_type {message.media}, error {str(e)}")
             return None
 
-    async def _persist_media_file_id_async(self, file_path: str, file_data: dict) -> None:
-        import time as _time
-        task_start = _time.monotonic()
-        channel = file_data.get('channel', '?')
-        post_id = file_data.get('post_id', '?')
-        file_uid = file_data.get('file_unique_id', '?')
+    async def _persist_media_file_id_async(self, channel: str, post_id: int, file_unique_id: str, added: float) -> None:
+        """Persist a single media file ID record to SQLite (fire-and-forget)."""
         try:
-            existing_data = []
-            if os.path.exists(file_path):
-                read_start = _time.monotonic()
-                existing_data = await asyncio.to_thread(read_json_file_sync, file_path)
-                read_elapsed = _time.monotonic() - read_start
-                if read_elapsed > 0.1:
-                    logger.warning(f"diag_persist_slow_read: {channel}/{post_id}/{file_uid} read {len(existing_data)} entries in {read_elapsed:.3f}s")
-
-            found = False
-            for item in existing_data:
-                if (item.get('channel') == file_data['channel'] and
-                        item.get('post_id') == file_data['post_id'] and
-                        item.get('file_unique_id') == file_data['file_unique_id']):
-                    item['added'] = datetime.now().timestamp()
-                    found = True
-                    break
-
-            if not found:
-                existing_data.append(file_data)
-
-            lock_wait_start = _time.monotonic()
-            async with get_media_file_ids_lock():
-                lock_acquired = _time.monotonic()
-                lock_wait = lock_acquired - lock_wait_start
-                if lock_wait > 0.05:
-                    logger.warning(f"diag_persist_lock_wait: {channel}/{post_id}/{file_uid} waited {lock_wait:.3f}s for lock")
-                write_start = _time.monotonic()
-                await asyncio.to_thread(write_json_file_sync, file_path, existing_data)
-                write_elapsed = _time.monotonic() - write_start
-                if write_elapsed > 0.1:
-                    logger.warning(f"diag_persist_slow_write: {channel}/{post_id}/{file_uid} wrote {len(existing_data)} entries in {write_elapsed:.3f}s")
+            await asyncio.to_thread(upsert_media_file_id_sync, DB_PATH, channel, post_id, file_unique_id, added)
+            logger.debug(f"persist_media_file_id: upserted {channel}/{post_id}/{file_unique_id}")
         except Exception as e:
-            logger.error(f"file_id_save_error: error writing to {file_path}, error {str(e)}")
-        finally:
-            total = _time.monotonic() - task_start
-            if total > 0.2:
-                logger.warning(f"diag_persist_slow_total: {channel}/{post_id}/{file_uid} total {total:.3f}s")
+            logger.error(f"file_id_save_error: error upserting {channel}/{post_id}/{file_unique_id}, error {str(e)}")
 
     def _save_media_file_ids(self, message: Message) -> None:
         try:
-            file_data = {
-                'channel': '',
-                'post_id': 0,
-                'file_unique_id': '',
-                'added': .0
-            }
-
             channel_username = self.get_channel_username(message)
             if not channel_username:
                 logger.error(f"channel_username_error: no username found for chat in message {message.id}")
@@ -993,55 +949,41 @@ class PostParser:
 
             if message.media:
                 # Skip large videos - they shouldn't be cached permanently
-                if message.video and message.video.file_size and message.video.file_size > 100 * 1024 * 1024: return
-                
-                if   message.photo:         file_data['file_unique_id'] = message.photo.file_unique_id
-                elif message.video:         file_data['file_unique_id'] = message.video.file_unique_id
-                elif message.document:      file_data['file_unique_id'] = message.document.file_unique_id
-                elif message.audio:         file_data['file_unique_id'] = message.audio.file_unique_id
-                elif message.voice:         file_data['file_unique_id'] = message.voice.file_unique_id
-                elif message.video_note:    file_data['file_unique_id'] = message.video_note.file_unique_id
-                elif message.animation:     file_data['file_unique_id'] = message.animation.file_unique_id
-                elif message.sticker:       file_data['file_unique_id'] = message.sticker.file_unique_id
+                if message.video and message.video.file_size and message.video.file_size > 100 * 1024 * 1024:
+                    return
+
+                file_unique_id = ''
+                if   message.photo:      file_unique_id = message.photo.file_unique_id
+                elif message.video:      file_unique_id = message.video.file_unique_id
+                elif message.document:   file_unique_id = message.document.file_unique_id
+                elif message.audio:      file_unique_id = message.audio.file_unique_id
+                elif message.voice:      file_unique_id = message.voice.file_unique_id
+                elif message.video_note: file_unique_id = message.video_note.file_unique_id
+                elif message.animation:  file_unique_id = message.animation.file_unique_id
+                elif message.sticker:    file_unique_id = message.sticker.file_unique_id
                 elif message.web_page and message.web_page.photo:
-                    file_data['file_unique_id'] = message.web_page.photo.file_unique_id
+                    file_unique_id = message.web_page.photo.file_unique_id
 
-                if file_data['file_unique_id']:
-                    file_data['channel'] = channel_username
-                    file_data['post_id'] = message.id
-                    file_data['added'] = datetime.now().timestamp()
-
-                    file_path = os.path.join(os.path.abspath("./data"), 'media_file_ids.json')
+                if file_unique_id:
+                    added_ts = datetime.now().timestamp()
                     try:
                         loop = asyncio.get_running_loop()
                         if loop.is_running():
-                            task = loop.create_task(self._persist_media_file_id_async(file_path, file_data))
-                            # Диагностика: считаем сколько fire-and-forget задач висит в очереди
+                            task = loop.create_task(
+                                self._persist_media_file_id_async(channel_username, message.id, file_unique_id, added_ts)
+                            )
+                            # Count pending fire-and-forget tasks to surface backlog issues
                             all_tasks = asyncio.all_tasks(loop)
                             persist_tasks = [t for t in all_tasks if '_persist_media_file_id_async' in str(t.get_coro())]
                             task_count = len(persist_tasks)
                             if task_count > 5:
-                                logger.warning(f"diag_persist_task_queue: {task_count} pending _persist_media_file_id_async tasks (msg {message.id})")
-                            logger.debug(f"diag_persist_task_created: queued for {channel_username}/{message.id}/{file_data['file_unique_id']}, total pending: {task_count}")
+                                logger.warning(f"persist_task_queue: {task_count} pending _persist_media_file_id_async tasks (msg {message.id})")
+                            logger.debug(f"persist_task_created: queued for {channel_username}/{message.id}/{file_unique_id}, total pending: {task_count}")
                         else:
-                            # Fallback sync write (should not occur during normal FastAPI runtime)
-                            existing_data = []
-                            if os.path.exists(file_path):
-                                existing_data = read_json_file_sync(file_path)  # type: ignore
-                            found = False
-                            for item in existing_data:
-                                if (item.get('channel') == file_data['channel'] and 
-                                        item.get('post_id') == file_data['post_id'] and 
-                                        item.get('file_unique_id') == file_data['file_unique_id']):
-                                    item['added'] = datetime.now().timestamp()
-                                    found = True
-                                    break
-                            if not found:
-                                existing_data.append(file_data)
-                            write_json_file_sync(file_path, existing_data)  # type: ignore
-
+                            # Fallback sync path (should not occur during normal FastAPI runtime)
+                            upsert_media_file_id_sync(DB_PATH, channel_username, message.id, file_unique_id, added_ts)
                     except Exception as e:
-                        logger.error(f"file_id_save_error: error writing to {file_path}, error {str(e)}")
+                        logger.error(f"file_id_save_error: error saving {channel_username}/{message.id}/{file_unique_id}, error {str(e)}")
 
         except Exception as e:
             logger.error(f"file_id_collection_error: message_id {message.id}, error {str(e)}")

@@ -24,7 +24,6 @@ import uvloop
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.background import BackgroundTask
-import json_repair
 import sys
 
 import magic
@@ -37,7 +36,8 @@ from config import get_settings, setup_logging
 from rss_generator import generate_channel_rss, generate_channel_html
 from post_parser import PostParser
 from url_signer import verify_media_digest, generate_media_digest
-from file_io import read_json_file_sync, write_json_file_sync, get_media_file_ids_lock
+from file_io import (DB_PATH, init_db_sync, get_all_media_file_ids_sync,
+                     update_media_file_access_sync, remove_media_file_ids_sync)
 
 # Global python-magic instance for MIME type detection
 magic_mime = magic.Magic(mime=True)
@@ -78,7 +78,10 @@ async def lifespan(_: FastAPI):
     
     base_cache_dir = os.path.abspath("./data/cache")
     os.makedirs(base_cache_dir, exist_ok=True) # Create cache directory
-    
+
+    # Initialize SQLite database (creates table if not present)
+    await asyncio.to_thread(init_db_sync, DB_PATH)
+
     await client.start()
     background_task = asyncio.create_task(cache_media_files()) # Start background task
     worker_task = asyncio.create_task(background_download_worker()) # Start download worker
@@ -290,21 +293,14 @@ async def download_media_file(channel: Union[str, int], post_id: int, file_uniqu
                 logger.error(f"cleanup_error: Failed to remove zero-size cached file {cache_path}: {e}")
             # Do not raise error here, proceed to download below
         else:
-            # File exists and is not zero size, update timestamp and return
+            # File exists and is not zero size, update access timestamp and return
             logger.info(f"Found cached media file: {cache_path}")
-            # Update access timestamp in media_file_ids.json
-            file_ids_path = os.path.join(os.path.abspath("./data"), 'media_file_ids.json')
             try:
-                if os.path.exists(file_ids_path):
-                    media_files = await asyncio.to_thread(read_json_file_sync, file_ids_path)
-                    for file_data in media_files:
-                        if (file_data.get('channel') == str(channel) and  # Ensure channel is string for comparison
-                            file_data.get('post_id') == post_id and
-                            file_data.get('file_unique_id') == file_unique_id):
-                            file_data['added'] = datetime.now().timestamp()
-                            break
-                    async with get_media_file_ids_lock():
-                        await asyncio.to_thread(write_json_file_sync, file_ids_path, media_files)
+                await asyncio.to_thread(
+                    update_media_file_access_sync,
+                    DB_PATH, str(channel), post_id, file_unique_id,
+                    datetime.now().timestamp()
+                )
             except Exception as e:
                 logger.error(f"Failed to update timestamp for {channel}/{post_id}/{file_unique_id}: {str(e)}")
             return cache_path, False
@@ -313,31 +309,17 @@ async def download_media_file(channel: Union[str, int], post_id: int, file_uniqu
     if not file_id:
         error_message = f"Media with file_unique_id {file_unique_id} not found in message {post_id} for channel {channel}"
         logger.error(error_message)
-        
-        # Attempt to remove the invalid entry from media_file_ids.json using threadpool I/O
-        file_ids_path = os.path.join(os.path.abspath("./data"), 'media_file_ids.json')
-        try:
-            if os.path.exists(file_ids_path):
-                media_files = await asyncio.to_thread(read_json_file_sync, file_ids_path)
-                initial_count = len(media_files)
-                media_files_updated = [
-                    f_data for f_data in media_files
-                    if not (
-                        f_data.get('channel') == str(channel) and
-                        f_data.get('post_id') == post_id and
-                        f_data.get('file_unique_id') == file_unique_id
-                    )
-                ]
-                if len(media_files_updated) < initial_count:
-                    async with get_media_file_ids_lock():
-                        await asyncio.to_thread(write_json_file_sync, file_ids_path, media_files_updated)
-                    logger.info(f"Removed invalid entry for {channel}/{post_id}/{file_unique_id} from media_file_ids.json")
-                else:
-                    logger.warning(f"Entry for {channel}/{post_id}/{file_unique_id} not found in media_file_ids.json for removal")
 
+        # Remove the invalid entry from the SQLite database
+        try:
+            await asyncio.to_thread(
+                remove_media_file_ids_sync,
+                DB_PATH, [(str(channel), post_id, file_unique_id)]
+            )
+            logger.info(f"Removed invalid entry for {channel}/{post_id}/{file_unique_id} from SQLite")
         except Exception as e:
-            logger.error(f"Failed to remove entry for {channel}/{post_id}/{file_unique_id} from media_file_ids.json: {str(e)}")
-            
+            logger.error(f"Failed to remove entry for {channel}/{post_id}/{file_unique_id} from SQLite: {str(e)}")
+
         raise HTTPException(status_code=404, detail="File not found in message")
         
     try:
@@ -431,7 +413,7 @@ def remove_old_cached_files_sync(media_files: list, cache_dir: str) -> tuple[lis
                         files_removed += 1
                         logger.info(f"Removed temporary file: {file_path}")
                         
-                        # Also remove entry from media_file_ids.json if exists
+                        # Also remove the temporary file entry from the in-memory list
                         updated_media_files = [
                             f for f in updated_media_files 
                             if not (f.get('channel') == channel and 
@@ -491,32 +473,6 @@ async def download_new_files(media_files: list, cache_dir: str) -> None:
         logger.info(f"Queued {files_queued} files for background download")
 
 
-def fix_corrupted_json(file_path: str) -> list:
-    """
-    Attempt to fix corrupted JSON file using json-repair library
-    Returns list of valid entries
-    """
-    try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-            
-        # Try to repair and parse the JSON
-        fixed_data = json_repair.loads(content)
-        
-        # Validate entries
-        valid_entries = []
-        if isinstance(fixed_data, list):
-            for entry in fixed_data:
-                if isinstance(entry, dict) and all(key in entry for key in ['channel', 'post_id', 'file_unique_id']):
-                    valid_entries.append(entry)
-                
-        logger.info(f"Fixed JSON file: {file_path}, found {len(valid_entries)} valid entries")
-        return valid_entries
-        
-    except Exception as e:
-        logger.error(f"Failed to fix JSON file {file_path}: {str(e)}")
-        return []
-
 async def background_download_worker():
     """Worker that processes downloads from queue"""
     while True:
@@ -541,37 +497,33 @@ async def cache_media_files() -> None:
     delay = 60
     while True:
         try:
-            file_path = os.path.join(os.path.abspath("./data"), 'media_file_ids.json')
-            if not os.path.exists(file_path):
-                await asyncio.sleep(delay)
-                continue
-
-            try:
-                media_files = await asyncio.to_thread(read_json_file_sync, file_path)
-            except json.JSONDecodeError:
-                logger.error(f"JSON decode error in {file_path}, attempting to fix")
-                media_files = await asyncio.to_thread(fix_corrupted_json, file_path)
-                if media_files:
-                    await asyncio.to_thread(write_json_file_sync, file_path, media_files)
-                else:
-                    logger.error("Failed to fix JSON file, skipping cache update")
-                    await asyncio.sleep(delay)
-                    continue
+            # Load all media file ID records from SQLite
+            media_files = await asyncio.to_thread(get_all_media_file_ids_sync, DB_PATH)
 
             cache_dir = os.path.abspath("./data/cache")
             updated_media_files, files_removed = await asyncio.to_thread(remove_old_cached_files_sync, media_files, cache_dir)
 
             if files_removed > 0:
                 try:
-                    async with get_media_file_ids_lock():
-                        await asyncio.to_thread(write_json_file_sync, file_path, updated_media_files)
+                    # Determine which entries were removed and delete them from SQLite
+                    updated_set = {
+                        (r['channel'], r['post_id'], r['file_unique_id'])
+                        for r in updated_media_files
+                    }
+                    removed_entries = [
+                        (r['channel'], r['post_id'], r['file_unique_id'])
+                        for r in media_files
+                        if (r['channel'], r['post_id'], r['file_unique_id']) not in updated_set
+                    ]
+                    if removed_entries:
+                        await asyncio.to_thread(remove_media_file_ids_sync, DB_PATH, removed_entries)
                     logger.info(f"Removed {files_removed} old files from cache")
                 except Exception as e:
-                    logger.error(f"Failed to update media_file_ids.json: {str(e)}")
+                    logger.error(f"Failed to remove old entries from SQLite: {str(e)}")
 
             await download_new_files(updated_media_files, cache_dir)
             await asyncio.sleep(delay)  # Check every delay seconds
-            
+
         except Exception as e:
             logger.error(f"Cache media files error: {str(e)}")
             await asyncio.sleep(delay)
@@ -616,17 +568,14 @@ def calculate_cache_stats() -> dict[str, Any]:
         cache_files_count = 0
         cache_total_size_mb = 0
 
-    media_file_ids_path = os.path.join(os.path.abspath("./data"), "media_file_ids.json")
     cache_times = []
-    if os.path.exists(media_file_ids_path):
-        try:
-            with open(media_file_ids_path, "r", encoding="utf-8") as json_file:
-                media_files = json.load(json_file)
-            for entry in media_files:
-                if "added" in entry:
-                    cache_times.append(entry["added"])
-        except Exception as e:
-            logger.error(f"Error reading media_file_ids.json: {str(e)}")
+    try:
+        media_files = get_all_media_file_ids_sync(DB_PATH)
+        for entry in media_files:
+            if "added" in entry:
+                cache_times.append(entry["added"])
+    except Exception as e:
+        logger.error(f"Error reading media file IDs from SQLite: {str(e)}")
     if cache_times:
         cache_time_diff_seconds = max(cache_times) - min(cache_times)
         cache_time_diff_days = round(cache_time_diff_seconds / 86400, 2)  # rounded to two decimals
