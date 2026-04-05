@@ -47,15 +47,18 @@ def get_settings() -> dict[str, Any]:
 
     log_level = os.getenv("LOG_LEVEL", "INFO")
 
-    # Build MTProto proxy config if proxy host is provided
+    # Build MTProto proxy config if proxy host is provided.
+    # Telegram MTProto proxy (telegrammessenger/proxy) exposes a SOCKS5 interface,
+    # so Pyrogram connects to it via SOCKS5 scheme.
     proxy_host = os.getenv("TG_PROXY_HOST")
     proxy: dict[str, Any] | None = None
     if proxy_host:
         proxy = {
-            "scheme": "mtproto",
+            "scheme": "SOCKS5",
             "hostname": proxy_host,
-            "port": int(os.getenv("TG_PROXY_PORT") or 443),
-            "secret": os.getenv("TG_PROXY_SECRET", ""),
+            "port": int(os.getenv("TG_PROXY_PORT") or 1080),
+            "username": os.getenv("TG_PROXY_USERNAME") or None,
+            "password": os.getenv("TG_PROXY_PASSWORD") or None,
         }
 
     return {
