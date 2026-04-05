@@ -8,6 +8,9 @@ services:
     environment:
       TG_API_ID: XXX
       TG_API_HASH: XXX
+      # TG_PROXY_HOST: 127.0.0.1     # MTProto proxy host (optional)
+      # TG_PROXY_PORT: 443            # MTProto proxy port (default: 443)
+      # TG_PROXY_SECRET: XXX          # MTProto proxy secret
       PYROGRAM_BRIDGE_URL: https://pgbridge.example.com
       API_PORT: 80
       TOKEN: ХХХ

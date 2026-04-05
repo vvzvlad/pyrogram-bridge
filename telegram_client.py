@@ -32,6 +32,7 @@ class TelegramClient:
             api_id=settings["tg_api_id"],
             api_hash=settings["tg_api_hash"],
             workdir=settings["session_path"],
+            proxy=settings["proxy"],  # MTProto proxy config, None if not set
         )
         self.disconnect_count = 0
         self.max_disconnects = 3

@@ -47,6 +47,17 @@ def get_settings() -> dict[str, Any]:
 
     log_level = os.getenv("LOG_LEVEL", "INFO")
 
+    # Build MTProto proxy config if proxy host is provided
+    proxy_host = os.getenv("TG_PROXY_HOST")
+    proxy: dict[str, Any] | None = None
+    if proxy_host:
+        proxy = {
+            "scheme": "mtproto",
+            "hostname": proxy_host,
+            "port": int(os.getenv("TG_PROXY_PORT") or 443),
+            "secret": os.getenv("TG_PROXY_SECRET", ""),
+        }
+
     return {
         "tg_api_id": int(tg_api_id),
         "tg_api_hash": tg_api_hash,
@@ -60,4 +71,5 @@ def get_settings() -> dict[str, Any]:
         "time_based_merge": os.getenv("TIME_BASED_MERGE", "False").strip() in ["True", "true"],
         "show_bridge_link": os.getenv("SHOW_BRIDGE_LINK", "False").strip() in ["True", "true"],
         "show_post_flags": os.getenv("SHOW_POST_FLAGS", "False").strip() in ["True", "true"],
-    } 
+        "proxy": proxy,
+    }
