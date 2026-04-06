@@ -841,8 +841,8 @@ async def get_media(channel: str, post_id: int, file_unique_id: str, request: Re
             expected_digest = generate_media_digest(url)
             logger.error(f"Invalid digest for media {url}: {digest}, expected: {expected_digest}")
             raise HTTPException(status_code=403, detail="Invalid URL signature")
-        else:
-            logger.info(f"Valid digest for media {url}: {digest}")   
+        #else:
+        #    logger.info(f"Valid digest for media {url}: {digest}")   
             
         # Convert numeric channel ID to int if needed
         channel_id: Union[str, int] = channel
