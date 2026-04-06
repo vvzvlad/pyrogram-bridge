@@ -48,13 +48,22 @@ def init_db_sync(db_path: str) -> None:
             )
             """
         )
+        # Add mime_type column if it does not exist yet (idempotent migration)
+        try:
+            conn.execute("ALTER TABLE media_file_ids ADD COLUMN mime_type TEXT")
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" not in str(e):
+                raise  # Re-raise any OperationalError that is not "duplicate column name"
 
 
 def upsert_media_file_id_sync(db_path: str, channel: str, post_id: int, file_unique_id: str, added: float) -> None:
     """Insert or replace a single media file ID record."""
     with _db_connection(db_path) as conn:
         conn.execute(
-            "INSERT OR REPLACE INTO media_file_ids (channel, post_id, file_unique_id, added) VALUES (?, ?, ?, ?)",
+            """INSERT INTO media_file_ids (channel, post_id, file_unique_id, added)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(channel, post_id, file_unique_id)
+               DO UPDATE SET added = excluded.added""",
             (channel, post_id, file_unique_id, added),
         )
 
@@ -83,6 +92,28 @@ def remove_media_file_ids_sync(db_path: str, entries: List[tuple]) -> None:
         conn.executemany(
             "DELETE FROM media_file_ids WHERE channel = ? AND post_id = ? AND file_unique_id = ?",
             entries,
+        )
+
+
+def get_mime_type_sync(db_path: str, channel: str, post_id: int, file_unique_id: str) -> str | None:
+    """Return the cached MIME type for a given media key, or None if not stored yet."""
+    with _db_connection(db_path) as conn:
+        cursor = conn.execute(
+            "SELECT mime_type FROM media_file_ids WHERE channel = ? AND post_id = ? AND file_unique_id = ?",
+            (channel, post_id, file_unique_id),
+        )
+        row = cursor.fetchone()
+    if row is None:
+        return None
+    return row[0]  # May be None if the column value was never set
+
+
+def set_mime_type_sync(db_path: str, channel: str, post_id: int, file_unique_id: str, mime_type: str) -> None:
+    """Persist a detected MIME type for an existing media file ID record."""
+    with _db_connection(db_path) as conn:
+        conn.execute(
+            "UPDATE media_file_ids SET mime_type = ? WHERE channel = ? AND post_id = ? AND file_unique_id = ?",
+            (mime_type, channel, post_id, file_unique_id),
         )
 
 

@@ -38,7 +38,8 @@ from rss_generator import generate_channel_rss, generate_channel_html
 from post_parser import PostParser
 from url_signer import verify_media_digest, generate_media_digest
 from file_io import (DB_PATH, init_db_sync, get_all_media_file_ids_sync,
-                     update_media_file_access_sync, remove_media_file_ids_sync)
+                     update_media_file_access_sync, remove_media_file_ids_sync,
+                     get_mime_type_sync, set_mime_type_sync)
 
 # Global python-magic instance for MIME type detection
 magic_mime = magic.Magic(mime=True)
@@ -49,15 +50,11 @@ class ZeroSizeFileError(Exception):
 
 class RequestLoggingMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        # Log request details
-        logger.info(f"Request: {request.method} {request.url}")
-        logger.info(f"Headers: {dict(request.headers)}")
-        logger.info(f"Query params: {dict(request.query_params)}")
-        
+        # Log only method and URL at debug level to avoid flooding logs on active RSS polling
+        logger.debug(f"Request: {request.method} {request.url}")
         try:
             response = await call_next(request)
-            # Log response details
-            logger.info(f"Response status: {response.status_code}")
+            logger.debug(f"Response status: {response.status_code}")
             return response
         except Exception as e:
             logger.error(f"Request processing error: {str(e)}")
@@ -204,17 +201,30 @@ def delayed_delete_file(file_path: str, delay: int = 300) -> None:
         logger.error(f"Failed to delete temporary file {file_path}: {str(e)}")
 
 
-async def prepare_file_response(file_path: str, request: Request, delete_after: bool = False) -> StreamingResponse:
+async def prepare_file_response(file_path: str, request: Request, delete_after: bool = False,
+                                media_key: tuple[str, int, str] | None = None) -> StreamingResponse:
     """Prepare a streaming file response with HTTP Range request support."""
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="File not found")
 
-    try:
-        # Determine MIME type using python-magic in a thread to avoid blocking the event loop
-        media_type = await asyncio.to_thread(magic_mime.from_file, file_path)
-    except Exception as e:
-        logger.warning(f"Failed to determine MIME type using python-magic: {str(e)}")
-        media_type = None
+    media_type: str | None = None
+
+    if media_key is not None:
+        # Try to load the cached MIME type from the database (avoids repeated python-magic I/O)
+        channel_key, post_id_key, file_unique_id_key = media_key
+        media_type = await asyncio.to_thread(get_mime_type_sync, DB_PATH, channel_key, post_id_key, file_unique_id_key)
+
+    if not media_type:
+        # Cache miss or no media_key — detect with python-magic in a thread to avoid blocking the event loop
+        try:
+            media_type = await asyncio.to_thread(magic_mime.from_file, file_path)
+        except Exception as e:
+            logger.warning(f"Failed to determine MIME type using python-magic: {str(e)}")
+            media_type = None
+
+        # Persist the detected MIME type so the next request can skip python-magic
+        if media_type and media_key is not None:
+            await asyncio.to_thread(set_mime_type_sync, DB_PATH, channel_key, post_id_key, file_unique_id_key, media_type)
 
     if not media_type: media_type, _ = mimetypes.guess_type(file_path)  # Fallback to mimetypes if python-magic failed
     if not media_type: media_type = "application/octet-stream"  # Final fallback to octet-stream
@@ -853,7 +863,8 @@ async def get_media(channel: str, post_id: int, file_unique_id: str, request: Re
             if not file_path:
                 raise HTTPException(status_code=404, detail="File not found")
             if file_path:
-                return await prepare_file_response(file_path, request=request, delete_after=delete_after)
+                return await prepare_file_response(file_path, request=request, delete_after=delete_after,
+                                                   media_key=(str(channel), post_id, file_unique_id))
         except ZeroSizeFileError as e: # Catch zero-size file errors
             logger.warning(f"zero_size_file_encountered: {str(e)}. Instructing client to retry.")
             return Response(
