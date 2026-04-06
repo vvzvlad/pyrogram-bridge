@@ -218,7 +218,12 @@ async def prepare_file_response(file_path: str, delete_after: bool = False) -> F
     if not media_type: media_type = "application/octet-stream" # Final fallback to octet-stream
     
     logger.debug(f"Determined media type for {os.path.basename(file_path)}: {media_type}")
-    headers = {"Content-Disposition": f"inline; filename={os.path.basename(file_path)}"}
+    headers = {
+        "Content-Disposition": f"inline; filename={os.path.basename(file_path)}",
+        # Files are addressed by file_unique_id which is immutable in Telegram,
+        # so it is safe to cache them aggressively on the client side.
+        "Cache-Control": "public, max-age=86400, immutable",
+    }
     if delete_after:
         return FileResponse(path=file_path, media_type=media_type, headers=headers, background=BackgroundTask(delayed_delete_file, file_path))
     else:
