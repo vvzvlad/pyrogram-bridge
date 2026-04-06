@@ -13,6 +13,7 @@ import logging
 import os
 import mimetypes
 from typing import List, Union, Any
+from urllib.parse import quote
 
 import json
 from datetime import datetime
@@ -30,7 +31,7 @@ import magic
 from pyrogram import errors
 from pyrogram.types import Message
 from fastapi import FastAPI, HTTPException, Response, Request
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse
 from telegram_client import TelegramClient
 from config import get_settings, setup_logging
 from rss_generator import generate_channel_rss, generate_channel_html
@@ -203,31 +204,126 @@ def delayed_delete_file(file_path: str, delay: int = 300) -> None:
         logger.error(f"Failed to delete temporary file {file_path}: {str(e)}")
 
 
-async def prepare_file_response(file_path: str, delete_after: bool = False) -> FileResponse:
-    """Prepare file response with proper headers"""
-    if not os.path.exists(file_path): raise HTTPException(status_code=404, detail="File not found")
-    
+async def prepare_file_response(file_path: str, request: Request, delete_after: bool = False) -> StreamingResponse:
+    """Prepare a streaming file response with HTTP Range request support."""
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File not found")
+
     try:
         # Determine MIME type using python-magic in a thread to avoid blocking the event loop
         media_type = await asyncio.to_thread(magic_mime.from_file, file_path)
     except Exception as e:
         logger.warning(f"Failed to determine MIME type using python-magic: {str(e)}")
         media_type = None
-    
-    if not media_type: media_type, _ = mimetypes.guess_type(file_path) # Fallback to mimetypes if python-magic failed
-    if not media_type: media_type = "application/octet-stream" # Final fallback to octet-stream
-    
+
+    if not media_type: media_type, _ = mimetypes.guess_type(file_path)  # Fallback to mimetypes if python-magic failed
+    if not media_type: media_type = "application/octet-stream"  # Final fallback to octet-stream
+
     logger.debug(f"Determined media type for {os.path.basename(file_path)}: {media_type}")
-    headers = {
-        "Content-Disposition": f"inline; filename={os.path.basename(file_path)}",
-        # Files are addressed by file_unique_id which is immutable in Telegram,
-        # so it is safe to cache them aggressively on the client side.
-        "Cache-Control": "public, max-age=86400, immutable",
-    }
-    if delete_after:
-        return FileResponse(path=file_path, media_type=media_type, headers=headers, background=BackgroundTask(delayed_delete_file, file_path))
+
+    try:
+        total_size = os.path.getsize(file_path)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="File not found")
+    range_header = request.headers.get("range")
+
+    if range_header:
+        # Parse Range header according to RFC 7233
+        try:
+            range_value = range_header.strip()
+            if not range_value.startswith("bytes="):
+                raise ValueError("Only bytes ranges are supported")
+            range_spec = range_value[len("bytes="):]
+            if range_spec.startswith("-"):
+                # Suffix range: bytes=-N (last N bytes)
+                suffix_length = int(range_spec[1:])
+                start = max(0, total_size - suffix_length)
+                end = total_size - 1
+            elif range_spec.endswith("-"):
+                # Open-ended range: bytes=START-
+                start = int(range_spec[:-1])
+                end = total_size - 1
+            else:
+                # Full range: bytes=START-END
+                start_str, end_str = range_spec.split("-", 1)
+                start = int(start_str)
+                end = int(end_str)
+        except (ValueError, IndexError) as e:
+            logger.debug(f"Invalid Range header '{range_header}': {e}")
+            return Response(
+                status_code=416,
+                headers={"Content-Range": f"bytes */{total_size}"}
+            )
+
+        # Clamp end to file size - 1 (RFC 7233 allows end >= total_size)
+        end = min(end, total_size - 1)
+
+        # If start is beyond file size, return 416
+        if start >= total_size:
+            return Response(
+                status_code=416,
+                headers={"Content-Range": f"bytes */{total_size}"}
+            )
+
+        content_length = end - start + 1
+        status_code = 206
+        headers = {
+            "Content-Disposition": (
+                f"inline; filename=\"{os.path.basename(file_path)}\"; "
+                f"filename*=UTF-8''{quote(os.path.basename(file_path))}"
+            ),
+            # Files are addressed by file_unique_id which is immutable in Telegram,
+            # so it is safe to cache them aggressively on the client side.
+            "Cache-Control": "public, max-age=86400, immutable",
+            "Accept-Ranges": "bytes",
+            "Content-Range": f"bytes {start}-{end}/{total_size}",
+            "Content-Length": str(content_length),
+        }
     else:
-        return FileResponse(path=file_path, media_type=media_type, headers=headers)
+        # No Range header — serve full file with status 200
+        start = 0
+        end = total_size - 1
+        status_code = 200
+        headers = {
+            "Content-Disposition": (
+                f"inline; filename=\"{os.path.basename(file_path)}\"; "
+                f"filename*=UTF-8''{quote(os.path.basename(file_path))}"
+            ),
+            # Files are addressed by file_unique_id which is immutable in Telegram,
+            # so it is safe to cache them aggressively on the client side.
+            "Cache-Control": "public, max-age=86400, immutable",
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(total_size),
+        }
+
+    chunk_size = 64 * 1024  # 64 KB chunks
+
+    async def file_chunk_generator():
+        """Async generator that reads file in chunks; each chunk is a separate open/seek/read/close."""
+        bytes_remaining = end - start + 1
+        offset = start
+        while bytes_remaining > 0:
+            to_read = min(chunk_size, bytes_remaining)
+            def read_at(path, off, size):
+                # Open, seek, read, and close within a single thread call to avoid fd leaks
+                with open(path, "rb") as f:
+                    f.seek(off)
+                    return f.read(size)
+            data = await asyncio.to_thread(read_at, file_path, offset, to_read)
+            if not data:
+                break
+            bytes_remaining -= len(data)
+            offset += len(data)
+            yield data
+
+    background = BackgroundTask(delayed_delete_file, file_path) if delete_after else None
+    return StreamingResponse(
+        content=file_chunk_generator(),
+        status_code=status_code,
+        media_type=media_type,
+        headers=headers,
+        background=background,
+    )
 
 async def download_media_file(channel: Union[str, int], post_id: int, file_unique_id: str) -> tuple[Union[str, None], bool]:
     """
@@ -728,7 +824,7 @@ async def health_check(request: Request, token: str | None = None) -> Response:
 
 @app.get("/media/{channel}/{post_id}/{file_unique_id}/{digest}", response_model=None)
 @app.get("/media/{channel}/{post_id}/{file_unique_id}", response_model=None)
-async def get_media(channel: str, post_id: int, file_unique_id: str, digest: str | None = None) -> FileResponse|Response:
+async def get_media(channel: str, post_id: int, file_unique_id: str, request: Request, digest: str | None = None) -> StreamingResponse|Response:
     try:
         url = f"{channel}/{post_id}/{file_unique_id}"
         if not verify_media_digest(url, digest):
@@ -757,7 +853,7 @@ async def get_media(channel: str, post_id: int, file_unique_id: str, digest: str
             if not file_path:
                 raise HTTPException(status_code=404, detail="File not found")
             if file_path:
-                return await prepare_file_response(file_path, delete_after=delete_after)
+                return await prepare_file_response(file_path, request=request, delete_after=delete_after)
         except ZeroSizeFileError as e: # Catch zero-size file errors
             logger.warning(f"zero_size_file_encountered: {str(e)}. Instructing client to retry.")
             return Response(
