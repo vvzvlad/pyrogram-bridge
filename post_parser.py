@@ -188,7 +188,8 @@ class PostParser:
         if message.media:
             if message.media == MessageMediaType.POLL:
                 if message.poll is not None and hasattr(message.poll, 'question'):
-                    poll_question = str(message.poll.question).strip()
+                    q = message.poll.question
+                    poll_question = (q.text if hasattr(q, 'text') else str(q)).strip()
                     if poll_question:
                         return f"📊 Poll: {poll_question}"
                 return "📊 Poll"
@@ -898,10 +899,14 @@ class PostParser:
         
         try:
             if poll := getattr(message, "poll", None):
-                poll_text = f"📊 Poll: {str(poll.question)}\n"
+                q = poll.question
+                question_str = q.text if hasattr(q, 'text') else str(q)
+                poll_text = f"📊 Poll: {question_str}\n"
                 if hasattr(poll, "options") and poll.options:
                     for i, option in enumerate(poll.options, 1):
-                        poll_text += f"{i}. {str(getattr(option, 'text', ''))}\n"
+                        opt_text = getattr(option, 'text', '')
+                        opt_str = opt_text.text if hasattr(opt_text, 'text') else str(opt_text)
+                        poll_text += f"{i}. {opt_str}\n"
                 poll_text += "\n→ Vote in Telegram 🔗\n"
                 return f'<div class="message-poll">{poll_text.replace(chr(10), "<br>")}</div>'
             return None
