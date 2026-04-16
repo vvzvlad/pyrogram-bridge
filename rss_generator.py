@@ -101,7 +101,6 @@ async def _create_messages_groups(messages: list[Message]) -> list[list[Message]
                 if 'GROUP_CHAT_CREATED'     in str(message.service): continue
                 if 'CHANNEL_CHAT_CREATED'   in str(message.service): continue
                 if 'DELETE_CHAT_PHOTO'      in str(message.service): continue
-                if 'NEW_CHAT_TITLE'         in str(message.service): continue
 
             if message.media_group_id:
                 if message.media_group_id not in media_groups:
