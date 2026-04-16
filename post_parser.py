@@ -650,7 +650,7 @@ class PostParser:
 
         content_media = []
         base_url = Config['pyrogram_bridge_url']
-        if message.media and message.media != "MessageMediaType.POLL":
+        if message.media and message.media != MessageMediaType.POLL:
             content_media.append(f'<div class="message-media">')
 
             file_unique_id = self._get_file_unique_id(message)

@@ -30,6 +30,7 @@ import sys
 import magic
 from pyrogram import errors
 from pyrogram.types import Message
+from pyrogram.enums import MessageMediaType
 from fastapi import FastAPI, HTTPException, Response, Request
 from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse
 from telegram_client import TelegramClient
@@ -139,7 +140,7 @@ if __name__ == "__main__":
 
 async def find_file_id_in_message(message: Message, file_unique_id: str) -> Union[str, None]:
     """Find file_id by checking all possible media types in message"""
-    if message.media == "MessageMediaType.POLL":
+    if message.media == MessageMediaType.POLL:
         logger.debug(f"Message {message.id} is a poll, skipping media search")
         return None
         
@@ -360,7 +361,7 @@ async def download_media_file(channel: Union[str, int], post_id: int, file_uniqu
         logger.error(f"Timeout getting messages for {channel}/{post_id}")
         raise HTTPException(status_code=504, detail="Request timeout")
     
-    if message.media == "MessageMediaType.POLL":
+    if message.media == MessageMediaType.POLL:
         return None, False
     
     # Check if it is a video and if its size exceeds 100 MB
