@@ -709,6 +709,40 @@ def is_local_request(request: Request) -> bool:
             return True
     return False
 
+
+@app.get("/", response_class=HTMLResponse)
+async def index() -> HTMLResponse:
+    """Returns a simple landing page with service description and GitHub link."""
+    html = """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pyrogram Bridge</title>
+    <style>
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            max-width: 640px;
+            margin: 80px auto;
+            padding: 0 24px;
+            color: #222;
+            background: #fafafa;
+        }
+        h1 { font-size: 2rem; margin-bottom: 0.25em; }
+        p  { font-size: 1.1rem; line-height: 1.6; color: #444; }
+        a  { color: #0066cc; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <h1>Pyrogram Bridge</h1>
+    <p>A Telegram-to-RSS/JSON bridge that exposes Telegram channel posts as RSS feeds and JSON API endpoints.</p>
+    <p><a href="https://github.com/vvzvlad/pyrogram-bridge">github.com/vvzvlad/pyrogram-bridge</a></p>
+</body>
+</html>"""
+    return HTMLResponse(content=html)
+
+
 @app.get("/html/{channel}/{post_id}", response_class=HTMLResponse)
 @app.get("/post/html/{channel}/{post_id}", response_class=HTMLResponse)
 @app.get("/html/{channel}/{post_id}/{token}", response_class=HTMLResponse)  
