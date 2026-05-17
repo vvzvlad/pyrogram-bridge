@@ -32,7 +32,9 @@ async def _create_time_based_media_groups(messages: list[Message], merge_seconds
     """
     Create media groups based on time difference between messages
     """
-    messages_sorted = sorted(messages, key=lambda msg: msg.date) # type: ignore
+    # Compute fallback once so all None-date messages get the same sort key (deterministic order)
+    _sort_fallback = datetime.now(timezone.utc)
+    messages_sorted = sorted(messages, key=lambda msg: msg.date or _sort_fallback) # type: ignore
     cluster: list[Message] = []
     last_msg_date: datetime = datetime.now(timezone.utc)
     current_media_group_id: Optional[str] = None
@@ -41,11 +43,14 @@ async def _create_time_based_media_groups(messages: list[Message], merge_seconds
         
         if not cluster:
             cluster.append(msg)
-            last_msg_date = msg.date # type: ignore
+            # Use current time as fallback when date is None
+            last_msg_date = msg.date or datetime.now(timezone.utc) # type: ignore
             current_media_group_id = getattr(msg, "media_group_id", None)
             continue
         
-        time_diff = (msg.date - last_msg_date).total_seconds() # type: ignore
+        # Use current time as fallback when date is None to avoid TypeError in subtraction
+        msg_date = msg.date or datetime.now(timezone.utc)
+        time_diff = (msg_date - last_msg_date).total_seconds()
         
         msg_media_group_id = getattr(msg, "media_group_id", None)
         
@@ -57,7 +62,8 @@ async def _create_time_based_media_groups(messages: list[Message], merge_seconds
                 for m in cluster:
                     m.media_group_id = current_media_group_id  # type: ignore
             cluster.append(msg)
-            last_msg_date = msg.date # type: ignore
+            # Use current time as fallback when date is None
+            last_msg_date = msg.date or datetime.now(timezone.utc) # type: ignore
         else:
             if len(cluster) >= 2 and not current_media_group_id:
                 dates = [m.date for m in cluster if m.date is not None]
@@ -67,7 +73,8 @@ async def _create_time_based_media_groups(messages: list[Message], merge_seconds
                     for m in cluster:
                         m.media_group_id = new_group_id  # type: ignore
             cluster = [msg]
-            last_msg_date = msg.date # type: ignore
+            # Use current time as fallback when date is None
+            last_msg_date = msg.date or datetime.now(timezone.utc) # type: ignore
             current_media_group_id = msg_media_group_id
     
     if len(cluster) >= 2 and not current_media_group_id:
@@ -293,8 +300,8 @@ async def _render_messages_groups(messages_groups: list[list[Message]],
                 logger.debug(f"excluded_post: message_id {post['message_id']}, pattern {exclude_pattern.pattern}")
         rendered_posts = filtered_posts
     
-    # Sort by date
-    rendered_posts.sort(key=lambda x: x['date'], reverse=True)
+    # Sort by date; use 0.0 (epoch) as fallback for posts with None date to avoid TypeError
+    rendered_posts.sort(key=lambda x: x['date'] if x['date'] is not None else 0.0, reverse=True)
     return rendered_posts
 
 async def generate_channel_rss(channel: str | int, 
@@ -449,9 +456,15 @@ async def generate_channel_rss(channel: str | int,
                 sanitized_html = post['html']
             fe.content(content=sanitized_html, type='CDATA')
             
-            pub_date = datetime.fromtimestamp(post['date'], tz=timezone.utc)
-            logger.debug(f"rss_entry_date: channel {channel}, message_id {post['message_id']}, timestamp {post['date']}, pub_date {pub_date.isoformat()}")
-            fe.pubDate(pub_date)
+            if post['date'] is not None:
+                pub_date = datetime.fromtimestamp(post['date'], tz=timezone.utc)
+                logger.debug(f"rss_entry_date: channel {channel}, message_id {post['message_id']}, timestamp {post['date']}, pub_date {pub_date.isoformat()}")
+                fe.pubDate(pub_date)
+            else:
+                # Date is None (e.g. service or deleted message) — fall back to current time
+                pub_date = datetime.now(tz=timezone.utc)
+                logger.warning(f"rss_entry_missing_date: channel {channel}, message_id {post['message_id']}, using current time as fallback")
+                fe.pubDate(pub_date)
             fe.guid(post_link, permalink=True)
             
             if post['author'] and post['author'] != main_name:
