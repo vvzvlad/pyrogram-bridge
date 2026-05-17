@@ -309,7 +309,20 @@ class PostParser:
     
     def _extract_reactions(self, message: Message) -> Union[Dict[str, int], None]:
         if reactions := getattr(message, 'reactions', None):
-            return {r.emoji: r.count for r in reactions.reactions}
+            result: Dict[str, int] = {}
+            for r in reactions.reactions:
+                # Resolve emoji key using the same logic as _reactions_views_links()
+                if getattr(r, "is_paid", False):
+                    emoji = "⭐"
+                elif hasattr(r, "emoji") and r.emoji:
+                    emoji = r.emoji
+                elif hasattr(r, "custom_emoji_id"):
+                    emoji = "❓"  # custom emoji — no text representation available
+                else:
+                    emoji = "❓"  # unknown reaction type
+                # Accumulate counts in case multiple reactions resolve to the same key
+                result[emoji] = result.get(emoji, 0) + r.count
+            return result
         return None
 
     def _extract_flags(self, message: Message) -> List[str]: #Tests: tests/postparser_extract_flags.py
@@ -365,10 +378,14 @@ class PostParser:
         # Check if the post's reactions contain more clown emojis (🤡) or poo emojis (💩).
         if reactions := getattr(message, "reactions", None):
             for reaction in getattr(reactions, "reactions", []):
-                if reaction.emoji == "🤡" and reaction.count >= 30:
+                # Skip paid reactions and custom emoji — they have no .emoji attribute
+                if getattr(reaction, "is_paid", False) or not hasattr(reaction, "emoji"):
+                    continue
+                emoji = reaction.emoji  # attribute existence is guaranteed by hasattr guard above
+                if emoji == "🤡" and reaction.count >= 30:
                     flags.append("clownpoo")
                     break
-                if reaction.emoji == "💩" and reaction.count >= 30:
+                if emoji == "💩" and reaction.count >= 30:
                     flags.append("clownpoo")
                     break
 

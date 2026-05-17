@@ -360,7 +360,12 @@ async def download_media_file(channel: Union[str, int], post_id: int, file_uniqu
     except asyncio.TimeoutError:
         logger.error(f"Timeout getting messages for {channel}/{post_id}")
         raise HTTPException(status_code=504, detail="Request timeout")
-    
+
+    # Guard: message may be None (deleted) or an empty stub returned by Pyrogram
+    if not message or getattr(message, 'empty', False):
+        logger.warning(f"Message {post_id} not found or empty in channel {channel}")
+        raise HTTPException(status_code=404, detail="Post not found or deleted")
+
     if message.media == MessageMediaType.POLL:
         return None, False
     
