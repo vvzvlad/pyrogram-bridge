@@ -28,6 +28,9 @@ Config = get_settings()
 
 logger = logging.getLogger(__name__)
 
+# Module-level counter for in-flight persist tasks (used only in diagnostics)
+_persist_pending_count = 0
+
 
 #tests
 #http://127.0.0.1:8000/post/html/DragorWW_space/114 — video
@@ -325,11 +328,15 @@ class PostParser:
             return result
         return None
 
-    def _extract_flags(self, message: Message) -> List[str]: #Tests: tests/postparser_extract_flags.py
+    def _extract_flags(self, message: Message, html_body: Optional[str] = None) -> List[str]: #Tests: tests/postparser_extract_flags.py
         # Use raw text/caption for some checks before HTML processing
         message_text_str = str(message.text or message.caption or '')
         # Use HTML body for checks involving formatted text or links within HTML
-        message_body_html = self._generate_html_body(message)
+        # If html_body is provided (pre-computed), use it directly to avoid redundant generation
+        if html_body is None:
+            message_body_html = self._generate_html_body(message)
+        else:
+            message_body_html = html_body
         flags = []
 
         # Add "fwd" flag for forwarded messages
@@ -491,6 +498,10 @@ class PostParser:
         return return_html
 
     def process_message(self, message: Message) -> Dict[Any, Any]:
+        # Compute html body once — avoids triple _generate_html_body calls
+        html_body = self._generate_html_body(message)
+        flags = self._extract_flags(message, html_body=html_body)
+        footer = self.generate_html_footer(message, flags_list=flags)
         result = {
             'channel': self.get_channel_username(message),
             'message_id': message.id,
@@ -499,10 +510,10 @@ class PostParser:
             'text': message.text or message.caption or '',
             'html': {
                 'title': self._generate_title(message),
-                'body': self._generate_html_body(message),
-                'footer': self.generate_html_footer(message)
+                'body': html_body,
+                'footer': footer
             },
-            'flags': self._extract_flags(message),
+            'flags': flags,
             'author': self._get_author_info(message),
             'views': message.views,
             'reactions': self._extract_reactions(message),
@@ -992,16 +1003,21 @@ class PostParser:
                     try:
                         loop = asyncio.get_running_loop()
                         if loop.is_running():
+                            global _persist_pending_count
                             task = loop.create_task(
                                 self._persist_media_file_id_async(channel_username, message.id, file_unique_id, added_ts)
                             )
-                            # Count pending fire-and-forget tasks to surface backlog issues
-                            all_tasks = asyncio.all_tasks(loop)
-                            persist_tasks = [t for t in all_tasks if '_persist_media_file_id_async' in str(t.get_coro())]
-                            task_count = len(persist_tasks)
-                            if task_count > 5:
-                                logger.warning(f"persist_task_queue: {task_count} pending _persist_media_file_id_async tasks (msg {message.id})")
-                            logger.debug(f"persist_task_created: queued for {channel_username}/{message.id}/{file_unique_id}, total pending: {task_count}")
+                            _persist_pending_count += 1
+
+                            def _on_task_done(t):
+                                global _persist_pending_count
+                                _persist_pending_count -= 1
+
+                            task.add_done_callback(_on_task_done)
+
+                            if _persist_pending_count > 5:
+                                logger.warning(f"persist_task_queue: {_persist_pending_count} pending _persist_media_file_id_async tasks (msg {message.id})")
+                            logger.debug(f"persist_task_created: queued for {channel_username}/{message.id}/{file_unique_id}, total pending: {_persist_pending_count}")
                         else:
                             # Fallback sync path (should not occur during normal FastAPI runtime)
                             upsert_media_file_id_sync(DB_PATH, channel_username, message.id, file_unique_id, added_ts)

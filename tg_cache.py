@@ -42,11 +42,11 @@ def _save_history_to_cache(channel_id: Union[str, int], messages: List[Message],
     try:
         cache_file = _get_history_cache_file_path(channel_id)
         
-        # Create cache metadata
+        # Create cache metadata — store messages directly (no inner pickle.dumps)
         cache_data = {
             'timestamp': time.time(),
             'limit': limit,
-            'messages': pickle.dumps(messages)
+            'messages': messages
         }
         
         with open(cache_file, 'wb') as f:
@@ -94,8 +94,12 @@ def _get_history_from_cache(channel_id: Union[str, int], limit: int, max_age_hou
             logger.info(f"history_cache_limit_mismatch: channel {channel_id}, cached limit {cached_limit}, requested limit {limit}")
             return None
         
-        # Restore message list from pickle
-        messages = pickle.loads(cache_data['messages'])
+        # Restore message list; handle old cache files that used double-pickle (bytes = old format)
+        raw = cache_data['messages']
+        if isinstance(raw, bytes):
+            messages = pickle.loads(raw)
+        else:
+            messages = raw
         logger.info(f"history_cache_hit: channel {channel_id}, limit {limit}, messages {len(messages)}, age {cache_age:.1f}s")
         return messages
     

@@ -190,13 +190,9 @@ async def find_file_id_in_message(message: Message, file_unique_id: str) -> Unio
     return None
 
 
-def delayed_delete_file(file_path: str, delay: int = 300) -> None:
-    """
-    Delete temporary file after a delay to ensure complete file delivery.
-    Delay is set to 5 minutes by default.
-    NOTE: Runs in a background thread via Starlette BackgroundTask.
-    """
-    time.sleep(delay)
+async def delayed_delete_file(file_path: str, delay: int = 300) -> None:
+    """Delete a temporary file after a delay. Runs as an async background task."""
+    await asyncio.sleep(delay)
     try:
         os.remove(file_path)
         logger.info(f"Deleted temporary file {file_path} after delay of {delay} seconds")
@@ -955,6 +951,29 @@ async def get_media(channel: str, post_id: int, file_unique_id: str, request: Re
             
         try: # Wrap the download and prepare call
             import time as _time
+
+            # Pre-semaphore cache check: serve already-cached files without acquiring the semaphore
+            base_cache_dir = os.path.abspath("./data/cache")
+            channel_dir = os.path.join(base_cache_dir, str(channel))
+            post_dir = os.path.join(channel_dir, str(post_id))
+            cache_path = os.path.join(post_dir, file_unique_id)
+            if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
+                # File is already in cache — skip semaphore and serve directly
+                logger.info(f"pre_semaphore_cache_hit: {channel}/{post_id}/{file_unique_id}")
+                # Fire-and-forget timestamp update with error handling to avoid silent failures
+                async def _update_access(_ch, _pid, _fid):
+                    try:
+                        await asyncio.to_thread(
+                            update_media_file_access_sync,
+                            DB_PATH, str(_ch), _pid, _fid,
+                            datetime.now().timestamp()
+                        )
+                    except Exception as _e:
+                        logger.warning(f"Failed to update access time for {_ch}/{_pid}/{_fid}: {_e}")
+                asyncio.create_task(_update_access(channel, post_id, file_unique_id))
+                return await prepare_file_response(cache_path, request=request,
+                                                   media_key=(str(channel), post_id, file_unique_id))
+
             _sem_wait_start = _time.monotonic()
             async with HTTP_DOWNLOAD_SEMAPHORE:  # limit concurrent live HTTP downloads
                 _sem_wait = _time.monotonic() - _sem_wait_start

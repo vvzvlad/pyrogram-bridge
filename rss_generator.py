@@ -477,17 +477,47 @@ async def generate_channel_rss(channel: str | int,
 
 async def _reply_enrichment(client: Client, messages: list[Message]) -> list[Message]:
     """
-    Enrich messages with reply to messages
+    Enrich messages with reply-to messages.
+
+    Instead of one API call per message, replies are batched: all message IDs
+    that need enrichment are grouped by chat_id and fetched in a single
+    client.get_messages() call per chat_id.
     """
+    # Collect messages that need reply enrichment, grouped by chat_id
+    chat_messages: dict[int, list[Message]] = {}
     for message in messages:
         if message.reply_to_message_id and message.chat:
-            full_message = await client.get_messages(message.chat.id, message.id)
-            if isinstance(full_message, list):
-                if full_message and full_message[0].reply_to_message:
-                    message.reply_to_message = full_message[0].reply_to_message
-            else:
-                if full_message and full_message.reply_to_message:
-                    message.reply_to_message = full_message.reply_to_message
+            chat_id = message.chat.id
+            if chat_id not in chat_messages:
+                chat_messages[chat_id] = []
+            chat_messages[chat_id].append(message)
+
+    if not chat_messages:
+        # No messages with replies — return unchanged
+        return messages
+
+    # Build a lookup: {(chat_id, message_id): full_message} using one batch call per chat
+    reply_lookup: dict[tuple[int, int], Message] = {}
+    for chat_id, chat_msgs in chat_messages.items():
+        ids_to_fetch = [m.id for m in chat_msgs]
+        try:
+            fetched = await client.get_messages(chat_id, ids_to_fetch)
+            # get_messages may return a single Message or a list
+            if not isinstance(fetched, list):
+                fetched = [fetched]
+            for fm in fetched:
+                if fm and not getattr(fm, 'empty', False):
+                    reply_lookup[(chat_id, fm.id)] = fm
+        except Exception as e:
+            logger.error(f"reply_enrichment_batch_error: chat_id {chat_id}, ids {ids_to_fetch}, error {str(e)}")
+
+    # Apply reply_to_message from lookup
+    for message in messages:
+        if message.reply_to_message_id and message.chat:
+            key = (message.chat.id, message.id)
+            full_message = reply_lookup.get(key)
+            if full_message and full_message.reply_to_message:
+                message.reply_to_message = full_message.reply_to_message
 
     return messages
 
