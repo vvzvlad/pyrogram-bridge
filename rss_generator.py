@@ -9,6 +9,7 @@
 # pylance: disable=reportMissingImports, reportMissingModuleSource
 # mypy: disable-error-code="import-untyped"
 
+import copy
 import logging
 import asyncio
 import re
@@ -32,6 +33,9 @@ async def _create_time_based_media_groups(messages: list[Message], merge_seconds
     """
     Create media groups based on time difference between messages
     """
+    # Deep-copy the input list to avoid mutating cached Message objects (the cache may
+    # reuse the same objects across calls with different merge_seconds values)
+    messages = copy.deepcopy(messages)
     # Compute fallback once so all None-date messages get the same sort key (deterministic order)
     _sort_fallback = datetime.now(timezone.utc)
     messages_sorted = sorted(messages, key=lambda msg: msg.date or _sort_fallback) # type: ignore
@@ -350,24 +354,9 @@ async def generate_channel_rss(channel: str | int,
         except (errors.UsernameInvalid, errors.UsernameNotOccupied) as e:
             logger.warning(f"Channel not found error for {channel}: {str(e)}")
             return create_error_feed(channel, base_url)
-        except errors.FloodWait as e:
-            # Handle Telegram flood wait - wait for the specified duration and retry
-            wait_time = e.value
-            logger.warning(f"Telegram flood wait detected for channel '{channel}'. Waiting {wait_time} seconds before retry...")
-            await asyncio.sleep(wait_time)
-            logger.info(f"Flood wait completed for channel '{channel}', retrying get_chat...")
-            
-            # Retry the get_chat operation after waiting
-            try:
-                channel_info = await post_parser.client.get_chat(channel)
-                channel_title = channel_info.title or f"Telegram: {channel}"
-                channel_username = channel_info.username or (str(channel_info.id) if channel_info.id and str(channel_info.id).startswith('-100') else None)
-                if not channel_username:
-                    logger.warning(f"Could not get username for channel {channel} after flood wait, using identifier for error feed.")
-                    return create_error_feed(str(channel), base_url)
-            except Exception as retry_e:
-                logger.error(f"Retry after flood wait failed for channel '{channel}': {str(retry_e)}", exc_info=True)
-                raise ValueError(f"Failed to get chat info for {channel} after flood wait: {str(retry_e)}") from retry_e
+        except errors.FloodWait:
+            # Let FloodWait bubble up to api_server.py, which returns HTTP 429 with Retry-After header
+            raise
         except Exception as e:
             logger.error(f"Error during get_chat for channel '{channel}' (type: {type(channel)}): {str(e)}", exc_info=True) # Log error specifically for get_chat
             # Re-raise the original exception to be caught by the outer handler if needed,
@@ -547,23 +536,9 @@ async def generate_channel_html(channel: str | int,
             logger.warning(f"Channel not found error for {channel} in HTML generation: {str(e)}")
             # Consider returning a dedicated HTML error page.
             return create_error_feed(channel, base_url)
-        except errors.FloodWait as e:
-            # Handle Telegram flood wait - wait for the specified duration and retry
-            wait_time = e.value
-            logger.warning(f"Telegram flood wait detected for channel '{channel}' in HTML generation. Waiting {wait_time} seconds before retry...")
-            await asyncio.sleep(wait_time)
-            logger.info(f"Flood wait completed for channel '{channel}' in HTML generation, retrying get_chat...")
-            
-            # Retry the get_chat operation after waiting
-            try:
-                channel_info = await post_parser.client.get_chat(channel)
-                channel_username = channel_info.username or (str(channel_info.id) if channel_info.id and str(channel_info.id).startswith('-100') else None)
-                if not channel_username:
-                    logger.warning(f"Could not get username for channel {channel} after flood wait in HTML generation, returning error feed.")
-                    return create_error_feed(str(channel), base_url)
-            except Exception as retry_e:
-                logger.error(f"Retry after flood wait failed for channel '{channel}' in HTML generation: {str(retry_e)}", exc_info=True)
-                raise ValueError(f"Failed to get chat info for {channel} after flood wait in HTML generation: {str(retry_e)}") from retry_e
+        except errors.FloodWait:
+            # Let FloodWait bubble up to api_server.py, which returns HTTP 429 with Retry-After header
+            raise
         except Exception as e:
             logger.error(f"Error during get_chat for channel '{channel}' (type: {type(channel)}) in HTML generation: {str(e)}", exc_info=True)
             raise ValueError(f"Failed to get chat info for {channel} in HTML generation: {str(e)}") from e

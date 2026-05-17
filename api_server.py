@@ -11,6 +11,8 @@
 
 import logging
 import os
+import re
+import uuid
 import mimetypes
 from typing import List, Union, Any
 from urllib.parse import quote
@@ -438,29 +440,47 @@ async def download_media_file(channel: Union[str, int], post_id: int, file_uniqu
             logger.error(f"Failed to remove entry for {channel}/{post_id}/{file_unique_id} from SQLite: {str(e)}")
 
         raise HTTPException(status_code=404, detail="File not found in message")
-        
+
+    # Use a unique temp path to avoid race conditions when concurrent requests download the same file
+    temp_path = cache_path + f".tmp.{uuid.uuid4().hex}"
     try:
-        file_path = await client.safe_download_media(file_id, cache_path)
+        file_path = await client.safe_download_media(file_id, temp_path)
     except asyncio.TimeoutError:
         logger.error(f"Timeout downloading media {file_unique_id}")
-        raise HTTPException(status_code=504, detail="Download timeout")
-    
-    # Check if the downloaded file exists and has a size greater than zero
-    if not file_path or not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
-        logger.error(f"download_failed_zero_size: Downloaded file {file_unique_id} for {channel}/{post_id} is zero size or missing.")
-        # Attempt to clean up the invalid file
-        if file_path and os.path.exists(file_path):
+        # Clean up the temp file if it was created
+        if os.path.exists(temp_path):
             try:
-                os.remove(file_path)
-                logger.info(f"Removed zero-size file: {file_path}")
+                os.remove(temp_path)
+            except OSError:
+                pass
+        raise HTTPException(status_code=504, detail="Download timeout")
+
+    # Check if the downloaded temp file exists and has a size greater than zero
+    if not file_path or not os.path.exists(temp_path) or os.path.getsize(temp_path) == 0:
+        logger.error(f"download_failed_zero_size: Downloaded file {file_unique_id} for {channel}/{post_id} is zero size or missing.")
+        # Attempt to clean up the invalid temp file
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+                logger.info(f"Removed zero-size temp file: {temp_path}")
             except OSError as e:
-                logger.error(f"cleanup_error: Failed to remove zero-size file {file_path}: {e}")
-        # Raise an error to indicate download failure
-        # Raise specific error
+                logger.error(f"cleanup_error: Failed to remove zero-size temp file {temp_path}: {e}")
+        # Raise specific error to indicate download failure
         raise ZeroSizeFileError(f"Downloaded file {file_unique_id} for {channel}/{post_id} is zero size or missing after download attempt.")
 
+    # Atomic rename: if another concurrent request already wrote the final file, discard our temp copy
+    if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
+        logger.info(f"Concurrent download already completed for {file_unique_id}, discarding temp file")
+        try:
+            os.remove(temp_path)
+        except OSError as e:
+            logger.warning(f"cleanup_error: Failed to remove temp file {temp_path}: {e}")
+        return cache_path, False
+
+    # Atomically move temp file to final cache path (atomic on POSIX)
+    os.rename(temp_path, cache_path)
     logger.info(f"Downloaded media file {file_unique_id} to {cache_path}")
-    return file_path, False
+    return cache_path, False
 
 
 def remove_old_cached_files_sync(media_files: list, cache_dir: str) -> tuple[list, int]:
@@ -511,35 +531,46 @@ def remove_old_cached_files_sync(media_files: list, cache_dir: str) -> tuple[lis
             logger.error(f"Error processing cache entry {file_data}: {str(e)}")
             continue
 
-    # Additionally, remove temporary files with prefix "temp_" if they are older than a threshold (1 hour)
+    # Clean up temporary files: "temp_"-prefixed (large videos) and ".tmp."-suffixed (race-condition downloads)
     temp_threshold = 3600  # 1 hour in seconds
     for root, _, files in os.walk(cache_dir):
         for file in files:
-            if file.startswith("temp_"):
-                file_path = os.path.join(root, file)
-                try:
-                    file_mod_time = os.path.getmtime(file_path)
-                    if time.time() - file_mod_time > temp_threshold:
-                        # Get channel/post/file_id from path
+            is_large_video_temp = file.startswith("temp_")
+            # Match exactly the format generated in download_media_file: {name}.tmp.{32 hex chars}
+            is_race_temp = bool(re.match(r'^.+\.tmp\.[0-9a-f]{32}$', file))
+            if not (is_large_video_temp or is_race_temp):
+                continue
+            file_path = os.path.join(root, file)
+            try:
+                file_mod_time = os.path.getmtime(file_path)
+                if time.time() - file_mod_time > temp_threshold:
+                    if is_large_video_temp and not is_race_temp:
+                        # Extract channel/post/file_id from path and name
                         rel_path = os.path.relpath(os.path.dirname(file_path), cache_dir)
-                        channel, post_id = rel_path.split(os.sep)
+                        parts = rel_path.split(os.sep)
+                        if len(parts) != 2:
+                            logger.warning(f"Unexpected path depth for large-video temp file, skipping: {file_path}")
+                            continue
+                        channel, post_id = parts
                         file_unique_id = file[5:]  # Remove 'temp_' prefix
-                        
                         # Remove file
                         os.remove(file_path)
                         files_removed += 1
-                        logger.info(f"Removed temporary file: {file_path}")
-                        
+                        logger.info(f"Removed temporary large video file: {file_path}")
                         # Also remove the temporary file entry from the in-memory list
                         updated_media_files = [
-                            f for f in updated_media_files 
-                            if not (f.get('channel') == channel and 
-                                f.get('post_id') == int(post_id) and 
+                            f for f in updated_media_files
+                            if not (f.get('channel') == channel and
+                                f.get('post_id') == int(post_id) and
                                 f.get('file_unique_id') == file_unique_id)
                         ]
-                        
-                except Exception as e:
-                    logger.error(f"Failed to remove temporary file {file_path}: {str(e)}")
+                    elif is_race_temp:
+                        # Race-condition temp file — just delete from disk, no SQLite entry to remove
+                        os.remove(file_path)
+                        files_removed += 1
+                        logger.info(f"Removed stale race-condition temp file: {file_path}")
+            except Exception as e:
+                logger.error(f"Failed to remove temporary file {file_path}: {str(e)}")
 
     return updated_media_files, files_removed
 

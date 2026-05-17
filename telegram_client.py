@@ -60,7 +60,22 @@ class TelegramClient:
             return
         self.disconnect_count += 1
         logger.warning(f"connection_handler: connection lost (#{self.disconnect_count})")
-        
+
+        # Wait briefly to allow Pyrogram's internal reconnect to complete
+        await asyncio.sleep(10)
+
+        # Re-check shutdown flag — it may have been set while we were sleeping
+        # (e.g. another concurrent _on_disconnect already triggered _restart_app)
+        if self._shutting_down:
+            logger.debug("connection_handler: shutdown started during sleep, suppressing further action")
+            return
+
+        # If the client reconnected successfully, reset the counter and return
+        if self.client.is_connected:
+            logger.info(f"connection_handler: reconnected successfully, resetting disconnect counter")
+            self.disconnect_count = 0
+            return
+
         if self.disconnect_count >= self.max_disconnects:
             logger.critical(f"connection_handler: reached disconnect limit ({self.max_disconnects})")
             self._restart_app()
@@ -99,7 +114,7 @@ class TelegramClient:
                     timeout=30.0
                 )
             except Exception as e:
-                if "KeyError" in str(e) and attempt < max_retries - 1:
+                if isinstance(e, KeyError) and attempt < max_retries - 1:
                     logger.warning(f"Auth error on attempt {attempt + 1}, retrying in 5s...")
                     await asyncio.sleep(5)
                     continue
@@ -114,7 +129,7 @@ class TelegramClient:
                     timeout=120.0
                 )
             except Exception as e:
-                if "KeyError" in str(e) and attempt < max_retries - 1:
+                if isinstance(e, KeyError) and attempt < max_retries - 1:
                     logger.warning(f"Download auth error on attempt {attempt + 1}, retrying...")
                     await asyncio.sleep(5)
                     continue

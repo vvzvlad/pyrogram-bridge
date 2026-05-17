@@ -9,6 +9,7 @@
 # pylance: disable=reportMissingImports, reportMissingModuleSource
 
 import os
+import sys
 import logging
 from typing import Any
 
@@ -42,8 +43,15 @@ def get_settings() -> dict[str, Any]:
     tg_api_id = os.getenv("TG_API_ID")
     tg_api_hash = os.getenv("TG_API_HASH")
     if not tg_api_id or not tg_api_hash:
-        print("TG_API_ID and TG_API_HASH must be set")
-        os._exit(1)
+        print("TG_API_ID and TG_API_HASH must be set", flush=True)
+        sys.exit(1)
+
+    # Validate and convert TG_API_ID to integer
+    try:
+        tg_api_id_int = int(tg_api_id)
+    except ValueError:
+        print(f"TG_API_ID must be a valid integer, got: {tg_api_id!r}", flush=True)
+        sys.exit(1)
 
     log_level = os.getenv("LOG_LEVEL", "INFO")
 
@@ -53,23 +61,36 @@ def get_settings() -> dict[str, Any]:
     proxy_host = os.getenv("TG_PROXY_HOST")
     proxy: dict[str, Any] | None = None
     if proxy_host:
+        # Validate and convert TG_PROXY_PORT to integer
+        try:
+            proxy_port = int(os.getenv("TG_PROXY_PORT") or 1080)
+        except ValueError:
+            print(f"TG_PROXY_PORT must be a valid integer, got: {os.getenv('TG_PROXY_PORT')!r}", flush=True)
+            sys.exit(1)
         proxy = {
             "scheme": "SOCKS5",
             "hostname": proxy_host,
-            "port": int(os.getenv("TG_PROXY_PORT") or 1080),
+            "port": proxy_port,
             "username": os.getenv("TG_PROXY_USERNAME") or None,
             "password": os.getenv("TG_PROXY_PASSWORD") or None,
         }
 
+    # Validate and convert API_PORT to integer
+    try:
+        api_port = int(os.getenv("API_PORT") or 8000)
+    except ValueError:
+        print(f"API_PORT must be a valid integer, got: {os.getenv('API_PORT')!r}", flush=True)
+        sys.exit(1)
+
     return {
-        "tg_api_id": int(tg_api_id),
+        "tg_api_id": tg_api_id_int,
         "tg_api_hash": tg_api_hash,
         "session_path": os.getenv("SESSION_PATH", "data") or "data",
         "api_host": os.getenv("API_HOST", "0.0.0.0"),
-        "api_port": int(os.getenv("API_PORT") or 8000),
+        "api_port": api_port,
         "pyrogram_bridge_url": os.getenv("PYROGRAM_BRIDGE_URL", ""),
         "log_level": log_level,
-        "debug": os.getenv("DEBUG", "False") == "True",
+        "debug": os.getenv("DEBUG", "False").strip() in ["True", "true"],
         "token": os.getenv("TOKEN", ""),
         "trusted_proxies": [ip.strip() for ip in os.getenv("TRUSTED_PROXIES", "").split(",") if ip.strip()],
         "time_based_merge": os.getenv("TIME_BASED_MERGE", "False").strip() in ["True", "true"],

@@ -225,7 +225,7 @@ class PostParser:
 
         if text_stripped:
             text_was_processed = True
-            text_has_urls = bool(re.search(r'https?://[^\\s<>\"\\\']+', text_stripped))
+            text_has_urls = bool(re.search(r'https?://[^\s<>"\']+', text_stripped))
 
             clean_text = html.unescape(text) # Remove HTML entities 
             clean_text = re.sub(r'<[^>]+?>', '', clean_text) # Remove HTML tags
@@ -675,61 +675,60 @@ class PostParser:
                 logger.debug(f"File unique id not found for message {message.id}")
             elif file_unique_id:
                 channel_username = self.get_channel_username(message)
-                file = f"{channel_username}/{message.id}/{file_unique_id}"
-                digest = generate_media_digest(file)
-                url = f"{base_url}/media/{file}/{digest}"
+                # Guard: channel_username may be None for private chats without a username
+                if not channel_username:
+                    logger.warning(f"Could not generate media URL for message {message.id}: channel username is missing.")
+                    content_media.append('</div>')
+                else:
+                    file = f"{channel_username}/{message.id}/{file_unique_id}"
+                    digest = generate_media_digest(file)
+                    url = f"{base_url}/media/{file}/{digest}"
 
-                logger.debug(f"Collected media file: {channel_username}/{message.id}/{file_unique_id}")
-                
-                # Check if document is a PDF file
-                if (message.media == MessageMediaType.DOCUMENT and
-                    message.document is not None and hasattr(message.document, 'mime_type') and
-                    message.document.mime_type == 'application/pdf'):
-                    # Only attempt to create link if channel_username is available
-                    if channel_username:
-                        if channel_username.startswith('-100'): 
+                    logger.debug(f"Collected media file: {channel_username}/{message.id}/{file_unique_id}")
+
+                    # Check if document is a PDF file
+                    if (message.media == MessageMediaType.DOCUMENT and
+                        message.document is not None and hasattr(message.document, 'mime_type') and
+                        message.document.mime_type == 'application/pdf'):
+                        # Only attempt to create link if channel_username is available
+                        if channel_username.startswith('-100'):
                             tg_link = f"https://t.me/c/{channel_username[4:]}/{message.id}"
-                        else:  
+                        else:
                             tg_link = f"https://t.me/{channel_username}/{message.id}"
                         content_media.append(f'<div class="document-pdf" style="padding: 10px;">')
                         content_media.append(f'<a href="{tg_link}" target="_blank">[PDF-файл]</a></div>')
-                    else:
-                        # Handle case where channel_username is None (e.g., log or add placeholder)
-                        logger.warning(f"Could not generate PDF link for {message.id}: ch username is missing.")
-                        # Add placeholder without link
-                        content_media.append(f'<div class="document-pdf" style="padding: 10px;">[PDF-файл]</div>') 
-                elif message.media in [MessageMediaType.PHOTO, MessageMediaType.DOCUMENT]:
-                    content_media.append(f'<img src="{url}" style="max-width:100%; width:auto; height:auto;'
-                                        f'max-height:400px; object-fit:contain;">')
-                elif message.media == MessageMediaType.VIDEO:
-                    content_media.append(f'<video controls src="{url}" style="max-width:100%; width:auto;'
-                                        f'height:auto; max-height:400px;"></video>')
-                elif message.media == MessageMediaType.ANIMATION:
-                    content_media.append(f'<video controls src="{url}" style="max-width:100%; width:auto;'
-                                        f'height:auto; max-height:400px;"></video>')
-                elif message.media == MessageMediaType.VIDEO_NOTE:
-                    content_media.append(f'<video controls src="{url}" style="max-width:100%; width:auto;'
-                                        f'height:auto; max-height:400px;"></video>')
-                elif message.media == MessageMediaType.AUDIO:
-                    mime_type = getattr(message.audio, 'mime_type', 'audio/mpeg')
-                    content_media.append(f'<audio controls style="width:100%; max-width:400px;">'
-                                        f'<source src="{url}" type="{mime_type}"></audio>')
-                    content_media.append('<br>')
-                elif message.media == MessageMediaType.VOICE:
-                    mime_type = getattr(message.voice, 'mime_type', 'audio/ogg')
-                    content_media.append(f'<audio controls style="width:100%; max-width:400px;">'
-                                        f'<source src="{url}" type="{mime_type}"></audio>')
-                    content_media.append('<br>')
-                elif message.media == MessageMediaType.STICKER:
-                    emoji = getattr(message.sticker, 'emoji', '')
-                    if getattr(message.sticker, 'is_video', False):
-                        content_media.append(f'<video controls autoplay loop muted src="{url}"'
-                                            f'style="max-width:100%; width:auto; height:auto; max-height:200px;'
-                                            f'object-fit:contain;"></video>')
-                    else:
-                        content_media.append(f'<img src="{url}" alt="Sticker {emoji}" style="max-width:100%;'
-                                            f'width:auto; height:auto; max-height:200px; object-fit:contain;">')
-                content_media.append('</div>')
+                    elif message.media in [MessageMediaType.PHOTO, MessageMediaType.DOCUMENT]:
+                        content_media.append(f'<img src="{url}" style="max-width:100%; width:auto; height:auto;'
+                                            f'max-height:400px; object-fit:contain;">')
+                    elif message.media == MessageMediaType.VIDEO:
+                        content_media.append(f'<video controls src="{url}" style="max-width:100%; width:auto;'
+                                            f'height:auto; max-height:400px;"></video>')
+                    elif message.media == MessageMediaType.ANIMATION:
+                        content_media.append(f'<video controls src="{url}" style="max-width:100%; width:auto;'
+                                            f'height:auto; max-height:400px;"></video>')
+                    elif message.media == MessageMediaType.VIDEO_NOTE:
+                        content_media.append(f'<video controls src="{url}" style="max-width:100%; width:auto;'
+                                            f'height:auto; max-height:400px;"></video>')
+                    elif message.media == MessageMediaType.AUDIO:
+                        mime_type = getattr(message.audio, 'mime_type', 'audio/mpeg')
+                        content_media.append(f'<audio controls style="width:100%; max-width:400px;">'
+                                            f'<source src="{url}" type="{mime_type}"></audio>')
+                        content_media.append('<br>')
+                    elif message.media == MessageMediaType.VOICE:
+                        mime_type = getattr(message.voice, 'mime_type', 'audio/ogg')
+                        content_media.append(f'<audio controls style="width:100%; max-width:400px;">'
+                                            f'<source src="{url}" type="{mime_type}"></audio>')
+                        content_media.append('<br>')
+                    elif message.media == MessageMediaType.STICKER:
+                        emoji = getattr(message.sticker, 'emoji', '')
+                        if getattr(message.sticker, 'is_video', False):
+                            content_media.append(f'<video controls autoplay loop muted src="{url}"'
+                                                f'style="max-width:100%; width:auto; height:auto; max-height:200px;'
+                                                f'object-fit:contain;"></video>')
+                        else:
+                            content_media.append(f'<img src="{url}" alt="Sticker {emoji}" style="max-width:100%;'
+                                                f'width:auto; height:auto; max-height:200px; object-fit:contain;">')
+                    content_media.append('</div>')
         
         if webpage := getattr(message, "web_page", None): # Web page preview
             if webpage_html := self._format_webpage(webpage, message):
@@ -789,13 +788,15 @@ class PostParser:
             if photo := getattr(webpage, "photo", None):
                 if file_unique_id := getattr(photo, "file_unique_id", None):
                     channel_username = self.get_channel_username(message)
-                    file = f"{channel_username}/{message.id}/{file_unique_id}"
-                    digest = generate_media_digest(file)
-                    url = f"{base_url}/media/{file}/{digest}"
-                    html_parts.append(f'<div class="webpage-photo" style="margin-top:10px;">')
-                    html_parts.append(f'<a href="{webpage.url}" target="_blank">')
-                    html_parts.append(f'<img src="{url}" style="max-width:100%; width:auto;'
-                                        f'height:auto; max-height:200px; object-fit:contain;"></a></div>')
+                    # Guard: skip photo if channel_username is unavailable to avoid broken URLs
+                    if channel_username:
+                        file = f"{channel_username}/{message.id}/{file_unique_id}"
+                        digest = generate_media_digest(file)
+                        url = f"{base_url}/media/{file}/{digest}"
+                        html_parts.append(f'<div class="webpage-photo" style="margin-top:10px;">')
+                        html_parts.append(f'<a href="{webpage.url}" target="_blank">')
+                        html_parts.append(f'<img src="{url}" style="max-width:100%; width:auto;'
+                                            f'height:auto; max-height:200px; object-fit:contain;"></a></div>')
             
             html_parts.append('</div>')
             return '\n'.join(html_parts)
