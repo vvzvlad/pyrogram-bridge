@@ -21,6 +21,22 @@ from pyrogram.enums import MessageMediaType
 from post_parser import PostParser # Import after mocking config
 
 
+class StrWithHtml(str):
+    """String subclass that mimics Pyrogram's text/caption objects.
+
+    Pyrogram's text and caption fields are not plain str — they provide an
+    .html property that returns the HTML-escaped version of the text.
+    Using a plain str (or MagicMock) breaks len() / strip() checks in
+    production code.  This class inherits from str so all str operations
+    (len, strip, comparison, boolean coercion) work correctly, while also
+    exposing the .html property expected by the parser.
+    """
+
+    @property
+    def html(self):
+        return self
+
+
 class TestPostParserExtractFlags(unittest.TestCase):
 
     def setUp(self):
@@ -72,18 +88,14 @@ class TestPostParserExtractFlags(unittest.TestCase):
         else:
             message.forward_origin = None
 
-        # Correctly mock text and caption to have an .html attribute and behave like strings
+        # Assign text and caption as StrWithHtml instances so that str operations
+        # (len, strip, bool coercion) behave exactly as they would with real
+        # Pyrogram objects, while the .html property is still available.
         if text:
-            mock_text = MagicMock()
-            mock_text.html = text
-            mock_text.__str__.return_value = text # Add __str__ mock
-            message.text = mock_text
+            message.text = StrWithHtml(text)
             message.caption = None
         elif caption:
-            mock_caption = MagicMock()
-            mock_caption.html = caption
-            mock_caption.__str__.return_value = caption # Add __str__ mock
-            message.caption = mock_caption
+            message.caption = StrWithHtml(caption)
             message.text = None
         else:
             message.text = None
@@ -126,36 +138,8 @@ class TestPostParserExtractFlags(unittest.TestCase):
 
     def test_flag_video_media_video_long_caption(self):
         long_caption = "This is a very long caption that exceeds the two hundred character limit, therefore it should not trigger the video flag even though the media type is video." * 5
-        
-        # Create a simple mock message for this specific test
-        message = MagicMock(spec=Message)
-        message.media = MessageMediaType.VIDEO
-        message.id = 123
-        message.forward_origin = None # Add missing attribute
-        message.web_page = None # Add missing attribute checked in _extract_flags
-        
-        # Create a basic mock Chat
-        mock_chat = MagicMock(spec=Chat)
-        mock_chat.username = "test_channel"
-        mock_chat.id = 1234567890
-        message.chat = mock_chat
-        
-        # Set up text and caption to ensure len() returns the correct length
-        message.text = None
-        
-        # Create a custom class that mimics caption with html attribute
-        class CaptionWithHtml(str):
-            @property
-            def html(self):
-                return self
-                
-        # Use our class instead of a regular string
-        message.caption = CaptionWithHtml(long_caption)
-        
-        # Mock HTML body generation
-        self.parser._generate_html_body = MagicMock(return_value=long_caption)
-        
-        # In _extract_flags, text length is checked and should be > 200
+        message = self._create_mock_message(media=MessageMediaType.VIDEO, caption=long_caption)
+        # Sanity-check: the caption must actually be longer than the threshold
         self.assertGreater(len(message.caption), 200)
         self.assertNotIn("video", self.parser._extract_flags(message))
 

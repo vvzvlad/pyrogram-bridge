@@ -18,4 +18,6 @@ def get_settings():
         "time_based_merge": False,
         "show_bridge_link": False,
         "show_post_flags": True,
-    } 
+        "proxy": None,
+        "trusted_proxies": [],
+    }
