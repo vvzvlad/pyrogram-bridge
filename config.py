@@ -71,6 +71,7 @@ def get_settings() -> dict[str, Any]:
         "log_level": log_level,
         "debug": os.getenv("DEBUG", "False") == "True",
         "token": os.getenv("TOKEN", ""),
+        "trusted_proxies": [ip.strip() for ip in os.getenv("TRUSTED_PROXIES", "").split(",") if ip.strip()],
         "time_based_merge": os.getenv("TIME_BASED_MERGE", "False").strip() in ["True", "true"],
         "show_bridge_link": os.getenv("SHOW_BRIDGE_LINK", "False").strip() in ["True", "true"],
         "show_post_flags": os.getenv("SHOW_POST_FLAGS", "False").strip() in ["True", "true"],

@@ -703,11 +703,44 @@ def calculate_cache_stats() -> dict[str, Any]:
 
 
 def is_local_request(request: Request) -> bool:
-    local_hosts = ["127.0.0.1", "localhost"]
-    if request and request.client and request.client.host:
-        if request.client.host in local_hosts:
-            return True
-    return False
+    """Return True if the request originates from a local (loopback) address.
+
+    When the service runs behind a trusted reverse proxy (configured via
+    TRUSTED_PROXIES env var), the real client IP is taken from X-Real-IP or
+    X-Forwarded-For instead of the TCP connection address.
+    """
+    local_hosts = {"127.0.0.1", "::1"}
+
+    if not request or not request.client or not request.client.host:
+        return False
+
+    connection_ip = request.client.host
+    trusted_proxies: list[str] = Config.get("trusted_proxies", [])
+
+    if trusted_proxies and connection_ip in trusted_proxies:
+        # Connection comes from a known proxy — resolve the real client IP.
+        # X-Real-IP is a single IP set by nginx; prefer it.
+        real_ip = request.headers.get("x-real-ip", "").strip()
+        if not real_ip:
+            # X-Forwarded-For may be a comma-separated list; rightmost is the value appended
+            # by the trusted proxy itself and cannot be forged by the client.
+            forwarded_for = request.headers.get("x-forwarded-for", "").strip()
+            real_ip = forwarded_for.split(",")[-1].strip() if forwarded_for else ""
+        if not real_ip:
+            # Trusted proxy did not supply any forwarding header — misconfiguration.
+            # Fail safe: do not grant local access when the real client IP is unknown.
+            logger.warning(
+                "Trusted proxy %s provided no X-Real-IP or X-Forwarded-For header; "
+                "treating as non-local request for safety.",
+                connection_ip
+            )
+            return False
+        client_ip = real_ip
+    else:
+        # Direct connection (no trusted proxy): use TCP connection address.
+        client_ip = connection_ip
+
+    return client_ip in local_hosts
 
 
 @app.get("/", response_class=HTMLResponse)
