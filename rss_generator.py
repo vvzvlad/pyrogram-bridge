@@ -128,9 +128,6 @@ async def _trim_messages_groups(messages_groups: list[list[Message]], limit: int
     """
     Trim messages groups to limit
     """
-    if messages_groups: # Remove the oldest group (the one with the lowest message id based on the first message's date)
-        messages_groups.pop()
-    
     if len(messages_groups) > limit: # Trim groups if they exceed the specified limit
         messages_groups = messages_groups[:limit]
     
