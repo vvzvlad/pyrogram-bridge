@@ -110,8 +110,8 @@ class PostParser:
                 return None
             
         except Exception as e:
-            # Log the specific exception type and message
-            logger.error(f"post_parsing_error: channel {prepared_channel_id}, post_id {post_id}, error_type {type(e).__name__}, error_message {str(e)}")
+            # Log the specific exception type and message (use original channel arg to avoid UnboundLocalError)
+            logger.error(f"post_parsing_error: channel {channel}, post_id {post_id}, error_type {type(e).__name__}, error_message {str(e)}")
             # Optional: include traceback for more detail
             # import traceback
             # logger.error(traceback.format_exc())
