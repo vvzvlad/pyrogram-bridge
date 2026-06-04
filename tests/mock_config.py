@@ -25,6 +25,7 @@ def get_settings():
         "tg_watchdog_timeout": 10,
         "tg_watchdog_failures": 3,
         "tg_watchdog_restart_timeout": 90,
+        "tg_watchdog_heartbeat_every": 30,
         "tg_disconnect_flap_limit": 3,
         "tg_disconnect_flap_window": 120,
     }

@@ -18,6 +18,7 @@ services:
       # TG_WATCHDOG_INTERVAL: 60      # Seconds between liveness probes (default: 60)
       # TG_WATCHDOG_TIMEOUT: 10       # Seconds to wait for each get_me probe (default: 10)
       # TG_WATCHDOG_FAILURES: 3       # Consecutive failed probes before restart (default: 3)
+      # TG_WATCHDOG_HEARTBEAT_EVERY: 30 # Emit an INFO watchdog heartbeat every N successful probes (default: 30)
       # TG_DISCONNECT_FLAP_LIMIT: 3   # Disconnect events within the flap window before an in-process restart (default: 3)
       # TG_DISCONNECT_FLAP_WINDOW: 120 # Flap detection window in seconds (default: 120)
       PYROGRAM_BRIDGE_URL: https://pgbridge.example.com

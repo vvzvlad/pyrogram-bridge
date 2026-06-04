@@ -117,6 +117,7 @@ def get_settings() -> dict[str, Any]:
         "tg_watchdog_timeout": _parse_int_env("TG_WATCHDOG_TIMEOUT", 10),
         "tg_watchdog_failures": _parse_int_env("TG_WATCHDOG_FAILURES", 3),
         "tg_watchdog_restart_timeout": _parse_int_env("TG_WATCHDOG_RESTART_TIMEOUT", 90),
+        "tg_watchdog_heartbeat_every": _parse_int_env("TG_WATCHDOG_HEARTBEAT_EVERY", 30),
         "tg_disconnect_flap_limit": _parse_int_env("TG_DISCONNECT_FLAP_LIMIT", 3),
         "tg_disconnect_flap_window": _parse_int_env("TG_DISCONNECT_FLAP_WINDOW", 120),
     }

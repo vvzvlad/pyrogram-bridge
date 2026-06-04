@@ -45,6 +45,14 @@ class TelegramClient:
         self.watchdog_timeout = settings["tg_watchdog_timeout"]
         self.watchdog_failures = settings["tg_watchdog_failures"]
         self.watchdog_restart_timeout = settings["tg_watchdog_restart_timeout"]
+        self.watchdog_heartbeat_every = settings["tg_watchdog_heartbeat_every"]
+        # Watchdog diagnostics counters (cumulative for the process lifetime)
+        self._wd_probe_count = 0          # successful liveness probes
+        self._wd_probe_fail_count = 0     # failed liveness probes
+        self._wd_restart_count = 0        # successful in-process restarts
+        self._wd_fallback_count = 0       # SIGTERM fallbacks after a failed in-process restart
+        self._wd_flap_trigger_count = 0   # times the disconnect-flap threshold was reached
+        self._wd_last_ok_monotonic = None # monotonic timestamp of the last successful probe
         self._setup_connection_handlers()
 
     def _ensure_session_directory(self):
@@ -81,8 +89,12 @@ class TelegramClient:
         logger.warning(f"connection_handler: connection lost ({count} within {self.disconnect_window}s window)")
 
         if count >= self.max_disconnects:
-            logger.critical(f"connection_handler: disconnect flap limit reached ({self.max_disconnects} within {self.disconnect_window}s), restarting client")
-            await self._restart_client()
+            self._wd_flap_trigger_count += 1
+            logger.critical(
+                f"connection_handler: disconnect flap limit reached "
+                f"({count} disconnects within {self.disconnect_window}s window, limit={self.max_disconnects}), restarting client"
+            )
+            await self._restart_client(reason=f"disconnect flap ({count} in {self.disconnect_window}s)")
 
     def _start_watchdog(self):
         """Starts the active liveness watchdog task (idempotent)."""
@@ -99,10 +111,14 @@ class TelegramClient:
         The disconnect-only recovery never triggers when Pyrogram's recv loop dies silently
         (is_connected stays True, no Disconnect event). This loop periodically issues a real
         lightweight API call (get_me) bounded by a short timeout; after N consecutive failures
-        it forces an in-process restart.
+        it forces an in-process restart. Emits diagnostics so the behaviour can be reconstructed
+        from logs afterwards.
         """
         consecutive_failures = 0
-        logger.info(f"watchdog: started (interval={self.watchdog_interval}s, timeout={self.watchdog_timeout}s, failures={self.watchdog_failures})")
+        logger.info(
+            f"watchdog: started (interval={self.watchdog_interval}s, timeout={self.watchdog_timeout}s, "
+            f"failures={self.watchdog_failures}, heartbeat_every={self.watchdog_heartbeat_every} probes)"
+        )
         try:
             while True:
                 await asyncio.sleep(self.watchdog_interval)
@@ -110,27 +126,61 @@ class TelegramClient:
                     break
                 if self._restarting:
                     # A restart is already underway; skip this probe cycle.
+                    logger.debug("watchdog: skip probe (restart in progress)")
                     continue
+                probe_started = time.monotonic()
                 try:
-                    await asyncio.wait_for(self.client.get_me(), timeout=self.watchdog_timeout)
+                    me = await asyncio.wait_for(self.client.get_me(), timeout=self.watchdog_timeout)
+                    latency_ms = (time.monotonic() - probe_started) * 1000
+                    self._wd_probe_count += 1
+                    self._wd_last_ok_monotonic = time.monotonic()
                     if consecutive_failures:
-                        logger.info(f"watchdog: liveness restored after {consecutive_failures} failed probe(s)")
-                    consecutive_failures = 0
+                        logger.warning(
+                            f"watchdog: liveness RESTORED after {consecutive_failures} failed probe(s) "
+                            f"(latency={latency_ms:.0f}ms, me_id={getattr(me, 'id', None)})"
+                        )
+                        consecutive_failures = 0
+                    else:
+                        logger.debug(f"watchdog: probe ok (latency={latency_ms:.0f}ms, probe #{self._wd_probe_count})")
+                    # Periodic proof-of-life heartbeat at INFO, so the ABSENCE of heartbeats in the
+                    # logs is itself a signal that the watchdog died.
+                    if self.watchdog_heartbeat_every > 0 and self._wd_probe_count % self.watchdog_heartbeat_every == 0:
+                        logger.info(
+                            f"watchdog: heartbeat — probes={self._wd_probe_count}, "
+                            f"probe_failures={self._wd_probe_fail_count}, restarts={self._wd_restart_count}, "
+                            f"sigterm_fallbacks={self._wd_fallback_count}, flap_triggers={self._wd_flap_trigger_count}, "
+                            f"last_probe_latency={latency_ms:.0f}ms, is_connected={self.client.is_connected}"
+                        )
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
+                    latency_ms = (time.monotonic() - probe_started) * 1000
                     consecutive_failures += 1
-                    logger.warning(f"watchdog: liveness probe failed ({consecutive_failures}/{self.watchdog_failures}): {type(e).__name__}: {e}")
+                    self._wd_probe_fail_count += 1
+                    if self._wd_last_ok_monotonic is not None:
+                        last_ok = f"{time.monotonic() - self._wd_last_ok_monotonic:.0f}s ago"
+                    else:
+                        last_ok = "never"
+                    logger.warning(
+                        f"watchdog: liveness probe FAILED ({consecutive_failures}/{self.watchdog_failures}) "
+                        f"after {latency_ms:.0f}ms: {type(e).__name__}: {e} "
+                        f"(is_connected={self.client.is_connected}, last_ok={last_ok}, "
+                        f"total_failures={self._wd_probe_fail_count})"
+                    )
                     if consecutive_failures >= self.watchdog_failures:
                         consecutive_failures = 0
-                        await self._restart_client()
+                        await self._restart_client(reason=f"watchdog: {self.watchdog_failures} consecutive failed probes")
         except asyncio.CancelledError:
-            logger.info("watchdog: stopped")
+            logger.info(
+                f"watchdog: stopped (probes={self._wd_probe_count}, probe_failures={self._wd_probe_fail_count}, "
+                f"restarts={self._wd_restart_count}, sigterm_fallbacks={self._wd_fallback_count}, "
+                f"flap_triggers={self._wd_flap_trigger_count})"
+            )
             raise
         except Exception as e:
             logger.critical(f"watchdog: loop crashed unexpectedly ({type(e).__name__}: {e}); liveness protection is now DISABLED until next start")
 
-    async def _restart_client(self):
+    async def _restart_client(self, reason: str = "unspecified"):
         """Recover the client without killing the process when possible.
 
         Performs an in-process restart (rebuilds session + recv loop), bounded by a timeout so a
@@ -138,23 +188,47 @@ class TelegramClient:
         (SIGTERM) if the in-process restart fails or times out.
         """
         if self._restarting or self._shutting_down:
+            logger.debug(f"recovery: restart requested (reason='{reason}') but already restarting/shutting down — skipped")
             return
         self._restarting = True
+        restart_started = time.monotonic()
+        was_connected = self.client.is_connected
+        logger.critical(
+            f"recovery: TRIGGERED — reason='{reason}', is_connected={was_connected}, "
+            f"in-process restarts so far={self._wd_restart_count}, sigterm fallbacks so far={self._wd_fallback_count}"
+        )
         try:
-            if self.client.is_connected:
-                logger.critical("recovery: restarting Telegram client in-process (client.restart)")
+            if was_connected:
+                logger.warning("recovery: calling client.restart() (in-process teardown + reconnect)")
                 await asyncio.wait_for(self.client.restart(), timeout=self.watchdog_restart_timeout)
             else:
-                logger.critical("recovery: client not connected, starting it in-process (client.start)")
+                logger.warning("recovery: client not connected, calling client.start()")
                 await asyncio.wait_for(self.client.start(), timeout=self.watchdog_restart_timeout)
-            logger.info("recovery: in-process client recovery completed successfully")
+            duration = time.monotonic() - restart_started
+            self._wd_restart_count += 1
+            # Verification probe to prove the network layer is actually back (diagnostic only).
+            try:
+                me = await asyncio.wait_for(self.client.get_me(), timeout=self.watchdog_timeout)
+                self._wd_last_ok_monotonic = time.monotonic()
+                verify = f", verify_get_me ok (me_id={getattr(me, 'id', None)})"
+            except Exception as ve:
+                verify = f", verify_get_me FAILED ({type(ve).__name__}: {ve})"
+            logger.warning(
+                f"recovery: in-process restart SUCCEEDED in {duration:.1f}s "
+                f"(is_connected={self.client.is_connected}{verify}, total in-process restarts={self._wd_restart_count})"
+            )
             self._disconnect_times.clear()
             # Re-arm the watchdog in case it had previously crashed (self-healing).
             self._start_watchdog()
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.error(f"recovery: in-process restart failed ({type(e).__name__}: {e}); falling back to process restart")
+            duration = time.monotonic() - restart_started
+            self._wd_fallback_count += 1
+            logger.error(
+                f"recovery: in-process restart FAILED after {duration:.1f}s ({type(e).__name__}: {e}); "
+                f"falling back to process restart (SIGTERM), total fallbacks={self._wd_fallback_count}"
+            )
             self._restart_app()
         finally:
             self._restarting = False
