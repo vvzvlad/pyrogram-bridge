@@ -82,6 +82,21 @@ def get_settings() -> dict[str, Any]:
         print(f"API_PORT must be a valid integer, got: {os.getenv('API_PORT')!r}", flush=True)
         sys.exit(1)
 
+    # Local helper to parse int env vars with a default and exit on a bad value
+    def _parse_int_env(name: str, default: int, minimum: int = 1) -> int:
+        raw = os.getenv(name)
+        if raw is None or raw.strip() == "":
+            return default
+        try:
+            value = int(raw)
+        except ValueError:
+            print(f"{name} must be a valid integer, got: {raw!r}", flush=True)
+            sys.exit(1)
+        if value < minimum:
+            print(f"{name} must be >= {minimum}, got: {value}", flush=True)
+            sys.exit(1)
+        return value
+
     return {
         "tg_api_id": tg_api_id_int,
         "tg_api_hash": tg_api_hash,
@@ -97,4 +112,11 @@ def get_settings() -> dict[str, Any]:
         "show_bridge_link": os.getenv("SHOW_BRIDGE_LINK", "False").strip() in ["True", "true"],
         "show_post_flags": os.getenv("SHOW_POST_FLAGS", "False").strip() in ["True", "true"],
         "proxy": proxy,
+        "tg_watchdog_enabled": os.getenv("TG_WATCHDOG_ENABLED", "true").strip().lower() not in ["false", "0", "no", "off", "disable", "disabled"],
+        "tg_watchdog_interval": _parse_int_env("TG_WATCHDOG_INTERVAL", 60),
+        "tg_watchdog_timeout": _parse_int_env("TG_WATCHDOG_TIMEOUT", 10),
+        "tg_watchdog_failures": _parse_int_env("TG_WATCHDOG_FAILURES", 3),
+        "tg_watchdog_restart_timeout": _parse_int_env("TG_WATCHDOG_RESTART_TIMEOUT", 90),
+        "tg_disconnect_flap_limit": _parse_int_env("TG_DISCONNECT_FLAP_LIMIT", 3),
+        "tg_disconnect_flap_window": _parse_int_env("TG_DISCONNECT_FLAP_WINDOW", 120),
     }
