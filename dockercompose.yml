@@ -21,6 +21,9 @@ services:
       # TG_WATCHDOG_HEARTBEAT_EVERY: 30 # Emit an INFO watchdog heartbeat every N successful probes (default: 30)
       # TG_DISCONNECT_FLAP_LIMIT: 3   # Disconnect events within the flap window before an in-process restart (default: 3)
       # TG_DISCONNECT_FLAP_WINDOW: 120 # Flap detection window in seconds (default: 120)
+      # TG_CHAT_CACHE_TTL_HOURS: 12   # TTL for cached channel info (title/username/id); removes GetFullChannel from the poll hot path (default: 12)
+      # TG_RPC_CONCURRENCY: 1         # Max concurrent live Telegram RPC calls — global throttle (default: 1)
+      # TG_RPC_MIN_INTERVAL_MS: 500   # Minimum gap between live Telegram RPC starts, ms (default: 500)
       PYROGRAM_BRIDGE_URL: https://pgbridge.example.com
       API_PORT: 80
       TOKEN: ХХХ

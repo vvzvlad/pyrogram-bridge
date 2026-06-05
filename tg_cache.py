@@ -17,14 +17,25 @@ import random
 import asyncio
 import time
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from typing import Any, Optional, Union, List
 from pyrogram import Client
 from pyrogram.types import Chat, Message
+from tg_throttle import tg_rpc
 
 logger = logging.getLogger(__name__)
 
 # Path to cache directory
 CACHE_DIR = os.path.join('data', 'tgcache')
+
+# TTL (hours) for the channel-info cache. Channel title/username/id change rarely,
+# so a long TTL removes the rate-limited GetFullChannel from the feed-poll hot path.
+try:
+    CHAT_CACHE_TTL_HOURS = int(os.getenv("TG_CHAT_CACHE_TTL_HOURS", "12"))
+    if CHAT_CACHE_TTL_HOURS < 1:
+        CHAT_CACHE_TTL_HOURS = 12
+except ValueError:
+    CHAT_CACHE_TTL_HOURS = 12
 
 def _get_history_cache_file_path(channel_id: Union[str, int]) -> str:
     """Returns path to the message history cache file for the channel"""
@@ -128,11 +139,87 @@ async def cached_get_chat_history(client: Client, channel_id: Union[str, int], l
     try:
         logger.info(f"history_cache_request: fetching fresh history for channel {channel_id}, limit {limit}")
         messages = []
-        async for message in client.get_chat_history(channel_id, limit=limit):
-            messages.append(message)
+        async with tg_rpc():
+            async for message in client.get_chat_history(channel_id, limit=limit):
+                messages.append(message)
         await asyncio.to_thread(_save_history_to_cache, channel_id, messages, limit)
         
         return messages
     except Exception as e:
         logger.error(f"history_cache_request_error: channel {channel_id}, limit {limit}, error {str(e)}")
         raise
+
+
+def _get_chat_cache_file_path(channel_id: Union[str, int]) -> str:
+    """Returns path to the channel-info cache file for the channel."""
+    if not os.path.exists(CACHE_DIR):
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        logger.info(f"cache_dir_created: path {CACHE_DIR}")
+    channel_id_str = str(channel_id)
+    safe_filename = channel_id_str.replace('/', '_').replace('\\', '_')
+    # Distinct suffix so channel-info files never collide with history (.cache) files.
+    return os.path.join(CACHE_DIR, f"{safe_filename}.chatinfo")
+
+
+def _save_chat_to_cache(channel_id: Union[str, int], data: dict) -> None:
+    """Saves channel-info (id/title/username) to cache."""
+    try:
+        cache_file = _get_chat_cache_file_path(channel_id)
+        cache_data = {'timestamp': time.time(), 'data': data}
+        with open(cache_file, 'wb') as f:
+            pickle.dump(cache_data, f)
+        logger.info(f"chatinfo_cache_saved: channel {channel_id}, file {cache_file}")
+    except Exception as e:
+        logger.error(f"chatinfo_cache_save_error: channel {channel_id}, error {str(e)}")
+
+
+def _get_chat_from_cache(channel_id: Union[str, int], max_age_hours: int = CHAT_CACHE_TTL_HOURS) -> Optional[dict]:
+    """Retrieves channel-info from cache if not older than max_age_hours (with up-to-20% randomization)."""
+    try:
+        cache_file = _get_chat_cache_file_path(channel_id)
+        if not os.path.exists(cache_file):
+            logger.info(f"chatinfo_cache_miss: channel {channel_id}, cache file not found")
+            return None
+        with open(cache_file, 'rb') as f:
+            cache_data = pickle.load(f)
+        cache_age = time.time() - cache_data['timestamp']
+        # Add randomness up to 20% of max age, same approach as the history cache.
+        random_factor = 1 - random.uniform(0, 0.2)
+        adjusted_max_age = max_age_hours * 3600 * random_factor
+        if cache_age > adjusted_max_age:
+            logger.info(f"chatinfo_cache_expired: channel {channel_id}, age {cache_age:.1f}s > adjusted max {adjusted_max_age:.1f}s (random factor: {random_factor:.2f})")
+            return None
+        data = cache_data.get('data')
+        if not isinstance(data, dict):
+            logger.warning(f"chatinfo_cache_invalid: channel {channel_id}, unexpected payload type {type(data).__name__}")
+            return None
+        logger.info(f"chatinfo_cache_hit: channel {channel_id}, age {cache_age:.1f}s")
+        return data
+    except Exception as e:
+        logger.error(f"chatinfo_cache_read_error: channel {channel_id}, error {str(e)}")
+        return None
+
+
+async def cached_get_chat(client: Client, channel_id: Union[str, int]) -> SimpleNamespace:
+    """Gets channel info (id/title/username) with disk TTL caching.
+
+    Avoids the rate-limited channels.GetFullChannel on every feed poll. Mirrors
+    cached_get_chat_history. On a cache miss the live get_chat is throttled and its
+    exceptions (FloodWait, UsernameInvalid, ...) propagate to the caller unchanged;
+    only successful lookups are cached. The returned object exposes .id/.title/.username.
+    """
+    cached = await asyncio.to_thread(_get_chat_from_cache, channel_id)
+    if cached is not None:
+        return SimpleNamespace(**cached)
+
+    logger.info(f"chatinfo_cache_request: fetching fresh chat info for channel {channel_id}")
+    async with tg_rpc():
+        chat = await client.get_chat(channel_id)
+
+    data = {
+        'id': getattr(chat, 'id', None),
+        'title': getattr(chat, 'title', None),
+        'username': getattr(chat, 'username', None),
+    }
+    await asyncio.to_thread(_save_chat_to_cache, channel_id, data)
+    return SimpleNamespace(**data)
