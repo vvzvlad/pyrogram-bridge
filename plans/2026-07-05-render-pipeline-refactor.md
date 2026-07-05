@@ -157,9 +157,9 @@ Golden-эталоны (§5, этап 0) обновляются только ко
 пиклы ровно нужного формата: `{channel}.cache` =
 `{'timestamp', 'limit', 'messages': List[Message]}`
 (`tg_cache._save_history_to_cache`) и `{channel}.chatinfo` (для
-`cached_get_chat`). Отобранные ПАРЫ файлов копируются с сервера в
-`tests/test_data/recorded/` и коммитятся как замороженный корпус. Состав
-(какие каналы) выбирает владелец — контент этих каналов попадает в репо.
+`cached_get_chat`). Отобранные ПАРЫ файлов лежат в
+`tests/test_data/recorded/` и коммитятся как замороженный корпус (контент
+этих публичных каналов попадает в репо).
 
 Реплей: тестовый загрузчик распикливает файлы напрямую (`timestamp`/`limit`
 игнорируются — никакой проверки свежести) и monkeypatch'ит
@@ -184,10 +184,24 @@ media-типы, наличие media_groups / time-кластеров / forward 
 зачёркивания (`<s>`/`<del>` в entities). Дыры покрытия закрываются
 СИНТЕТИЧЕСКОЙ добавкой — только для недостижимого в записанном.
 
-**Статус (2026-07-05): оба шага уже выполнены.** Снапшот прод-кэша снят:
-`data/tgcache_prod_2026-07-05/` (90 `.cache` + 89 `.chatinfo`, 53 МБ, вне
-git — `data/` в .gitignore; отбор пар в `tests/test_data/recorded/` — задача
-этапа 0). Совместимость подтверждена: ВСЕ файлы распикливаются под kurigram
+**Статус (2026-07-05): снапшот, проверка, инвентарь И ОТБОР уже выполнены.**
+Снапшот прод-кэша: `data/tgcache_prod_2026-07-05/` (90 `.cache` +
+89 `.chatinfo`, 53 МБ, вне git — `data/` в .gitignore). Отбор сделан жадно
+по матрице признаков, 4 канала (2.7 МБ) уже лежат в
+`tests/test_data/recorded/` (untracked; коммитятся первым коммитом этапа 0):
+
+- `bladerunnerblues` — единственный источник GIVEAWAY + GIVEAWAY_WINNERS;
+  плюс POLL, pdf, DOCUMENT, ANIMATION, r_paid (71), wp_nophoto;
+- `theyforcedme` — вся редкая медиа-палитра разом: STICKER, AUDIO, VOICE,
+  VIDEO_NOTE, POLL, ANIMATION; богат forward (13) и reply (10);
+- `embedoka` — r_empty + r_custom (35) + strike (7) + POLL + pdf +
+  wp_nophoto; forward 20, reply 14;
+- `meow_design` — 51 time-кластерная пара (ядро для time_based_merge),
+  media_groups 22, pdf, POLL, strike.
+
+Суммарно закрыта ВСЯ матрица: PHOTO 246, VIDEO 40, media_groups 66,
+forward 35, reply 27, wp_photo 11 + все редкие признаки выше.
+Совместимость подтверждена: ВСЕ файлы распикливаются под kurigram
 2.2.23 без ошибок. Инвентарь (8582 сообщения): PHOTO 5397, text-only 1609,
 WEB_PAGE 764 (с фото 581 / без 183), VIDEO 653, DOCUMENT 51, ANIMATION 33,
 POLL 31, VIDEO_NOTE 15, STICKER 13, AUDIO 8, VOICE 6, GIVEAWAY и
