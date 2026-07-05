@@ -36,4 +36,5 @@ def get_settings():
         "media_download_timeout_min": 120,
         "media_download_timeout_max": 1800,
         "media_download_min_speed": 256 * 1024,
+        "io_thread_pool_size": 32,
     }

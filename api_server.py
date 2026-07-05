@@ -15,7 +15,6 @@ import re
 import uuid
 import mimetypes
 from typing import List, Union, Any
-from urllib.parse import quote
 
 import json
 from datetime import datetime
@@ -23,9 +22,9 @@ import time
 from contextlib import asynccontextmanager
 import random
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import uvloop
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.background import BackgroundTask
 import sys
 
@@ -51,14 +50,35 @@ magic_mime = magic.Magic(mime=True)
 class ZeroSizeFileError(Exception):
     """Custom exception for zero-size files found or downloaded."""
 
-class RequestLoggingMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        # Log only method and URL at debug level to avoid flooding logs on active RSS polling
-        logger.debug(f"Request: {request.method} {request.url}")
+class RequestLoggingMiddleware:
+    """Pure-ASGI request logger (no BaseHTTPMiddleware).
+
+    BaseHTTPMiddleware runs the downstream app in a separate anyio task and pumps the
+    response through an in-memory stream, which adds per-request overhead and interacts
+    badly with streaming bodies, background tasks and client cancellation. This plain
+    ASGI middleware only wraps `send` to observe the response status line, so it never
+    buffers the body — the FileResponse stream flows straight through untouched.
+    """
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        # Log only method and path (with query, matching the old request.url logging) at
+        # debug level to avoid flooding logs on active RSS polling.
+        _qs = scope.get("query_string") or b""
+        _path = scope["path"] + (f"?{_qs.decode('latin-1')}" if _qs else "")
+        logger.debug(f"Request: {scope['method']} {_path}")
+
+        async def send_wrapper(message):
+            if message["type"] == "http.response.start":
+                logger.debug(f"Response status: {message['status']}")
+            await send(message)
+
         try:
-            response = await call_next(request)
-            logger.debug(f"Response status: {response.status_code}")
-            return response
+            await self.app(scope, receive, send_wrapper)
         except Exception as e:
             logger.error(f"Request processing error: {str(e)}")
             raise
@@ -71,6 +91,11 @@ Config = get_settings()
 HTTP_DOWNLOAD_SEMAPHORE = asyncio.Semaphore(3)  # semaphore for live HTTP media requests
 BACKGROUND_DOWNLOAD_SEMAPHORE = asyncio.Semaphore(2)  # semaphore for background cache worker
 download_queue = asyncio.Queue(maxsize=100)
+# How stale a temp_* file's mtime must be before a serve refreshes it (keeps the 1h
+# sweeper from deleting an actively-viewed video). Well below 1h so the file stays alive,
+# but large enough that the mtime — and thus FileResponse's ETag — is stable across the
+# rapid requests of one resume/seek session.
+TEMP_MTIME_REFRESH_INTERVAL = 300  # seconds
 
 # In-flight download dedup registry: maps (channel, post_id, file_unique_id) to the
 # shared Future of an ongoing download. The FIRST request for a key runs the download in
@@ -117,7 +142,13 @@ async def _supervised(factory, name: str, min_restart_interval: float = 60.0):
 async def lifespan(_: FastAPI):
     setup_logging(Config["log_level"])
 
-    
+    # Enlarge the default threadpool: SQLite/python-magic/pickle/os.walk all run via
+    # asyncio.to_thread, and the interpreter default (min(32, cpu+4) = 5-6 on a 1-2 CPU
+    # container) is too small under load. Configurable via IO_THREAD_POOL_SIZE.
+    loop = asyncio.get_running_loop()
+    io_executor = ThreadPoolExecutor(max_workers=Config["io_thread_pool_size"], thread_name_prefix="io")
+    loop.set_default_executor(io_executor)
+
     base_cache_dir = os.path.abspath("./data/cache")
     os.makedirs(base_cache_dir, exist_ok=True) # Create cache directory
 
@@ -141,6 +172,8 @@ async def lifespan(_: FastAPI):
     except asyncio.CancelledError:
         pass
     await client.stop()
+    # Shut the io threadpool down so its threads don't linger past a reload/restart.
+    io_executor.shutdown(wait=False)
 
 app = FastAPI(title="Pyrogram Bridge", lifespan=lifespan)
 app.add_middleware(RequestLoggingMiddleware)
@@ -244,16 +277,33 @@ async def delayed_delete_file(file_path: str, delay: int = 300) -> None:
 
 
 async def prepare_file_response(file_path: str, request: Request, delete_after: bool = False,
-                                media_key: tuple[str, int, str] | None = None) -> StreamingResponse:
-    """Prepare a streaming file response with HTTP Range request support."""
+                                media_key: tuple[str, int, str] | None = None) -> Response:
+    """Serve a cached media file via Starlette's FileResponse.
+
+    FileResponse handles Range/If-Range/206/416/multipart and sets
+    Accept-Ranges/ETag/Last-Modified itself, and reads the file efficiently (no per-64KB
+    to_thread hop that starved the threadpool). We keep: the early 404 pre-check, the MIME
+    logic (python-magic + SQLite type cache), the stage-2 temp_* mtime touch, and the
+    delete_after BackgroundTask.
+    """
+    # `request` is unused now that FileResponse parses the Range header itself, but the
+    # signature is kept for call-site compatibility (and future needs).
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="File not found")
 
     # Keep an actively-viewed large-video temp file alive: refresh its mtime so the 1h
     # sweeper (which deletes temp_* by mtime) won't remove it out from under a viewer.
+    # DEBOUNCED: FileResponse derives ETag/Last-Modified from mtime, so touching on EVERY
+    # serve would make the validators change per request and break a player's `If-Range`
+    # resume (it would restart with a 200 instead of a 206). We only refresh when the
+    # mtime is already older than TEMP_MTIME_REFRESH_INTERVAL — far below the 1h sweeper
+    # window, so the file still stays alive, but the ETag is stable across the rapid
+    # requests of a single resume/seek session.
     if os.path.basename(file_path).startswith("temp_"):
         try:
-            await asyncio.to_thread(os.utime, file_path, None)
+            age = time.time() - await asyncio.to_thread(os.path.getmtime, file_path)
+            if age > TEMP_MTIME_REFRESH_INTERVAL:
+                await asyncio.to_thread(os.utime, file_path, None)
         except OSError as e:
             logger.debug(f"Failed to refresh mtime for {file_path}: {e}")
 
@@ -281,107 +331,23 @@ async def prepare_file_response(file_path: str, request: Request, delete_after: 
 
     logger.debug(f"Determined media type for {os.path.basename(file_path)}: {media_type}")
 
-    try:
-        total_size = os.path.getsize(file_path)
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="File not found")
-    range_header = request.headers.get("range")
-
-    if range_header:
-        # Parse Range header according to RFC 7233
-        try:
-            range_value = range_header.strip()
-            if not range_value.startswith("bytes="):
-                raise ValueError("Only bytes ranges are supported")
-            range_spec = range_value[len("bytes="):]
-            if range_spec.startswith("-"):
-                # Suffix range: bytes=-N (last N bytes)
-                suffix_length = int(range_spec[1:])
-                start = max(0, total_size - suffix_length)
-                end = total_size - 1
-            elif range_spec.endswith("-"):
-                # Open-ended range: bytes=START-
-                start = int(range_spec[:-1])
-                end = total_size - 1
-            else:
-                # Full range: bytes=START-END
-                start_str, end_str = range_spec.split("-", 1)
-                start = int(start_str)
-                end = int(end_str)
-        except (ValueError, IndexError) as e:
-            logger.debug(f"Invalid Range header '{range_header}': {e}")
-            return Response(
-                status_code=416,
-                headers={"Content-Range": f"bytes */{total_size}"}
-            )
-
-        # Clamp end to file size - 1 (RFC 7233 allows end >= total_size)
-        end = min(end, total_size - 1)
-
-        # If start is beyond file size, return 416
-        if start >= total_size:
-            return Response(
-                status_code=416,
-                headers={"Content-Range": f"bytes */{total_size}"}
-            )
-
-        content_length = end - start + 1
-        status_code = 206
-        headers = {
-            "Content-Disposition": (
-                f"inline; filename=\"{os.path.basename(file_path)}\"; "
-                f"filename*=UTF-8''{quote(os.path.basename(file_path))}"
-            ),
-            # Files are addressed by file_unique_id which is immutable in Telegram,
-            # so it is safe to cache them aggressively on the client side.
-            "Cache-Control": "public, max-age=86400, immutable",
-            "Accept-Ranges": "bytes",
-            "Content-Range": f"bytes {start}-{end}/{total_size}",
-            "Content-Length": str(content_length),
-        }
-    else:
-        # No Range header — serve full file with status 200
-        start = 0
-        end = total_size - 1
-        status_code = 200
-        headers = {
-            "Content-Disposition": (
-                f"inline; filename=\"{os.path.basename(file_path)}\"; "
-                f"filename*=UTF-8''{quote(os.path.basename(file_path))}"
-            ),
-            # Files are addressed by file_unique_id which is immutable in Telegram,
-            # so it is safe to cache them aggressively on the client side.
-            "Cache-Control": "public, max-age=86400, immutable",
-            "Accept-Ranges": "bytes",
-            "Content-Length": str(total_size),
-        }
-
-    chunk_size = 64 * 1024  # 64 KB chunks
-
-    async def file_chunk_generator():
-        """Async generator that reads file in chunks; each chunk is a separate open/seek/read/close."""
-        bytes_remaining = end - start + 1
-        offset = start
-        while bytes_remaining > 0:
-            to_read = min(chunk_size, bytes_remaining)
-            def read_at(path, off, size):
-                # Open, seek, read, and close within a single thread call to avoid fd leaks
-                with open(path, "rb") as f:
-                    f.seek(off)
-                    return f.read(size)
-            data = await asyncio.to_thread(read_at, file_path, offset, to_read)
-            if not data:
-                break
-            bytes_remaining -= len(data)
-            offset += len(data)
-            yield data
-
+    # Delete the temporary file once the response has been fully sent (stage-2 delete_after).
+    # FileResponse runs this BackgroundTask after streaming the body.
     background = BackgroundTask(delayed_delete_file, file_path) if delete_after else None
-    return StreamingResponse(
-        content=file_chunk_generator(),
-        status_code=status_code,
+
+    # FileResponse handles Range/If-Range/206/416/multipart and sets
+    # Accept-Ranges/ETag/Last-Modified itself. Do NOT hand-build Content-Disposition:
+    # passing filename= makes FileResponse emit `inline; filename*=UTF-8''...` on its own
+    # (setting it manually would double the header).
+    #
+    # Files are addressed by file_unique_id which is immutable in Telegram, so it is safe
+    # to cache them aggressively on the client side.
+    return FileResponse(
+        file_path,
         media_type=media_type,
-        headers=headers,
+        filename=os.path.basename(file_path),
+        content_disposition_type="inline",
+        headers={"Cache-Control": "public, max-age=86400, immutable"},
         background=background,
     )
 

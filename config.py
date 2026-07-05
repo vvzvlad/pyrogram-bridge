@@ -129,4 +129,8 @@ def get_settings() -> dict[str, Any]:
         "media_download_timeout_min": _parse_int_env("MEDIA_DOWNLOAD_TIMEOUT_MIN", 120),
         "media_download_timeout_max": _parse_int_env("MEDIA_DOWNLOAD_TIMEOUT_MAX", 1800),
         "media_download_min_speed": _parse_int_env("MEDIA_DOWNLOAD_MIN_SPEED", 256 * 1024),
+        # Size of the asyncio default ThreadPoolExecutor. SQLite/python-magic/pickle/os.walk
+        # all run via asyncio.to_thread; the interpreter default (min(32, cpu+4)) is only 5-6
+        # on a 1-2 CPU container, which starves those under load. 32 gives ample headroom.
+        "io_thread_pool_size": _parse_int_env("IO_THREAD_POOL_SIZE", 32),
     }
