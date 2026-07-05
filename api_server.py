@@ -72,6 +72,16 @@ HTTP_DOWNLOAD_SEMAPHORE = asyncio.Semaphore(3)  # semaphore for live HTTP media 
 BACKGROUND_DOWNLOAD_SEMAPHORE = asyncio.Semaphore(2)  # semaphore for background cache worker
 download_queue = asyncio.Queue(maxsize=100)
 
+# In-flight download dedup registry: maps (channel, post_id, file_unique_id) to the
+# shared Future of an ongoing download. The FIRST request for a key runs the download in
+# a DETACHED task and shares its Future; concurrent requests await that Future instead of
+# starting their own download. Detaching the download means a client disconnecting (which
+# cancels its request coroutine) can never cancel the download nor leave the Future
+# forever-pending — so waiters can't hang. See _download_deduped.
+_inflight: dict[tuple[str, int, str], asyncio.Future] = {}
+# Strong refs to detached download tasks so they are not garbage-collected mid-flight.
+_inflight_tasks: set[asyncio.Task] = set()
+
 async def _supervised(factory, name: str, min_restart_interval: float = 60.0):
     """Run factory() forever, restarting it if it dies with a non-cancellation error.
 
@@ -239,6 +249,14 @@ async def prepare_file_response(file_path: str, request: Request, delete_after: 
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="File not found")
 
+    # Keep an actively-viewed large-video temp file alive: refresh its mtime so the 1h
+    # sweeper (which deletes temp_* by mtime) won't remove it out from under a viewer.
+    if os.path.basename(file_path).startswith("temp_"):
+        try:
+            await asyncio.to_thread(os.utime, file_path, None)
+        except OSError as e:
+            logger.debug(f"Failed to refresh mtime for {file_path}: {e}")
+
     media_type: str | None = None
 
     if media_key is not None:
@@ -367,6 +385,96 @@ async def prepare_file_response(file_path: str, request: Request, delete_after: 
         background=background,
     )
 
+def _media_download_timeout(file_size: int) -> float:
+    """Scale the download timeout with file size.
+
+    Effective floor of `media_download_min_speed` bytes/s (timeout ≈ size / min_speed),
+    clamped to [media_download_timeout_min, media_download_timeout_max] seconds.
+    A non-positive/unknown size falls back to the minimum timeout.
+    """
+    min_t = Config["media_download_timeout_min"]
+    max_t = Config["media_download_timeout_max"]
+    min_speed = Config["media_download_min_speed"]
+    if file_size <= 0 or min_speed <= 0:
+        return float(min_t)
+    return float(min(max_t, max(min_t, file_size // min_speed)))
+
+
+async def _download_atomic(file_id: str, final_path: str, timeout: float) -> str:
+    """Download a media file through a unique partial path and atomically publish it.
+
+    Invariant enforced here: a file that exists at a FINAL name (`{file_unique_id}` or
+    `temp_{file_unique_id}`) is ALWAYS complete. The downloader only ever writes to a
+    unique `{final_path}.part.{hex}` path; the file appears at its final name solely via
+    os.rename (atomic on POSIX). The finally block ALWAYS removes our partial (on timeout,
+    cancel, zero-size, or losing a rename race), so no stub is ever served or left behind.
+
+    Raises ZeroSizeFileError if the download produced a missing/zero-size file.
+    """
+    part_path = f"{final_path}.part.{uuid.uuid4().hex}"
+    try:
+        await client.safe_download_media(file_id, part_path, timeout=timeout)
+        if not os.path.exists(part_path) or os.path.getsize(part_path) == 0:
+            raise ZeroSizeFileError(
+                f"Downloaded file for {final_path} is zero size or missing after download attempt."
+            )
+        # Publish atomically, but only if nobody else already produced the final file
+        # (a concurrent request that won the race). rename is atomic on POSIX.
+        if not os.path.exists(final_path):
+            os.rename(part_path, final_path)
+        return final_path
+    finally:
+        # Always clean up our partial: timeout, cancellation, zero-size, or race loser
+        # (rename skipped because final_path already existed).
+        if os.path.exists(part_path):
+            try:
+                os.remove(part_path)
+            except OSError as e:
+                logger.warning(f"cleanup_error: Failed to remove partial file {part_path}: {e}")
+
+
+async def _download_deduped(channel: Union[str, int], post_id: int, file_unique_id: str) -> tuple[Union[str, None], bool]:
+    """Deduplicate concurrent downloads of the same media by (channel, post_id, fid).
+
+    The first request for a key runs download_media_file in a DETACHED task and shares its
+    Future; concurrent requests await the same Future (bounded by wait_for). The detached
+    task's finally BOTH sets the Future's result/exception AND pops the key — so a
+    completed Future never leaves the key stuck, and a client disconnect (cancelling only
+    the awaiting request coroutine) can neither cancel the download nor hang other waiters.
+    """
+    key = (str(channel), post_id, file_unique_id)
+    fut = _inflight.get(key)
+    if fut is None:
+        loop = asyncio.get_running_loop()
+        fut = loop.create_future()
+        _inflight[key] = fut
+
+        async def _runner():
+            try:
+                result = await download_media_file(channel, post_id, file_unique_id)
+                if not fut.done():
+                    fut.set_result(result)
+            except BaseException as e:  # noqa: BLE001 — must forward ANY failure to waiters
+                if not fut.done():
+                    fut.set_exception(e)
+            finally:
+                _inflight.pop(key, None)
+
+        task = asyncio.create_task(_runner())
+        _inflight_tasks.add(task)
+        task.add_done_callback(_inflight_tasks.discard)
+        # Retrieve the exception in a done-callback to silence "exception was never
+        # retrieved" if every waiter disconnects before awaiting the Future.
+        fut.add_done_callback(lambda f: f.cancelled() or f.exception())
+
+    # Waiter timeout: a generous safety net above the maximum per-download timeout (the
+    # download is itself internally bounded), so a live download always completes first.
+    waiter_timeout = float(Config["media_download_timeout_max"]) + 120.0
+    # shield so a timed-out / cancelled waiter does NOT cancel the shared Future that the
+    # detached task owns and other waiters depend on.
+    return await asyncio.wait_for(asyncio.shield(fut), timeout=waiter_timeout)
+
+
 async def download_media_file(channel: Union[str, int], post_id: int, file_unique_id: str) -> tuple[Union[str, None], bool]:
     """
     Download media file from Telegram and save to cache
@@ -410,18 +518,27 @@ async def download_media_file(channel: Union[str, int], post_id: int, file_uniqu
             logger.error(f"Failed to get video file size for message {post_id}: {str(e)}")
     
     if is_large_video:
-        # For large video, download without permanent caching; use a temporary file
+        # For large video, download without permanent caching; use a temporary file.
         temp_file_path = os.path.join(post_dir, f"temp_{file_unique_id}")
-        if os.path.exists(temp_file_path):
+        # A temp_{fid} file now only ever appears via atomic rename (see _download_atomic),
+        # so its presence GUARANTEES a complete file — serve it directly.
+        if os.path.exists(temp_file_path) and os.path.getsize(temp_file_path) > 0:
             logger.info(f"Temporary file {temp_file_path} already exists, serving cached large video")
             return temp_file_path, False
         file_id = await find_file_id_in_message(message, file_unique_id)
         if not file_id:
             logger.error(f"Media with file_unique_id {file_unique_id} not found in message {post_id}")
             raise HTTPException(status_code=404, detail="File not found in message")
-        logger.info(f"Downloading large video file {file_unique_id} to temporary path {temp_file_path}")
+        # Scale the timeout with size (≈256 KB/s floor) so slow big-video downloads aren't
+        # cut short at the fixed 120s used for regular files.
         try:
-            file_path = await client.safe_download_media(file_id, temp_file_path)
+            file_size = int(message.video.file_size or 0)
+        except Exception:
+            file_size = 0
+        timeout = _media_download_timeout(file_size)
+        logger.info(f"Downloading large video file {file_unique_id} to temporary path {temp_file_path} (timeout={timeout:.0f}s)")
+        try:
+            file_path = await _download_atomic(file_id, temp_file_path, timeout)
         except asyncio.TimeoutError:
             logger.error(f"Timeout downloading large video {file_unique_id}")
             raise HTTPException(status_code=504, detail="Download timeout")
@@ -470,46 +587,17 @@ async def download_media_file(channel: Union[str, int], post_id: int, file_uniqu
 
         raise HTTPException(status_code=404, detail="File not found in message")
 
-    # Use a unique temp path to avoid race conditions when concurrent requests download the same file
-    temp_path = cache_path + f".tmp.{uuid.uuid4().hex}"
+    # Download through a unique `.part.` file and atomically publish to the final cache
+    # path. _download_atomic owns the zero-size check, the race-loser cleanup, and the
+    # rename-only-if-absent logic, keeping the "final name = complete file" invariant.
     try:
-        file_path = await client.safe_download_media(file_id, temp_path)
+        file_path = await _download_atomic(file_id, cache_path, timeout=float(Config["media_download_timeout_min"]))
     except asyncio.TimeoutError:
         logger.error(f"Timeout downloading media {file_unique_id}")
-        # Clean up the temp file if it was created
-        if os.path.exists(temp_path):
-            try:
-                os.remove(temp_path)
-            except OSError:
-                pass
         raise HTTPException(status_code=504, detail="Download timeout")
 
-    # Check if the downloaded temp file exists and has a size greater than zero
-    if not file_path or not os.path.exists(temp_path) or os.path.getsize(temp_path) == 0:
-        logger.error(f"download_failed_zero_size: Downloaded file {file_unique_id} for {channel}/{post_id} is zero size or missing.")
-        # Attempt to clean up the invalid temp file
-        if os.path.exists(temp_path):
-            try:
-                os.remove(temp_path)
-                logger.info(f"Removed zero-size temp file: {temp_path}")
-            except OSError as e:
-                logger.error(f"cleanup_error: Failed to remove zero-size temp file {temp_path}: {e}")
-        # Raise specific error to indicate download failure
-        raise ZeroSizeFileError(f"Downloaded file {file_unique_id} for {channel}/{post_id} is zero size or missing after download attempt.")
-
-    # Atomic rename: if another concurrent request already wrote the final file, discard our temp copy
-    if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
-        logger.info(f"Concurrent download already completed for {file_unique_id}, discarding temp file")
-        try:
-            os.remove(temp_path)
-        except OSError as e:
-            logger.warning(f"cleanup_error: Failed to remove temp file {temp_path}: {e}")
-        return cache_path, False
-
-    # Atomically move temp file to final cache path (atomic on POSIX)
-    os.rename(temp_path, cache_path)
     logger.info(f"Downloaded media file {file_unique_id} to {cache_path}")
-    return cache_path, False
+    return file_path, False
 
 
 def remove_old_cached_files_sync(media_files: list, cache_dir: str) -> tuple[list, int]:
@@ -565,8 +653,9 @@ def remove_old_cached_files_sync(media_files: list, cache_dir: str) -> tuple[lis
     for root, _, files in os.walk(cache_dir):
         for file in files:
             is_large_video_temp = file.startswith("temp_")
-            # Match exactly the format generated in download_media_file: {name}.tmp.{32 hex chars}
-            is_race_temp = bool(re.match(r'^.+\.tmp\.[0-9a-f]{32}$', file))
+            # Match the partial-download suffixes: the new `.part.{32 hex}` and the legacy
+            # `.tmp.{32 hex}` (old stubs may still be on disk after the rename to .part.).
+            is_race_temp = bool(re.match(r'^.+\.(part|tmp)\.[0-9a-f]{32}$', file))
             if not (is_large_video_temp or is_race_temp):
                 continue
             file_path = os.path.join(root, file)
@@ -1020,14 +1109,39 @@ async def get_media(channel: str, post_id: int, file_unique_id: str, request: Re
                                                    media_key=(str(channel), post_id, file_unique_id))
 
             _sem_wait_start = _time.monotonic()
-            async with HTTP_DOWNLOAD_SEMAPHORE:  # limit concurrent live HTTP downloads
+            # Bound the wait for a live-download permit: a saturated semaphore must not
+            # hang the request indefinitely. wait_for wraps ONLY the acquire; the permit
+            # is released in the finally below only if the acquire actually succeeded (a
+            # timed-out acquire never holds a permit, so it must not release one).
+            #
+            # CONSCIOUS TRADE-OFF (stage-2 review): the permit is held by the REQUEST, not
+            # the detached download task. So this bounds concurrent *requests* (admission
+            # control with a fast 503 on saturation), not strictly concurrent *downloads*:
+            # if a client disconnects, its request coroutine releases the permit while the
+            # detached download keeps running, so a burst of disconnects across DIFFERENT
+            # files can transiently exceed the limit of live Telegram downloads. This is
+            # deliberate — the download surviving a disconnect is the whole point of the
+            # in-flight registry, and moving the permit into the runner would forfeit the
+            # fast 503 (a saturated request would instead hang on the future for up to the
+            # waiter timeout). Each download is itself timeout-bounded, so the overrun is
+            # transient. If prod observation (stage 7) shows real download-count overrun
+            # under disconnect churn, strengthen with a separate download-side limiter.
+            try:
+                await asyncio.wait_for(HTTP_DOWNLOAD_SEMAPHORE.acquire(), timeout=30)
+            except asyncio.TimeoutError:
+                logger.warning(f"http_semaphore_timeout: {channel}/{post_id}/{file_unique_id} waited >30s for HTTP_DOWNLOAD_SEMAPHORE")
+                return Response(status_code=503, content="Server busy, please retry",
+                                headers={"Retry-After": "30"})
+            try:
                 _sem_wait = _time.monotonic() - _sem_wait_start
                 if _sem_wait > 0.5:
                     logger.warning(f"diag_semaphore_wait: {channel}/{post_id}/{file_unique_id} waited {_sem_wait:.3f}s for HTTP_DOWNLOAD_SEMAPHORE")
                 _dl_start = _time.monotonic()
-                file_path, delete_after = await download_media_file(channel_id, post_id, file_unique_id)
+                file_path, delete_after = await _download_deduped(channel_id, post_id, file_unique_id)
                 _dl_elapsed = _time.monotonic() - _dl_start
                 logger.info(f"diag_download_timing: {channel}/{post_id}/{file_unique_id} download_media_file took {_dl_elapsed:.3f}s (semaphore_wait={_sem_wait:.3f}s)")
+            finally:
+                HTTP_DOWNLOAD_SEMAPHORE.release()
             if not file_path:
                 raise HTTPException(status_code=404, detail="File not found")
             if file_path:
@@ -1043,6 +1157,13 @@ async def get_media(channel: str, post_id: int, file_unique_id: str, request: Re
             
     except HTTPException:
         raise
+    except errors.FloodWait as e:
+        # MUST precede `except errors.RPCError` (FloodWait subclasses RPCError): a temporary
+        # Telegram throttle must return a retryable 429, never a permanent 404.
+        retry_after = min(int(e.value) + random.randint(1, 30), 300)
+        logger.warning(f"media_flood_wait: {channel}/{post_id}/{file_unique_id} retry after {retry_after}s")
+        return Response(status_code=429, content="Telegram flood wait",
+                        headers={"Retry-After": str(retry_after)})
     except errors.RPCError as e:
         logger.error(f"Media request RPC error for {channel}/{post_id}/{file_unique_id}: {type(e).__name__} - {str(e)}")
         raise HTTPException(status_code=404, detail="File not found in Telegram") from e

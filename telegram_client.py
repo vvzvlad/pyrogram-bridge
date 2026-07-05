@@ -274,13 +274,16 @@ class TelegramClient:
                     continue
                 raise
 
-    async def safe_download_media(self, file_id, file_name, max_retries=2):
-        """Wrapper with retry logic for download errors"""
+    async def safe_download_media(self, file_id, file_name, max_retries=2, timeout: float = 120.0):
+        """Wrapper with retry logic for download errors.
+
+        `timeout` bounds each download attempt; for large videos the caller scales it
+        with file size (see api_server._media_download_timeout)."""
         for attempt in range(max_retries):
             try:
                 return await asyncio.wait_for(
                     self.client.download_media(file_id, file_name=file_name),
-                    timeout=120.0
+                    timeout=timeout
                 )
             except Exception as e:
                 if isinstance(e, KeyError) and attempt < max_retries - 1:

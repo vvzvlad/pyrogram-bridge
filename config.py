@@ -123,4 +123,10 @@ def get_settings() -> dict[str, Any]:
         "tg_watchdog_heartbeat_every": _parse_int_env("TG_WATCHDOG_HEARTBEAT_EVERY", 30),
         "tg_disconnect_flap_limit": _parse_int_env("TG_DISCONNECT_FLAP_LIMIT", 3),
         "tg_disconnect_flap_window": _parse_int_env("TG_DISCONNECT_FLAP_WINDOW", 120),
+        # Media download timeout scales with file size (large videos): the per-download
+        # timeout is clamped to [min, max] seconds, with an effective floor of
+        # `media_download_min_speed` bytes/s (timeout ≈ file_size / min_speed).
+        "media_download_timeout_min": _parse_int_env("MEDIA_DOWNLOAD_TIMEOUT_MIN", 120),
+        "media_download_timeout_max": _parse_int_env("MEDIA_DOWNLOAD_TIMEOUT_MAX", 1800),
+        "media_download_min_speed": _parse_int_env("MEDIA_DOWNLOAD_MIN_SPEED", 256 * 1024),
     }

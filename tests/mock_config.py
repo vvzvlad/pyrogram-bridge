@@ -33,4 +33,7 @@ def get_settings():
         "tg_watchdog_heartbeat_every": 30,
         "tg_disconnect_flap_limit": 3,
         "tg_disconnect_flap_window": 120,
+        "media_download_timeout_min": 120,
+        "media_download_timeout_max": 1800,
+        "media_download_min_speed": 256 * 1024,
     }
