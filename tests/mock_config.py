@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+def setup_logging(level_name: str = "INFO") -> None:
+    """No-op logging setup for tests (mirrors config.setup_logging signature)."""
+    return None
+
 def get_settings():
     """
     Mock config for testing without requiring TG_API_ID and TG_API_HASH
@@ -20,6 +24,7 @@ def get_settings():
         "show_post_flags": True,
         "proxy": None,
         "trusted_proxies": [],
+        "tg_rpc_timeout": 60,
         "tg_watchdog_enabled": True,
         "tg_watchdog_interval": 60,
         "tg_watchdog_timeout": 10,

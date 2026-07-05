@@ -92,10 +92,13 @@ class PostParser:
                         post_id: int, 
                         output_type: str = 'json', 
                         debug: bool = False) -> Union[str, Dict[Any, Any], None]:
-        print(f"Getting post {channel}, {post_id}")
         try:
             prepared_channel_id: Union[str, int] = self.channel_name_prepare(channel)
-            message = await self.client.get_messages(prepared_channel_id, post_id)
+            # Bound the single-post fetch so a hung RPC cannot block the request forever.
+            message = await asyncio.wait_for(
+                self.client.get_messages(prepared_channel_id, post_id),
+                timeout=30,
+            )
 
             if Config["debug"]: print(message)
 

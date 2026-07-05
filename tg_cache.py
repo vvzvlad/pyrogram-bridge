@@ -22,8 +22,11 @@ from typing import Any, Optional, Union, List
 from pyrogram import Client
 from pyrogram.types import Chat, Message
 from tg_throttle import tg_rpc
+from config import get_settings
 
 logger = logging.getLogger(__name__)
+
+Config = get_settings()
 
 # Path to cache directory
 CACHE_DIR = os.path.join('data', 'tgcache')
@@ -138,10 +141,16 @@ async def cached_get_chat_history(client: Client, channel_id: Union[str, int], l
     
     try:
         logger.info(f"history_cache_request: fetching fresh history for channel {channel_id}, limit {limit}")
-        messages = []
+        # Hold the global RPC gate only for the live fetch. The paginated `async for`
+        # cannot be wrapped in wait_for directly, so collect it in an inner coroutine
+        # and bound THAT with the timeout. wait_for wraps only the RPC body, never the
+        # gate entry (`async with tg_rpc()`), so legitimate queue backpressure is not
+        # mistaken for a hang.
         async with tg_rpc():
-            async for message in client.get_chat_history(channel_id, limit=limit):
-                messages.append(message)
+            async def _collect():
+                # Full paginated history; bounded by the outer wait_for.
+                return [m async for m in client.get_chat_history(channel_id, limit=limit)]
+            messages = await asyncio.wait_for(_collect(), timeout=Config["tg_rpc_timeout"])
         await asyncio.to_thread(_save_history_to_cache, channel_id, messages, limit)
         
         return messages
@@ -214,7 +223,8 @@ async def cached_get_chat(client: Client, channel_id: Union[str, int]) -> Simple
 
     logger.info(f"chatinfo_cache_request: fetching fresh chat info for channel {channel_id}")
     async with tg_rpc():
-        chat = await client.get_chat(channel_id)
+        # Bound the RPC itself, not the gate entry above it.
+        chat = await asyncio.wait_for(client.get_chat(channel_id), timeout=Config["tg_rpc_timeout"])
 
     data = {
         'id': getattr(chat, 'id', None),

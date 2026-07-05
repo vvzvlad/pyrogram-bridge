@@ -72,6 +72,37 @@ HTTP_DOWNLOAD_SEMAPHORE = asyncio.Semaphore(3)  # semaphore for live HTTP media 
 BACKGROUND_DOWNLOAD_SEMAPHORE = asyncio.Semaphore(2)  # semaphore for background cache worker
 download_queue = asyncio.Queue(maxsize=100)
 
+async def _supervised(factory, name: str, min_restart_interval: float = 60.0):
+    """Run factory() forever, restarting it if it dies with a non-cancellation error.
+
+    A background loop that returns or raises (anything except CancelledError) is logged
+    at CRITICAL and restarted, but successive (re)starts are spaced at least
+    min_restart_interval seconds apart so a hard-failing task can't spin the event loop.
+    CancelledError (shutdown) is propagated to the child and stops supervision.
+    """
+    while True:
+        start = time.monotonic()
+        task = asyncio.create_task(factory(), name=name)
+        try:
+            await task
+            # A supervised background loop is not expected to return on its own.
+            logger.critical(f"supervised_task_exited: {name} returned unexpectedly; restarting")
+        except asyncio.CancelledError:
+            # Shutdown or external cancel: propagate to the child, then stop supervising.
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            raise
+        except Exception as e:
+            logger.critical(f"supervised_task_crashed: {name} died with {e!r}; restarting", exc_info=True)
+        # Rate-limit restarts: keep successive starts at least min_restart_interval apart.
+        elapsed = time.monotonic() - start
+        if elapsed < min_restart_interval:
+            await asyncio.sleep(min_restart_interval - elapsed)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     setup_logging(Config["log_level"])
@@ -84,8 +115,10 @@ async def lifespan(_: FastAPI):
     await asyncio.to_thread(init_db_sync, DB_PATH)
 
     await client.start()
-    background_task = asyncio.create_task(cache_media_files()) # Start background task
-    worker_task = asyncio.create_task(background_download_worker()) # Start download worker
+    # Supervise the background tasks: if either dies (not via cancellation) it is logged
+    # CRITICAL and restarted, so a crash can no longer silently stop cache sweeping or downloads.
+    background_task = asyncio.create_task(_supervised(cache_media_files, "cache_media_files"))
+    worker_task = asyncio.create_task(_supervised(background_download_worker, "background_download_worker"))
     yield
     background_task.cancel() # Cleanup
     worker_task.cancel()
@@ -602,7 +635,10 @@ async def download_new_files(media_files: list, cache_dir: str) -> None:
             cache_path = os.path.join(post_dir, file_unique_id)
             if not os.path.exists(cache_path):
                 try:
-                    await download_queue.put((channel, post_id, file_unique_id))
+                    # put_nowait so a full queue raises QueueFull instead of blocking
+                    # cache_media_files (and thus the sweeper) forever. `await put()`
+                    # never raises QueueFull, which made the except below dead code.
+                    download_queue.put_nowait((channel, post_id, file_unique_id))
                     files_queued += 1
                     logger.debug(f"Queued for background download: {channel}/{post_id}/{file_unique_id}")
                 except asyncio.QueueFull:
@@ -620,19 +656,22 @@ async def download_new_files(media_files: list, cache_dir: str) -> None:
 async def background_download_worker():
     """Worker that processes downloads from queue"""
     while True:
+        # get() is OUTSIDE the try so task_done() in finally always balances exactly one
+        # successful get(). Cancellation propagates cleanly here (nothing to unbalance).
+        item = await download_queue.get()
+        channel, post_id, file_unique_id = item
+        logger.info(f"Background download: {channel}/{post_id}/{file_unique_id}")
         try:
-            channel, post_id, file_unique_id = await download_queue.get()
-            logger.info(f"Background download: {channel}/{post_id}/{file_unique_id}")
-            
-            try:
-                async with BACKGROUND_DOWNLOAD_SEMAPHORE:  # limit concurrent background downloads
-                    await download_media_file(channel, post_id, file_unique_id)
-                await asyncio.sleep(2)
-            except Exception as e:
-                logger.error(f"Background download error for {channel}/{post_id}/{file_unique_id}: {e}")
-                
+            async with BACKGROUND_DOWNLOAD_SEMAPHORE:  # limit concurrent background downloads
+                await download_media_file(channel, post_id, file_unique_id)
+            await asyncio.sleep(2)
+        except errors.FloodWait as e:
+            # Must be caught BEFORE the generic Exception (FloodWait subclasses RPCError),
+            # otherwise the worker would hammer Telegram while under a flood wait.
+            logger.warning(f"bg_download_floodwait: {channel}/{post_id}/{file_unique_id} sleeping {e.value}s")
+            await asyncio.sleep(min(int(e.value) + 5, 900))
         except Exception as e:
-            logger.error(f"Background download worker error: {e}")
+            logger.error(f"Background download error for {channel}/{post_id}/{file_unique_id}: {e}")
         finally:
             download_queue.task_done()
 
@@ -903,8 +942,9 @@ async def health_check(request: Request, token: str | None = None) -> Response:
         logger.info(f"Local request, skipping token check for health check.")
             
     try:
-        me = await client.client.get_me()
-        
+        # Bound the Telegram RPC so a hung get_me cannot hang the healthcheck.
+        me = await asyncio.wait_for(client.client.get_me(), timeout=10)
+
         # Offload heavy filesystem scanning to threadpool
         cache_stats = await asyncio.to_thread(calculate_cache_stats)
         
