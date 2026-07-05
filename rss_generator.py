@@ -23,6 +23,7 @@ from pyrogram.types import Message
 from post_parser import PostParser
 from config import get_settings
 from tg_throttle import tg_rpc_bounded
+from file_io import upsert_media_file_ids_bulk_sync, DB_PATH
 from bleach.css_sanitizer import CSSSanitizer
 from bleach import clean as HTMLSanitizer
 
@@ -30,9 +31,12 @@ Config = get_settings()
 
 logger = logging.getLogger(__name__)
 
-async def _create_time_based_media_groups(messages: list[Message], merge_seconds: int = 5) -> list[Message]:
+def _create_time_based_media_groups(messages: list[Message], merge_seconds: int = 5) -> list[Message]:
     """
     Create media groups based on time difference between messages
+
+    Plain synchronous function (contains no await): runs inside the render thread
+    via _render_pipeline. Must not touch asyncio.
     """
     # Deep-copy the input list to avoid mutating cached Message objects (the cache may
     # reuse the same objects across calls with different merge_seconds values)
@@ -92,9 +96,11 @@ async def _create_time_based_media_groups(messages: list[Message], merge_seconds
 
     return messages_sorted
 
-async def _create_messages_groups(messages: list[Message]) -> list[list[Message]]:
+def _create_messages_groups(messages: list[Message]) -> list[list[Message]]:
     """
     Process messages into formatted posts, handling media groups
+
+    Plain synchronous function (contains no await): runs inside the render thread.
     """
     processing_groups: list[list[Message]] = []
     media_groups: dict[str | int, list[Message]] = {}
@@ -136,9 +142,11 @@ async def _create_messages_groups(messages: list[Message]) -> list[list[Message]
     
     return processing_groups
 
-async def _trim_messages_groups(messages_groups: list[list[Message]], limit: int):
+def _trim_messages_groups(messages_groups: list[list[Message]], limit: int):
     """
     Trim messages groups to limit
+
+    Plain synchronous function (contains no await): runs inside the render thread.
     """
     if len(messages_groups) > limit: # Trim groups if they exceed the specified limit
         messages_groups = messages_groups[:limit]
@@ -193,12 +201,13 @@ def processed_message_to_tg_message(processed_message: dict) -> Message:
     return tg_message_mock # type: ignore
 
 
-async def _render_messages_groups(messages_groups: list[list[Message]], 
-                                    post_parser: PostParser, 
-                                    exclude_flags: str | None = None, 
+def _render_messages_groups(messages_groups: list[list[Message]],
+                                    post_parser: PostParser,
+                                    exclude_flags: str | None = None,
                                     exclude_text: str | None = None):
     """
     Render message groups into HTML format
+    Plain synchronous function (contains no await): runs inside the render thread.
     Args:
         messages_groups: List of message groups (each group is a list of messages)
         post_parser: PostParser instance
@@ -213,7 +222,9 @@ async def _render_messages_groups(messages_groups: list[list[Message]],
         try:
             if len(group) == 1: # Single message - simple case
                 one_message = group[0]
-                message_data = post_parser.process_message(one_message)
+                # Feed path: raw_message not needed and sanitize deferred to the final
+                # whole-feed pass, so each fragment is sanitized exactly once.
+                message_data = post_parser.process_message(one_message, include_raw=False, sanitize=False)
                 html_parts = [
                     f'<div class="message-body">{message_data["html"]["body"]}</div>',
                     f'<div class="message-footer">{message_data["html"]["footer"]}</div>'
@@ -228,7 +239,7 @@ async def _render_messages_groups(messages_groups: list[list[Message]],
                     'flags': message_data['flags']
                 })
             else: # Multiple messages in group - merge text and html body
-                processed_messages = [post_parser.process_message(msg) for msg in group]
+                processed_messages = [post_parser.process_message(msg, include_raw=False, sanitize=False) for msg in group]
 
                 # Determine main message for header/footer/title
                 main_message = next(  
@@ -309,7 +320,31 @@ async def _render_messages_groups(messages_groups: list[list[Message]],
     rendered_posts.sort(key=lambda x: x['date'] if x['date'] is not None else 0.0, reverse=True)
     return rendered_posts
 
-async def generate_channel_rss(channel: str | int, 
+
+def _render_pipeline(messages: list[Message],
+                     post_parser: PostParser,
+                     limit: int,
+                     exclude_flags: str | None,
+                     exclude_text: str | None,
+                     merge_seconds: int,
+                     time_based_merge: bool):
+    """
+    Full synchronous feed render pipeline (grouping + trimming + rendering).
+
+    Runs entirely in a worker thread via a single asyncio.to_thread call. It contains
+    NO await, NO asyncio primitives, NO create_task/get_running_loop — all the CPU-heavy
+    work (deepcopy, grouping, bleach-free rendering) happens here off the event loop.
+    Media file-id records are accumulated on post_parser._pending_media_ids and flushed
+    by the caller after this returns.
+    """
+    if time_based_merge:
+        messages = _create_time_based_media_groups(messages, merge_seconds)
+    message_groups = _create_messages_groups(messages)
+    message_groups = _trim_messages_groups(message_groups, limit)
+    return _render_messages_groups(message_groups, post_parser, exclude_flags, exclude_text)
+
+
+async def generate_channel_rss(channel: str | int,
                                 client: Client, 
                                 limit: int = 20, 
                                 exclude_flags: str | None = None,
@@ -389,14 +424,23 @@ async def generate_channel_rss(channel: str | int,
         messages_elapsed = time.time() - messages_start_time
         logger.debug(f"rss_messages_retrieval_timing: channel {channel}, {len(messages)} messages retrieved in {messages_elapsed:.3f} seconds")
         
-        # Process messages into groups and render them
+        # Process messages into groups and render them.
+        # The whole grouping/trimming/rendering pipeline is CPU-heavy (deepcopy +
+        # per-message rendering) and contains no await, so run it in ONE worker
+        # thread to keep the event loop responsive.
         processing_start_time = time.time()
-        if Config['time_based_merge']:
-            messages = await _create_time_based_media_groups(messages, merge_seconds)
-        message_groups = await _create_messages_groups(messages)
-        message_groups = await _trim_messages_groups(message_groups, limit)
-        final_posts = await _render_messages_groups(message_groups, post_parser, exclude_flags, exclude_text)
-        
+        try:
+            final_posts = await asyncio.to_thread(
+                _render_pipeline, messages, post_parser, limit,
+                exclude_flags, exclude_text, merge_seconds, Config['time_based_merge'],
+            )
+        finally:
+            # Persist media file-ids collected during rendering with a single bulk
+            # upsert — in a finally so a partial render still records what it collected
+            # (the flush is best-effort and swallows its own errors, so it cannot mask a
+            # render exception).
+            await post_parser._flush_pending_media_ids()
+
         processing_elapsed = time.time() - processing_start_time
         logger.debug(f"rss_messages_processing_timing: channel {channel}, {len(final_posts)} posts processed in {processing_elapsed:.3f} seconds")
         
@@ -601,16 +645,19 @@ async def generate_channel_html(channel: str | int,
         enrichment_elapsed = time.time() - enrichment_start_time
         logger.debug(f"html_reply_enrichment_timing: channel {channel}, replies enriched in {enrichment_elapsed:.3f} seconds")
 
-        # Process messages into groups and render them
+        # Process messages into groups and render them in ONE worker thread
+        # (CPU-heavy, no await) to keep the event loop responsive.
         processing_start_time = time.time()
-        if Config['time_based_merge']:
-            messages = await _create_time_based_media_groups(messages, merge_seconds)
+        try:
+            final_posts = await asyncio.to_thread(
+                _render_pipeline, messages, post_parser, limit,
+                exclude_flags, exclude_text, merge_seconds, Config['time_based_merge'],
+            )
+        finally:
+            # Persist media file-ids collected during rendering with a single bulk
+            # upsert — in a finally so a partial render still records what it collected.
+            await post_parser._flush_pending_media_ids()
 
-        # Process messages into groups and render them
-        message_groups = await _create_messages_groups(messages)
-        message_groups = await _trim_messages_groups(message_groups, limit)
-        final_posts = await _render_messages_groups(message_groups, post_parser, exclude_flags, exclude_text)
-        
         processing_elapsed = time.time() - processing_start_time
         logger.debug(f"html_messages_processing_timing: channel {channel}, {len(final_posts)} posts processed in {processing_elapsed:.3f} seconds")
 

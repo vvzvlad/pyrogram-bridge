@@ -69,6 +69,24 @@ def upsert_media_file_id_sync(db_path: str, channel: str, post_id: int, file_uni
         )
 
 
+def upsert_media_file_ids_bulk_sync(db_path: str, entries: List[tuple]) -> None:
+    """Insert or replace multiple media file ID records in a single transaction.
+
+    entries: iterable of (channel, post_id, file_unique_id, added) tuples.
+    Uses executemany for batched upserts (one connection, one commit).
+    """
+    if not entries:
+        return
+    with _db_connection(db_path) as conn:
+        conn.executemany(
+            """INSERT INTO media_file_ids (channel, post_id, file_unique_id, added)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(channel, post_id, file_unique_id)
+               DO UPDATE SET added = excluded.added""",
+            entries,
+        )
+
+
 def update_media_file_access_sync(db_path: str, channel: str, post_id: int, file_unique_id: str, added: float) -> None:
     """Update the access timestamp for an existing media file ID record."""
     with _db_connection(db_path) as conn:
