@@ -53,10 +53,15 @@ services:
       com.centurylinklabs.watchtower.enable: "true"   
       autoheal: true
     healthcheck:
-      test: ["CMD", "curl", "-s", "-f", "-o", "/dev/null", "http://127.0.0.1:80/rss/vvzvlad_lytdybr?limit=1"]
-      interval: 30m
+      # Lightweight process/loop liveness probe. /ping never touches Telegram or the
+      # filesystem, so it answers instantly even while a TG RPC is hung — unlike the old
+      # /rss?limit=1 check, which could exceed the 5s timeout on a cold cache and get the
+      # container restarted mid-download (corrupted temp files). TG liveness is now judged
+      # by the in-process watchdog, which /ping reports via its last-probe age.
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:80/ping"]
+      interval: 5m
       timeout: 5s
-      retries: 2
+      retries: 3
       start_period: 30s
       start_interval: 5s
 
