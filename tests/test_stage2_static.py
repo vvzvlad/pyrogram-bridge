@@ -18,16 +18,11 @@ Covers the four scenarios from the plan plus the subtle in-flight-dedup lifecycl
   fresh partials and non-temp files.
 """
 import os
-import sys
 import time
 import asyncio
 from types import SimpleNamespace
 
 import pytest
-
-# Add project root to sys.path and mock the config module (same pattern as the other tests).
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-sys.modules['config'] = __import__('tests.mock_config', fromlist=['get_settings'])
 
 import api_server
 from pyrogram import errors

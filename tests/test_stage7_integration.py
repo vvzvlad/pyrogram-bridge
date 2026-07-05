@@ -27,18 +27,12 @@ Automated here:
   an int-ish channel records the str-keyed timestamp, and the flush UPDATE matches the
   str-keyed DB row (hit -> flush -> DB), the exact affinity gotcha the plan warns about.
 """
-import os
-import sys
 import time
 import sqlite3
 import asyncio
 from types import SimpleNamespace
 
 import pytest
-
-# Add project root to sys.path and mock the config module (same pattern as the other tests).
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-sys.modules['config'] = __import__('tests.mock_config', fromlist=['get_settings'])
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient

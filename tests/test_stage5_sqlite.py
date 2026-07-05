@@ -17,16 +17,11 @@ Covers:
 - gotcha: str(channel) key discipline — an int-ish channel on the hot path keys the
       accumulator (and thus the UPDATE) by the string form.
 """
-import os
-import sys
 import sqlite3
 import asyncio
 from types import SimpleNamespace
 
 import pytest
-
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-sys.modules['config'] = __import__('tests.mock_config', fromlist=['get_settings'])
 
 import api_server
 from file_io import init_db_sync, update_media_file_access_bulk_sync

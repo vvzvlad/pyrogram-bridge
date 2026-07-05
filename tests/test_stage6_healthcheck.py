@@ -15,15 +15,9 @@ Covers:
   fake client's get_me / safe_get_messages proves neither is ever called.
 - TelegramClient.watchdog_last_ok_age(): None when never probed; a positive float afterwards.
 """
-import os
-import sys
 import time
 
 import pytest
-
-# Add project root to sys.path and mock the config module (same pattern as the other tests).
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-sys.modules['config'] = __import__('tests.mock_config', fromlist=['get_settings'])
 
 from fastapi.testclient import TestClient
 
