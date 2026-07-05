@@ -1083,10 +1083,18 @@ async def ping() -> JSONResponse:
     # age is None right after boot: the watchdog hasn't run its first probe yet. Treat that
     # as healthy (gate on connected only) so a freshly-started container is not killed before
     # its first probe cycle — otherwise start_period would have to cover a full watchdog interval.
-    # Note: when the watchdog is DISABLED (TG_WATCHDOG_ENABLED=false) age stays None forever,
-    # so /ping degenerates to a pure connectivity check and cannot detect a stale-but-connected
-    # ("zombie") session — that TG-liveness signal only exists while the watchdog runs.
-    healthy = connected and (age is None or age < threshold)
+    #
+    # The staleness branch (age >= threshold => degraded) is only meaningful while the watchdog
+    # is running to refresh age. With the watchdog DISABLED (TG_WATCHDOG_ENABLED=false) nothing
+    # refreshes age — yet a disconnect-flap restart can still stamp it once (see _restart_client,
+    # which runs before the watchdog-enabled gate), after which age only grows. Letting that
+    # stale age drive /ping to 503 would spuriously fail the container healthcheck on a live
+    # connection and trigger an autoheal restart. So gate staleness on the watchdog being on;
+    # with it off, /ping is a pure connectivity check (no zombie-session detection — that
+    # TG-liveness signal only exists while the watchdog runs).
+    healthy = connected and (
+        not Config["tg_watchdog_enabled"] or age is None or age < threshold
+    )
     return JSONResponse(
         {
             "status": "ok" if healthy else "degraded",

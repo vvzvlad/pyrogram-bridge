@@ -99,6 +99,21 @@ def test_ping_degraded_stale_probe(patch_client):
     assert fake.client.get_me_calls == 0
 
 
+def test_ping_watchdog_disabled_stale_age_still_healthy(patch_client, monkeypatch):
+    # With the watchdog OFF, nothing refreshes age (a disconnect-flap restart can stamp it
+    # once, then it only grows). A stale age must NOT drive /ping to 503 on a live connection
+    # — that would spuriously fail the healthcheck and trigger an autoheal restart. So with the
+    # watchdog disabled, /ping is a pure connectivity check: connected + stale age => healthy.
+    monkeypatch.setitem(api_server.Config, "tg_watchdog_enabled", False)
+    fake, tc = patch_client(age=THRESHOLD + 100, is_connected=True)
+    r = tc.get("/ping")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "ok"
+    assert body["connected"] is True
+    assert fake.client.get_me_calls == 0
+
+
 def test_ping_degraded_disconnected(patch_client):
     # Even with a fresh probe age, a disconnected client is unhealthy.
     fake, tc = patch_client(age=1.0, is_connected=False)
