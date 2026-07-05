@@ -33,7 +33,7 @@ from pyrogram import errors
 from pyrogram.types import Message
 from pyrogram.enums import MessageMediaType
 from fastapi import FastAPI, HTTPException, Response, Request
-from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, FileResponse
 from telegram_client import TelegramClient
 from config import get_settings, setup_logging
 from rss_generator import generate_channel_rss, generate_channel_html
@@ -93,8 +93,9 @@ BACKGROUND_DOWNLOAD_SEMAPHORE = asyncio.Semaphore(2)  # semaphore for background
 download_queue = asyncio.Queue(maxsize=100)
 # How stale a temp_* file's mtime must be before a serve refreshes it (keeps the 1h
 # sweeper from deleting an actively-viewed video). Well below 1h so the file stays alive,
-# but large enough that the mtime — and thus FileResponse's ETag — is stable across the
-# rapid requests of one resume/seek session.
+# but large enough that the mtime — and thus FileResponse's ETag — is stable within any
+# such window; a view running longer than one interval costs at most one safe 200
+# If-Range restart per interval (a full re-fetch, never corruption).
 TEMP_MTIME_REFRESH_INTERVAL = 300  # seconds
 
 # In-flight download dedup registry: maps (channel, post_id, file_unique_id) to the
@@ -288,17 +289,14 @@ async def prepare_file_response(file_path: str, request: Request, delete_after: 
     """
     # `request` is unused now that FileResponse parses the Range header itself, but the
     # signature is kept for call-site compatibility (and future needs).
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="File not found")
 
     # Keep an actively-viewed large-video temp file alive: refresh its mtime so the 1h
     # sweeper (which deletes temp_* by mtime) won't remove it out from under a viewer.
     # DEBOUNCED: FileResponse derives ETag/Last-Modified from mtime, so touching on EVERY
-    # serve would make the validators change per request and break a player's `If-Range`
-    # resume (it would restart with a 200 instead of a 206). We only refresh when the
-    # mtime is already older than TEMP_MTIME_REFRESH_INTERVAL — far below the 1h sweeper
-    # window, so the file still stays alive, but the ETag is stable across the rapid
-    # requests of a single resume/seek session.
+    # serve would change the validators per request. We only refresh when the mtime is
+    # already older than TEMP_MTIME_REFRESH_INTERVAL — far below the 1h sweeper window, so
+    # the file stays alive, and the ETag is stable within any such window (a view running
+    # longer than one interval costs at most one safe 200 If-Range restart per interval).
     if os.path.basename(file_path).startswith("temp_"):
         try:
             age = time.time() - await asyncio.to_thread(os.path.getmtime, file_path)
@@ -306,6 +304,18 @@ async def prepare_file_response(file_path: str, request: Request, delete_after: 
                 await asyncio.to_thread(os.utime, file_path, None)
         except OSError as e:
             logger.debug(f"Failed to refresh mtime for {file_path}: {e}")
+
+    # Take ONE authoritative stat and hand it to FileResponse as stat_result. This both
+    # (a) preserves the 404 semantics: FileResponse with stat_result=None re-stats at
+    # send-time and raises a RuntimeError (-> 500, escaping this handler's try/except) if
+    # the file was swept between here and the send; and (b) makes the ETag/Last-Modified
+    # reflect exactly the mtime observed after the optional touch above. The remaining
+    # narrow window (deleted between this stat and FileResponse's own open) truncates the
+    # body — that pre-existed the FileResponse migration and is not handled here.
+    try:
+        stat_result = await asyncio.to_thread(os.stat, file_path)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="File not found")
 
     media_type: str | None = None
 
@@ -336,9 +346,11 @@ async def prepare_file_response(file_path: str, request: Request, delete_after: 
     background = BackgroundTask(delayed_delete_file, file_path) if delete_after else None
 
     # FileResponse handles Range/If-Range/206/416/multipart and sets
-    # Accept-Ranges/ETag/Last-Modified itself. Do NOT hand-build Content-Disposition:
-    # passing filename= makes FileResponse emit `inline; filename*=UTF-8''...` on its own
-    # (setting it manually would double the header).
+    # Accept-Ranges/ETag/Last-Modified itself (from the stat_result we pass). Do NOT
+    # hand-build Content-Disposition: FileResponse forms it from filename= —
+    # `inline; filename="x"` for an ASCII name, adding `filename*=UTF-8''x` only for a
+    # non-ASCII name. It uses setdefault, so a manual header would OVERRIDE it, not double
+    # it; letting FileResponse own it keeps the RFC 5987 encoding correct.
     #
     # Files are addressed by file_unique_id which is immutable in Telegram, so it is safe
     # to cache them aggressively on the client side.
@@ -347,6 +359,7 @@ async def prepare_file_response(file_path: str, request: Request, delete_after: 
         media_type=media_type,
         filename=os.path.basename(file_path),
         content_disposition_type="inline",
+        stat_result=stat_result,
         headers={"Cache-Control": "public, max-age=86400, immutable"},
         background=background,
     )
@@ -1035,7 +1048,7 @@ async def health_check(request: Request, token: str | None = None) -> Response:
 
 @app.get("/media/{channel}/{post_id}/{file_unique_id}/{digest}", response_model=None)
 @app.get("/media/{channel}/{post_id}/{file_unique_id}", response_model=None)
-async def get_media(channel: str, post_id: int, file_unique_id: str, request: Request, digest: str | None = None) -> StreamingResponse|Response:
+async def get_media(channel: str, post_id: int, file_unique_id: str, request: Request, digest: str | None = None) -> Response:
     try:
         url = f"{channel}/{post_id}/{file_unique_id}"
         if not verify_media_digest(url, digest):

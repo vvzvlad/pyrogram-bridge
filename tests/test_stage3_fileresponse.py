@@ -361,3 +361,23 @@ def test_asgi_logging_middleware_range_still_works(tmp_path):
     # 206 streaming still works through the pure-ASGI middleware (send not buffered).
     assert r.status_code == 206
     assert r.content == BODY[:100]
+
+
+async def test_asgi_logging_middleware_passes_non_http_scope_through(caplog):
+    # The `scope["type"] != "http"` branch (lifespan/websocket) only runs in a real
+    # deploy, never through TestClient's plain request path — so pin it directly:
+    # a non-http scope must delegate to the inner app untouched and log nothing.
+    called = {}
+
+    async def inner(scope, receive, send):
+        called["scope_type"] = scope["type"]
+
+    mw = api_server.RequestLoggingMiddleware(inner)
+    with caplog.at_level(logging.DEBUG, logger="api_server"):
+        await mw({"type": "lifespan"}, None, None)
+
+    assert called["scope_type"] == "lifespan"  # delegated to the inner app
+    # Nothing request/response-ish was logged for a non-http scope.
+    messages = " ".join(rec.getMessage() for rec in caplog.records)
+    assert "Request:" not in messages
+    assert "Response status:" not in messages
