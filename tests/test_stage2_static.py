@@ -264,6 +264,67 @@ async def test_media_floodwait_returns_429_not_404(monkeypatch, tmp_path):
     assert 43 <= int(retry_after) <= 72  # 42 + random(1..30)
 
 
+# --------------------------------------------------------------------------- #
+# 2.5 — HTTP_DOWNLOAD_SEMAPHORE balance: released exactly once on success/error,
+# never released when the acquire itself timed out (503). It is a plain
+# asyncio.Semaphore, so an over-release would SILENTLY inflate the permit count
+# and disable the limiter — assert the count, mirroring the stage-1 gate test.
+# --------------------------------------------------------------------------- #
+async def test_media_semaphore_released_on_download_error(monkeypatch, tmp_path):
+    api_server._inflight.clear()
+    monkeypatch.chdir(tmp_path)  # pre-semaphore cache miss -> the acquire path runs
+    monkeypatch.setattr(api_server, "verify_media_digest", lambda url, digest: True)
+
+    permits_before = api_server.HTTP_DOWNLOAD_SEMAPHORE._value
+
+    async def boom(channel_id, post_id, fid):
+        raise RuntimeError("download blew up")
+
+    monkeypatch.setattr(api_server, "_download_deduped", boom)
+
+    req = SimpleNamespace(headers={})
+    # get_media swallows the error into a 4xx/5xx response; the point is the permit.
+    try:
+        await api_server.get_media("chan", 5, "errfid", request=req, digest="x")
+    except Exception:
+        pass
+
+    # Permit released exactly once (back to baseline) — not leaked, not double-released.
+    assert api_server.HTTP_DOWNLOAD_SEMAPHORE._value == permits_before
+
+
+async def test_media_semaphore_not_released_on_acquire_timeout(monkeypatch, tmp_path):
+    api_server._inflight.clear()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(api_server, "verify_media_digest", lambda url, digest: True)
+
+    permits_before = api_server.HTTP_DOWNLOAD_SEMAPHORE._value
+
+    # Make the bounded acquire time out: the first wait_for (wrapping the acquire)
+    # raises TimeoutError; we close the passed coroutine to avoid a "never awaited"
+    # warning. The 503 short-circuits before _download_deduped, so only this one
+    # wait_for is hit.
+    real_wait_for = asyncio.wait_for
+
+    async def fake_wait_for(coro, timeout=None):
+        if hasattr(coro, "close"):
+            coro.close()
+        raise asyncio.TimeoutError()
+
+    monkeypatch.setattr(api_server.asyncio, "wait_for", fake_wait_for)
+
+    req = SimpleNamespace(headers={})
+    resp = await api_server.get_media("chan", 5, "busyfid", request=req, digest="x")
+
+    assert resp.status_code == 503
+    assert resp.headers.get("retry-after") == "30"
+    # A timed-out acquire never held a permit, so nothing must have been released:
+    # the count is UNCHANGED (an erroneous release would inflate it above baseline).
+    assert api_server.HTTP_DOWNLOAD_SEMAPHORE._value == permits_before
+
+    monkeypatch.setattr(api_server.asyncio, "wait_for", real_wait_for)
+
+
 async def test_download_atomic_reraises_floodwait_and_cleans_part(monkeypatch, tmp_path):
     # Stage-2 review: prove a FloodWait raised by the downloader propagates OUT of
     # _download_atomic (its finally must NOT swallow it) AND the partial is cleaned.

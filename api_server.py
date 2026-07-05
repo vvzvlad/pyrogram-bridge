@@ -438,9 +438,10 @@ async def _download_deduped(channel: Union[str, int], post_id: int, file_unique_
 
     The first request for a key runs download_media_file in a DETACHED task and shares its
     Future; concurrent requests await the same Future (bounded by wait_for). The detached
-    task's finally BOTH sets the Future's result/exception AND pops the key — so a
-    completed Future never leaves the key stuck, and a client disconnect (cancelling only
-    the awaiting request coroutine) can neither cancel the download nor hang other waiters.
+    task sets the Future's result/exception (on success/failure) and its finally ALWAYS
+    pops the key — so both happen before the task ends: a completed Future never leaves the
+    key stuck, and a client disconnect (cancelling only the awaiting request coroutine) can
+    neither cancel the download nor hang other waiters.
     """
     key = (str(channel), post_id, file_unique_id)
     fut = _inflight.get(key)
