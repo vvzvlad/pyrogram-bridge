@@ -371,6 +371,73 @@ def test_checklist_task_text_is_escaped(parser):
     assert "📝 My list" in body
 
 
+def test_venue_title_is_escaped(parser):
+    # VENUE title feeds venue_label -> html.escape(venue_label)
+    venue = SimpleNamespace(title=XSS, address="1 Main St",
+                            location=SimpleNamespace(latitude=1.5, longitude=2.5))
+    msg = make_message(303, media=MessageMediaType.VENUE, venue=venue)
+    body = parser._generate_html_body(msg)
+    assert XSS not in body
+    assert XSS_ESCAPED in body
+
+
+def test_venue_address_label_is_escaped(parser):
+    # VENUE address also feeds venue_label -> html.escape(venue_label)
+    venue = SimpleNamespace(title="Blue Bottle", address=XSS,
+                            location=SimpleNamespace(latitude=1.5, longitude=2.5))
+    msg = make_message(304, media=MessageMediaType.VENUE, venue=venue)
+    body = parser._generate_html_body(msg)
+    assert XSS not in body
+    assert XSS_ESCAPED in body
+
+
+def test_dice_emoji_is_escaped(parser):
+    # DICE emoji -> html.escape(str(dice_emoji))
+    msg = make_message(305, media=MessageMediaType.DICE,
+                       dice=SimpleNamespace(emoji=XSS, value=6))
+    body = parser._generate_html_body(msg)
+    assert XSS not in body
+    assert XSS_ESCAPED in body
+
+
+def test_game_title_is_escaped(parser):
+    # GAME title -> html.escape(game_title.strip())
+    msg = make_message(306, media=MessageMediaType.GAME,
+                       game=SimpleNamespace(title=XSS))
+    body = parser._generate_html_body(msg)
+    assert XSS not in body
+    assert XSS_ESCAPED in body
+
+
+def test_checklist_title_is_escaped(parser):
+    # CHECKLIST title -> html.escape(title_str)
+    checklist = SimpleNamespace(title=XSS, tasks=[])
+    msg = make_message(307, media=MessageMediaType.CHECKLIST, checklist=checklist)
+    body = parser._generate_html_body(msg)
+    assert XSS not in body
+    assert XSS_ESCAPED in body
+
+
+def test_giveaway_description_is_escaped(parser):
+    # GIVEAWAY description -> html.escape(description.strip())
+    giveaway = SimpleNamespace(quantity=5, months=None, stars=None,
+                               until_date=None, description=XSS)
+    msg = make_message(308, media=MessageMediaType.GIVEAWAY, giveaway=giveaway)
+    body = parser._generate_html_body(msg)
+    assert XSS not in body
+    assert XSS_ESCAPED in body
+
+
+def test_giveaway_winners_prize_description_is_escaped(parser):
+    # GIVEAWAY_WINNERS prize_description -> html.escape(prize_description.strip())
+    winners = SimpleNamespace(winner_count=2, quantity=5, prize_description=XSS,
+                              unclaimed_prize_count=0, winners=[])
+    msg = make_message(309, media=MessageMediaType.GIVEAWAY_WINNERS, giveaway_winners=winners)
+    body = parser._generate_html_body(msg)
+    assert XSS not in body
+    assert XSS_ESCAPED in body
+
+
 # ---------------------------------------------------------------------------
 # 7. Giveaway / giveaway winners info blocks
 # ---------------------------------------------------------------------------
