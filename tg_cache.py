@@ -21,9 +21,12 @@ from types import SimpleNamespace
 from typing import Any, Optional, Union, List
 from pyrogram import Client
 from pyrogram.types import Chat, Message
-from tg_throttle import tg_rpc
+from tg_throttle import tg_rpc_bounded
+from config import get_settings
 
 logger = logging.getLogger(__name__)
+
+Config = get_settings()
 
 # Path to cache directory
 CACHE_DIR = os.path.join('data', 'tgcache')
@@ -138,10 +141,12 @@ async def cached_get_chat_history(client: Client, channel_id: Union[str, int], l
     
     try:
         logger.info(f"history_cache_request: fetching fresh history for channel {channel_id}, limit {limit}")
-        messages = []
-        async with tg_rpc():
-            async for message in client.get_chat_history(channel_id, limit=limit):
-                messages.append(message)
+        # Hold the global RPC gate for the live fetch and bound the RPC body with the
+        # timeout — gate outside, timeout inside — via the shared tg_rpc_bounded (so the
+        # tricky nesting is not re-derived here). The timeout covers the whole paginated
+        # fetch; see the note in tg_rpc_bounded.
+        async with tg_rpc_bounded(Config["tg_rpc_timeout"]):
+            messages = [m async for m in client.get_chat_history(channel_id, limit=limit)]
         await asyncio.to_thread(_save_history_to_cache, channel_id, messages, limit)
         
         return messages
@@ -213,7 +218,7 @@ async def cached_get_chat(client: Client, channel_id: Union[str, int]) -> Simple
         return SimpleNamespace(**cached)
 
     logger.info(f"chatinfo_cache_request: fetching fresh chat info for channel {channel_id}")
-    async with tg_rpc():
+    async with tg_rpc_bounded(Config["tg_rpc_timeout"]):
         chat = await client.get_chat(channel_id)
 
     data = {

@@ -259,6 +259,17 @@ class TelegramClient:
             # Emergency termination
             os._exit(1)
 
+    def watchdog_last_ok_age(self) -> float | None:
+        """Seconds since the last successful watchdog probe, or None if none succeeded yet.
+
+        Reads only the already-recorded monotonic timestamp set by the watchdog loop; it
+        never issues a Telegram RPC, so it is safe to call from the hot /ping path even
+        while a real RPC is hung.
+        """
+        if self._wd_last_ok_monotonic is None:
+            return None
+        return time.monotonic() - self._wd_last_ok_monotonic
+
     async def safe_get_messages(self, channel_id, post_id, max_retries=2):
         """Wrapper with retry logic for auth errors"""
         for attempt in range(max_retries):
@@ -274,13 +285,16 @@ class TelegramClient:
                     continue
                 raise
 
-    async def safe_download_media(self, file_id, file_name, max_retries=2):
-        """Wrapper with retry logic for download errors"""
+    async def safe_download_media(self, file_id, file_name, max_retries=2, timeout: float = 120.0):
+        """Wrapper with retry logic for download errors.
+
+        `timeout` bounds each download attempt; for large videos the caller scales it
+        with file size (see api_server._media_download_timeout)."""
         for attempt in range(max_retries):
             try:
                 return await asyncio.wait_for(
                     self.client.download_media(file_id, file_name=file_name),
-                    timeout=120.0
+                    timeout=timeout
                 )
             except Exception as e:
                 if isinstance(e, KeyError) and attempt < max_retries - 1:

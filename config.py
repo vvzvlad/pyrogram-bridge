@@ -112,6 +112,9 @@ def get_settings() -> dict[str, Any]:
         "show_bridge_link": os.getenv("SHOW_BRIDGE_LINK", "False").strip() in ["True", "true"],
         "show_post_flags": os.getenv("SHOW_POST_FLAGS", "False").strip() in ["True", "true"],
         "proxy": proxy,
+        # Hard cap (seconds) on any single live Telegram RPC held under the global RPC gate,
+        # so a hung MTProto call can never pin the gate (and the whole app) indefinitely.
+        "tg_rpc_timeout": _parse_int_env("TG_RPC_TIMEOUT", 60),
         "tg_watchdog_enabled": os.getenv("TG_WATCHDOG_ENABLED", "true").strip().lower() not in ["false", "0", "no", "off", "disable", "disabled"],
         "tg_watchdog_interval": _parse_int_env("TG_WATCHDOG_INTERVAL", 60),
         "tg_watchdog_timeout": _parse_int_env("TG_WATCHDOG_TIMEOUT", 10),
@@ -120,4 +123,25 @@ def get_settings() -> dict[str, Any]:
         "tg_watchdog_heartbeat_every": _parse_int_env("TG_WATCHDOG_HEARTBEAT_EVERY", 30),
         "tg_disconnect_flap_limit": _parse_int_env("TG_DISCONNECT_FLAP_LIMIT", 3),
         "tg_disconnect_flap_window": _parse_int_env("TG_DISCONNECT_FLAP_WINDOW", 120),
+        # /ping reports TG as unhealthy once the last successful watchdog probe is older than
+        # this many seconds. Default is derived from the watchdog cadence: it is roughly how
+        # long the watchdog itself would take to give up and trigger a restart —
+        # interval * (failures + 1) + timeout. With the defaults (60,3,10) that is 250s, so a
+        # transient slow probe never flaps /ping, but a genuinely stuck session (no successful
+        # probe for ~4 min) surfaces as 503 before/around the time the watchdog restarts.
+        "tg_ping_unhealthy_after": _parse_int_env(
+            "TG_PING_UNHEALTHY_AFTER",
+            _parse_int_env("TG_WATCHDOG_INTERVAL", 60) * (_parse_int_env("TG_WATCHDOG_FAILURES", 3) + 1)
+            + _parse_int_env("TG_WATCHDOG_TIMEOUT", 10),
+        ),
+        # Media download timeout scales with file size (large videos): the per-download
+        # timeout is clamped to [min, max] seconds, with an effective floor of
+        # `media_download_min_speed` bytes/s (timeout ≈ file_size / min_speed).
+        "media_download_timeout_min": _parse_int_env("MEDIA_DOWNLOAD_TIMEOUT_MIN", 120),
+        "media_download_timeout_max": _parse_int_env("MEDIA_DOWNLOAD_TIMEOUT_MAX", 1800),
+        "media_download_min_speed": _parse_int_env("MEDIA_DOWNLOAD_MIN_SPEED", 256 * 1024),
+        # Size of the asyncio default ThreadPoolExecutor. SQLite/python-magic/pickle/os.walk
+        # all run via asyncio.to_thread; the interpreter default (min(32, cpu+4)) is only 5-6
+        # on a 1-2 CPU container, which starves those under load. 32 gives ample headroom.
+        "io_thread_pool_size": _parse_int_env("IO_THREAD_POOL_SIZE", 32),
     }

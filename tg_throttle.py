@@ -9,6 +9,7 @@ import os
 import time
 import asyncio
 import logging
+from contextlib import asynccontextmanager
 
 logger = logging.getLogger(__name__)
 
@@ -67,3 +68,25 @@ class _TgRpcGate:
 def tg_rpc():
     """Return an async context manager that throttles a single live Telegram RPC call."""
     return _TgRpcGate()
+
+
+@asynccontextmanager
+async def tg_rpc_bounded(timeout: float):
+    """Throttle a live Telegram RPC AND bound it with a timeout, correctly nested.
+
+    The single tricky invariant this centralizes: the timeout must bound ONLY the
+    RPC body, never the gate ENTRY — timing out the `_sem.acquire()` / spacing wait
+    would turn legitimate queue backpressure (e.g. ~47 feeds queueing) into false
+    timeouts. So the gate is the OUTER context and the timeout is the INNER one; a
+    TimeoutError raised inside propagates out through the gate's `__aexit__`, which
+    releases the permit (no leak). Call as:
+
+        async with tg_rpc_bounded(Config["tg_rpc_timeout"]):
+            result = await client.get_chat(channel_id)
+
+    Every gated+bounded RPC uses this so no call site re-derives the nesting by hand
+    (getting it wrong silently reopens the hang-under-backpressure class).
+    """
+    async with _TgRpcGate():
+        async with asyncio.timeout(timeout):
+            yield
