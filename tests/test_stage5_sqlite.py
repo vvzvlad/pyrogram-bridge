@@ -74,6 +74,40 @@ async def test_cache_hit_records_accumulator_no_sqlite(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# 5.1 hot path (DoD guard): get_media's pre-semaphore cache-hit — the hottest
+# changed site, the one this PR exists for — records into the accumulator and
+# does NO synchronous SQLite access-write. Mirrors the download_media_file spy
+# so a regression re-introducing a per-hit write into THIS branch goes red.
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_get_media_pre_semaphore_cache_hit_no_sqlite(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    channel, post_id, fid = "gmchan", 11, "fidGM"
+    cache_dir = tmp_path / "data" / "cache" / channel / str(post_id)
+    cache_dir.mkdir(parents=True)
+    (cache_dir / fid).write_bytes(b"cached-bytes")
+
+    # Bypass the HMAC digest gate and the FileResponse machinery — the test targets
+    # only the access-time write on the pre-semaphore cache-hit branch.
+    monkeypatch.setattr(api_server, "verify_media_digest", lambda *a, **k: True)
+    sentinel = object()
+    async def fake_prepare(cache_path, request=None, media_key=None):
+        return sentinel
+    monkeypatch.setattr(api_server, "prepare_file_response", fake_prepare)
+
+    # Spy: the single-row synchronous updater must NOT be called on the hot path.
+    called = []
+    monkeypatch.setattr(api_server, "update_media_file_access_sync",
+                        lambda *a, **k: called.append(a))
+
+    resp = await api_server.get_media(channel, post_id, fid, request=object(), digest="x")
+
+    assert resp is sentinel
+    assert called == []  # no synchronous SQLite access-write on the hottest path
+    assert (channel, post_id, fid) in api_server._access_updates
+
+
+# --------------------------------------------------------------------------- #
 # gotcha: str(channel) key discipline on the hot path (int-ish channel).
 # --------------------------------------------------------------------------- #
 @pytest.mark.asyncio

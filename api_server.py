@@ -144,9 +144,11 @@ async def _supervised(factory, name: str, min_restart_interval: float = 60.0):
 # (a threadpool hop + connect + UPDATE per request), which starves the threadpool under
 # active RSS polling. Instead a cache hit just records the timestamp here — a dict write
 # on the single-threaded event loop is cheap and atomic — and a periodic background task
-# flushes the whole batch to SQLite in one executemany. Keys use str(channel) to match the
-# TEXT channel column; mixing str/int would make the UPDATE's WHERE silently never match,
-# so the access-time would stop advancing and the file would fall out of the 20-day cache.
+# flushes the whole batch to SQLite in one executemany. Keys use str(channel) to stay
+# consistent with the string form written at insert time and to not lean on SQLite's
+# implicit column-affinity coercion (the channel column is TEXT, so a bound int would be
+# coerced and still match — but we key the accumulator by the same type we store, rather
+# than depend on that).
 ACCESS_FLUSH_INTERVAL = 60  # seconds between access-time flushes
 _access_updates: dict[tuple[str, int, str], float] = {}
 
