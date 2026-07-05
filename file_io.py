@@ -69,12 +69,51 @@ def upsert_media_file_id_sync(db_path: str, channel: str, post_id: int, file_uni
         )
 
 
+def upsert_media_file_ids_bulk_sync(db_path: str, entries: List[tuple]) -> None:
+    """Insert or replace multiple media file ID records in a single transaction.
+
+    entries: iterable of (channel, post_id, file_unique_id, added) tuples.
+    Uses executemany for batched upserts (one connection, one commit).
+    """
+    if not entries:
+        return
+    with _db_connection(db_path) as conn:
+        conn.executemany(
+            """INSERT INTO media_file_ids (channel, post_id, file_unique_id, added)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(channel, post_id, file_unique_id)
+               DO UPDATE SET added = excluded.added""",
+            entries,
+        )
+
+
 def update_media_file_access_sync(db_path: str, channel: str, post_id: int, file_unique_id: str, added: float) -> None:
     """Update the access timestamp for an existing media file ID record."""
     with _db_connection(db_path) as conn:
         conn.execute(
             "UPDATE media_file_ids SET added = ? WHERE channel = ? AND post_id = ? AND file_unique_id = ?",
             (added, channel, post_id, file_unique_id),
+        )
+
+
+def update_media_file_access_bulk_sync(db_path: str, entries: List[tuple]) -> None:
+    """Update the access timestamp for multiple existing media file ID records.
+
+    entries: iterable of (channel, post_id, file_unique_id, added) tuples.
+    Uses executemany (one connection, one commit) so a batch of cache-hit access
+    updates costs a single SQLite transaction instead of one connect+UPDATE per hit.
+    Rows that do not exist are simply not matched by the WHERE clause (no-op), mirroring
+    the single-row update_media_file_access_sync. An empty batch is a no-op.
+    """
+    if not entries:
+        return
+    with _db_connection(db_path) as conn:
+        conn.executemany(
+            "UPDATE media_file_ids SET added = ? WHERE channel = ? AND post_id = ? AND file_unique_id = ?",
+            # Reorder each (channel, post_id, file_unique_id, added) tuple to match the
+            # UPDATE's placeholder order (added first, then the WHERE key columns).
+            [(added, channel, post_id, file_unique_id)
+             for (channel, post_id, file_unique_id, added) in entries],
         )
 
 
