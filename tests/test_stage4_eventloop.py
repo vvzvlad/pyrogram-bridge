@@ -365,3 +365,107 @@ async def test_xss_in_media_caption_stripped_in_feeds(monkeypatch):
     monkeypatch.setattr("tg_cache.cached_get_chat_history", fake_get_history2, raising=False)
     html_feed = await generate_channel_html("testchan", client=SimpleNamespace(), limit=5)
     _assert_clean(html_feed, "html feed (media caption)")
+
+
+# --------------------------------------------------------------------------- #
+# Review round-1: the new bulk-upsert SQL executed for real (not mocked).
+# --------------------------------------------------------------------------- #
+def test_bulk_upsert_media_file_ids_real_sql(tmp_path):
+    import sqlite3
+    from file_io import upsert_media_file_ids_bulk_sync, init_db_sync
+
+    db = str(tmp_path / "t.db")
+    init_db_sync(db)
+
+    # Empty list is a no-op (no crash).
+    upsert_media_file_ids_bulk_sync(db, [])
+
+    # Multi-row insert.
+    upsert_media_file_ids_bulk_sync(db, [
+        ("chA", 1, "fidA", 100.0),
+        ("chB", 2, "fidB", 200.0),
+    ])
+    conn = sqlite3.connect(db)
+    rows = dict(((c, p, f), a) for c, p, f, a in
+                conn.execute("SELECT channel, post_id, file_unique_id, added FROM media_file_ids"))
+    assert rows[("chA", 1, "fidA")] == 100.0
+    assert rows[("chB", 2, "fidB")] == 200.0
+
+    # Re-upsert the SAME key updates `added` (ON CONFLICT ... DO UPDATE SET added=excluded.added).
+    upsert_media_file_ids_bulk_sync(db, [("chA", 1, "fidA", 999.0)])
+    a = conn.execute(
+        "SELECT added FROM media_file_ids WHERE channel='chA' AND post_id=1 AND file_unique_id='fidA'"
+    ).fetchone()[0]
+    assert a == 999.0
+    conn.close()
+
+
+# --------------------------------------------------------------------------- #
+# Review round-1: media ids collected before a render exception are still
+# flushed (the flush is in a finally). Removing the finally must break this.
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_pending_media_flushed_on_render_exception(monkeypatch):
+    async def fake_get_chat(client, channel):
+        return SimpleNamespace(title="Test", username="testchan", id=-1001234567890)
+
+    async def fake_get_history(client, channel, limit=20):
+        return [make_message(40, text="hi")]
+
+    monkeypatch.setattr("tg_cache.cached_get_chat", fake_get_chat, raising=False)
+    monkeypatch.setattr("tg_cache.cached_get_chat_history", fake_get_history, raising=False)
+
+    # A render pipeline that collects a pending id then raises mid-render.
+    def boom_pipeline(messages, post_parser, *a, **k):
+        post_parser._pending_media_ids.append(("chZ", 9, "fidZ", 1.0))
+        raise RuntimeError("render blew up")
+
+    monkeypatch.setattr(rss_module, "_render_pipeline", boom_pipeline)
+
+    flushed = {}
+    async def fake_bulk(db, entries):
+        flushed["entries"] = list(entries)
+    monkeypatch.setattr("post_parser.upsert_media_file_ids_bulk_sync",
+                        lambda db, entries: flushed.__setitem__("entries", list(entries)),
+                        raising=False)
+
+    with pytest.raises(Exception):
+        await generate_channel_rss("testchan", client=SimpleNamespace(), limit=5)
+
+    # The collected id was persisted despite the render exception (flush in finally).
+    assert flushed.get("entries") == [("chZ", 9, "fidZ", 1.0)]
+
+
+# --------------------------------------------------------------------------- #
+# Review round-1 [security]: if the ONLY sanitize pass throws, the feed must
+# FAIL CLOSED (html.escape the raw content), never emit the raw XSS payload.
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_rss_fails_closed_when_sanitizer_raises(monkeypatch):
+    async def fake_get_chat(client, channel):
+        return SimpleNamespace(title="Test", username="testchan", id=-1001234567890)
+
+    async def fake_get_history(client, channel, limit=20):
+        return [make_message(41, text=XSS_PAYLOAD)]
+
+    monkeypatch.setattr("tg_cache.cached_get_chat", fake_get_chat, raising=False)
+    monkeypatch.setattr("tg_cache.cached_get_chat_history", fake_get_history, raising=False)
+
+    # Force bleach to blow up (e.g. the RecursionError class already seen in prod).
+    # rss_generator imports it as `from bleach import clean as HTMLSanitizer`.
+    def boom(*a, **k):
+        raise RecursionError("bleach exploded")
+    monkeypatch.setattr(rss_module, "HTMLSanitizer", boom, raising=True)
+
+    rss = await generate_channel_rss("testchan", client=SimpleNamespace(), limit=5)
+    chunks = re.findall(r"<!\[CDATA\[(.*?)\]\]>", rss, re.DOTALL)
+    assert chunks, "expected CDATA content"
+    for chunk in chunks:
+        # Fail-closed: the raw payload was html.escaped, so NO live tag survived — every
+        # `<` became `&lt;`. (The letters "javascript:" still appear, but as inert text
+        # inside an escaped &quot;…&quot;, not a live href.)
+        assert "<script" not in chunk, "RSS fail-open: raw <script> reached the feed"
+        assert "<img" not in chunk, "RSS fail-open: raw <img onerror> reached the feed"
+        assert "<a " not in chunk, "RSS fail-open: raw <a href> reached the feed"
+        # ...and the escaping actually ran (payload present as escaped text, not dropped).
+        assert "&lt;script&gt;" in chunk, "expected the payload html-escaped, not dropped"

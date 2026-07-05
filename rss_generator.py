@@ -14,6 +14,7 @@ import logging
 import asyncio
 import re
 import time
+from html import escape as html_escape
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Optional
@@ -23,7 +24,6 @@ from pyrogram.types import Message
 from post_parser import PostParser
 from config import get_settings
 from tg_throttle import tg_rpc_bounded
-from file_io import upsert_media_file_ids_bulk_sync, DB_PATH
 from bleach.css_sanitizer import CSSSanitizer
 from bleach import clean as HTMLSanitizer
 
@@ -487,8 +487,13 @@ async def generate_channel_rss(channel: str | int,
                     )
                 sanitized_html = await asyncio.to_thread(_sanitize_sync, post['html'])
             except Exception as e:
+                # FAIL CLOSED: since 4.4 removed the per-fragment passes, post['html'] is
+                # raw channel-controlled HTML, and this is its ONLY sanitize. If bleach
+                # itself throws (e.g. RecursionError on pathological nested HTML), do NOT
+                # emit the raw payload (that would be stored XSS) — html.escape it so the
+                # content survives as inert text.
                 logger.error(f"rss_html_sanitization_error: channel {channel}, message_id {post['message_id']}, error {str(e)}")
-                sanitized_html = post['html']
+                sanitized_html = html_escape(post['html'])
             fe.content(content=sanitized_html, type='CDATA')
             
             if post['date'] is not None:
@@ -693,7 +698,11 @@ async def generate_channel_html(channel: str | int,
                 )
             html = await asyncio.to_thread(_sanitize_sync, html)
         except Exception as e:
+            # FAIL CLOSED (see the RSS path): `html` is now the raw concatenated feed
+            # (4.4 removed the per-fragment passes). If bleach throws, html.escape the
+            # whole feed rather than returning raw channel HTML/JS to the client.
             logger.error(f"html_final_sanitization_error: channel {channel}, error {str(e)}")
+            html = html_escape(html)
         
         html_gen_elapsed = time.time() - html_gen_start_time
         logger.debug(f"html_generation_timing: channel {channel}, HTML generated in {html_gen_elapsed:.3f} seconds")

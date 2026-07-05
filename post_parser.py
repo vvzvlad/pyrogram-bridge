@@ -526,7 +526,8 @@ class PostParser:
             sanitize: when True, run the html body and footer through a single
                 bleach pass each. Single-post HTML and JSON need this (there is no
                 whole-feed pass on those paths). Feed generation passes False and
-                relies on the final whole-feed sanitize in rss_generator, so no
+                relies on the final sanitize in rss_generator (per-post for RSS,
+                whole-feed for HTML), so no
                 fragment is sanitized more than once.
         """
         # Compute html body once — avoids triple _generate_html_body calls.
@@ -715,8 +716,8 @@ class PostParser:
         content_body.append(f'</div><br>')
 
         # NOTE: sanitize is NOT applied here. Sanitization happens exactly once per
-        # output boundary (process_message for single-post/JSON, final whole-feed pass
-        # in rss_generator for feeds). See the sanitize coverage map (4.4).
+        # output boundary (process_message for single-post/JSON; in rss_generator the
+        # per-post pass for RSS and the whole-feed pass for HTML). See the map (4.4).
         html_body = '\n'.join(content_body)
         return html_body
 
@@ -879,7 +880,7 @@ class PostParser:
             content_footer.append('<br>' + flags_html)
             
         # Not sanitized here — sanitized once at the output boundary (4.4 coverage map):
-        # process_message for single-post/JSON, final whole-feed pass for feeds.
+        # process_message for single-post/JSON; per-post (RSS) / whole-feed (HTML) for feeds.
         html_footer = '\n'.join(content_footer)
         return html_footer
 
