@@ -287,9 +287,26 @@ if __name__ == "__main__":
 async def find_file_id_in_message(message: Message, file_unique_id: str) -> Union[str, None]:
     """Find file_id by checking all possible media types in message"""
     if message.media == MessageMediaType.POLL:
-        logger.debug(f"Message {message.id} is a poll, skipping media search")
+        # Kurigram 2.2.23: polls may carry media in description_media and
+        # explanation_media (MessageContent objects). The bridge renders only
+        # description_media, but explanation_media is searched too: if a signed URL
+        # for it ever exists, the download must still work. getattr-only access —
+        # older Poll objects/mocks do not define these fields.
+        poll = getattr(message, 'poll', None)
+        for container_name in ('description_media', 'explanation_media'):
+            content = getattr(poll, container_name, None) if poll else None
+            if content is None:
+                continue
+            for media_attr in ('photo', 'video', 'animation', 'sticker',
+                               'document', 'audio', 'voice', 'video_note'):
+                media_obj = getattr(content, media_attr, None)
+                if media_obj is None:
+                    continue
+                if getattr(media_obj, 'file_unique_id', None) == file_unique_id:
+                    return getattr(media_obj, 'file_id', None)
+        logger.debug(f"Message {message.id} is a poll, media '{file_unique_id}' not found in poll content")
         return None
-        
+
     media_found = []
     if message.photo:
         media_found.append(f"photo ({message.photo.file_unique_id})")
@@ -327,7 +344,21 @@ async def find_file_id_in_message(message: Message, file_unique_id: str) -> Unio
         media_found.append(f"document ({message.document.file_unique_id})")
         if message.document.file_unique_id == file_unique_id:
             return message.document.file_id
-            
+    # New media types (Kurigram 2.2.23): getattr-only access, the attributes do not
+    # exist on older Message objects/mocks.
+    if live_photo := getattr(message, 'live_photo', None):
+        media_found.append(f"live_photo ({getattr(live_photo, 'file_unique_id', None)})")
+        if getattr(live_photo, 'file_unique_id', None) == file_unique_id:
+            return getattr(live_photo, 'file_id', None)
+    if story := getattr(message, 'story', None):
+        for story_attr in ('photo', 'video'):
+            story_media = getattr(story, story_attr, None)
+            if story_media is None:
+                continue
+            media_found.append(f"story.{story_attr} ({getattr(story_media, 'file_unique_id', None)})")
+            if getattr(story_media, 'file_unique_id', None) == file_unique_id:
+                return getattr(story_media, 'file_id', None)
+
     # If we reached here, the file_unique_id was not found
     channel_id_log = message.chat.id if message.chat else 'unknown_chat'
     logger.warning(f"Could not find media with file_unique_id '{file_unique_id}' in message {message.id} (channel: {channel_id_log}). Found media: {', '.join(media_found) or 'None'}")

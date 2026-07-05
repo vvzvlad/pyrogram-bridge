@@ -28,6 +28,85 @@ Config = get_settings()
 
 logger = logging.getLogger(__name__)
 
+# Media types that never yield a renderable image/video in the feed: they are
+# represented by info blocks (or nothing), so posts carrying them get "no_image".
+NO_IMAGE_MEDIA_TYPES = {
+    MessageMediaType.GIVEAWAY,
+    MessageMediaType.GIVEAWAY_WINNERS,
+    MessageMediaType.CHECKLIST,
+    MessageMediaType.CONTACT,
+    MessageMediaType.LOCATION,
+    MessageMediaType.VENUE,
+    MessageMediaType.DICE,
+    MessageMediaType.GAME,
+    MessageMediaType.INVOICE,
+    MessageMediaType.UNSUPPORTED,
+    MessageMediaType.PAID_MEDIA,
+}
+
+
+def _poll_media_object(message):
+    """Return (media_obj, kind) attached to a poll's description_media, or (None, None).
+
+    Kurigram 2.2.23 polls may carry media in description_media / explanation_media
+    (MessageContent objects). Only description_media is considered for rendering:
+    explanation_media is the quiz-answer explanation attachment and does not belong
+    in a channel feed, so it is deliberately NOT rendered (api_server's download
+    lookup still covers it in case a URL for it exists).
+
+    kind is the render hint: 'img' for photo/sticker, 'video' for video/animation.
+
+    All attribute access goes through getattr: older Poll objects and test mocks do
+    not define these fields. A candidate is accepted only when its file_unique_id is
+    a non-empty str — without it nothing can be served through the /media pipeline,
+    and this also keeps loose MagicMock-based poll mocks from producing false
+    positives via auto-created attributes.
+    """
+    poll = getattr(message, 'poll', None)
+    if poll is None:
+        return None, None
+    description_media = getattr(poll, 'description_media', None)
+    if description_media is None:
+        return None, None
+    candidates = (
+        ('photo', 'img'),
+        ('video', 'video'),
+        ('animation', 'video'),
+        ('sticker', 'img'),
+    )
+    for attr, kind in candidates:
+        media_obj = getattr(description_media, attr, None)
+        if media_obj is None:
+            continue
+        file_unique_id = getattr(media_obj, 'file_unique_id', None)
+        if isinstance(file_unique_id, str) and file_unique_id:
+            return media_obj, kind
+    return None, None
+
+
+def _story_media_object(message):
+    """Return (media_obj, kind) for message.story media (video wins over photo), or (None, None).
+
+    kind is the render hint ('video' or 'img'). Rendering, URL generation and file-id
+    collection all go through this helper, so they always agree on WHICH story object
+    is used (e.g. when a story video lacks a usable file_unique_id and the helper
+    falls back to the photo, the tag type follows the fallback too).
+
+    Same defensive rules as _poll_media_object: getattr-only access and a non-empty
+    str file_unique_id requirement.
+    """
+    story = getattr(message, 'story', None)
+    if story is None:
+        return None, None
+    for attr, kind in (('video', 'video'), ('photo', 'img')):
+        media_obj = getattr(story, attr, None)
+        if media_obj is None:
+            continue
+        file_unique_id = getattr(media_obj, 'file_unique_id', None)
+        if isinstance(file_unique_id, str) and file_unique_id:
+            return media_obj, kind
+    return None, None
+
 
 #tests
 #http://127.0.0.1:8000/post/html/DragorWW_space/114 — video
@@ -221,6 +300,31 @@ class PostParser:
             if message.media == MessageMediaType.VOICE:       return "🎤 Voice"
             if message.media == MessageMediaType.VIDEO_NOTE:  return "📱 Video circle"
             if message.media == MessageMediaType.STICKER:     return "🎯 Sticker"
+            # New media types (Kurigram 2.2.23). New Message attributes are accessed
+            # via getattr only — older objects/mocks may not define them.
+            if message.media == MessageMediaType.LIVE_PHOTO:  return "📸 Live Photo"
+            if message.media == MessageMediaType.STORY:       return "📖 Story"
+            if message.media == MessageMediaType.GIVEAWAY:    return "🎁 Giveaway"
+            if message.media == MessageMediaType.GIVEAWAY_WINNERS: return "🏆 Giveaway winners"
+            if message.media == MessageMediaType.PAID_MEDIA:  return "⭐ Paid media"
+            if message.media == MessageMediaType.CHECKLIST:
+                checklist = getattr(message, 'checklist', None)
+                title = getattr(checklist, 'title', None) if checklist else None
+                if isinstance(title, str) and title.strip():
+                    return f"📝 Checklist: {title.strip()[:50]}"
+                return "📝 Checklist"
+            if message.media == MessageMediaType.CONTACT:     return "👤 Contact"
+            if message.media == MessageMediaType.LOCATION:    return "📍 Location"
+            if message.media == MessageMediaType.VENUE:
+                venue = getattr(message, 'venue', None)
+                venue_title = getattr(venue, 'title', None) if venue else None
+                if isinstance(venue_title, str) and venue_title.strip():
+                    return f"📍 {venue_title.strip()}"
+                return "📍 Venue"
+            if message.media == MessageMediaType.DICE:        return "🎲 Dice"
+            if message.media == MessageMediaType.GAME:        return "🎮 Game"
+            if message.media == MessageMediaType.INVOICE:     return "🧾 Invoice"
+            if message.media == MessageMediaType.UNSUPPORTED: return "⚠️ Unsupported content"
 
         # Web pages (if no text or media title)
         if message.web_page:
@@ -357,7 +461,9 @@ class PostParser:
             flags.append("fwd")
 
         # Add flag "video" if the message media is VIDEO or ANIMATION and the body text is up to 200 characters.
-        if (message.media in [MessageMediaType.VIDEO, MessageMediaType.ANIMATION, MessageMediaType.VIDEO_NOTE] and 
+        # LIVE_PHOTO (Kurigram 2.2.23) renders as a video element, so it counts too.
+        if (message.media in [MessageMediaType.VIDEO, MessageMediaType.ANIMATION, MessageMediaType.VIDEO_NOTE,
+                              MessageMediaType.LIVE_PHOTO] and
             len((message.text or message.caption or '').strip()) <= 200):
             flags.append("video")
 
@@ -366,8 +472,12 @@ class PostParser:
             len((message.text or message.caption or '').strip()) <= 200):
             flags.append("audio")
         
-        # Add flag for posts without images
-        if not message.media or message.media == MessageMediaType.POLL:
+        # Add flag for posts without images: no media at all, an info-block-only media
+        # type (see NO_IMAGE_MEDIA_TYPES), or a poll without renderable description_media.
+        # A poll WITH description_media renders an image/video, so it is NOT flagged.
+        if (not message.media
+                or message.media in NO_IMAGE_MEDIA_TYPES
+                or (message.media == MessageMediaType.POLL and _poll_media_object(message)[0] is None)):
             flags.append("no_image")
 
         # Add flag for sticker messages
@@ -715,6 +825,7 @@ class PostParser:
 
 
         if poll_html: content_body.append(poll_html) # Poll
+        if special_html := self._format_special_media(message): content_body.append(special_html) # Special media info blocks
         if message.forward_origin: content_body.append(f"--- Forwarded post end ---") # Forward info end
         content_body.append(f'</div><br>')
 
@@ -730,7 +841,27 @@ class PostParser:
 
         content_media = []
         base_url = Config['pyrogram_bridge_url']
-        if message.media and message.media != MessageMediaType.POLL:
+        # Poll media (Kurigram 2.2.23): a poll may carry description_media which IS
+        # renderable through the regular /media pipeline.
+        poll_media_obj, poll_media_kind = _poll_media_object(message)
+        if message.media == MessageMediaType.PAID_MEDIA:
+            # Paid media cannot be downloaded (it is paid content) — render an info
+            # block instead of a media element. Attributes via getattr only.
+            paid_media = getattr(message, 'paid_media', None)
+            stars_amount = getattr(paid_media, 'stars_amount', 0) if paid_media else 0
+            paid_items = getattr(paid_media, 'media', None) if paid_media else None
+            items_count = len(paid_items) if isinstance(paid_items, (list, tuple)) else 0
+            content_media.append(f'<div class="message-media">')
+            content_media.append(f'<div class="paid-media">⭐ Paid media ({stars_amount} stars, '
+                                f'{items_count} item(s)) — available in Telegram</div>')
+            content_media.append('</div>')
+        # Info-block-only media types (NO_IMAGE_MEDIA_TYPES) are rendered by
+        # _format_special_media — do not open an empty message-media container for
+        # them. PAID_MEDIA (also in that set) is handled by the branch above; POLL is
+        # not in the set and is let in only when it carries renderable poll media.
+        elif (message.media
+                and message.media not in NO_IMAGE_MEDIA_TYPES
+                and (message.media != MessageMediaType.POLL or poll_media_obj is not None)):
             content_media.append(f'<div class="message-media">')
 
             file_unique_id = self._get_file_unique_id(message)
@@ -791,6 +922,28 @@ class PostParser:
                         else:
                             content_media.append(f'<img src="{url}" alt="Sticker {emoji}" style="max-width:100%;'
                                                 f'width:auto; height:auto; max-height:200px; object-fit:contain;">')
+                    elif message.media == MessageMediaType.LIVE_PHOTO:
+                        # Live photo is effectively a short video clip.
+                        content_media.append(f'<video controls autoplay loop muted src="{url}"'
+                                            f'style="max-width:100%; width:auto; height:auto; max-height:400px;'
+                                            f'object-fit:contain;"></video>')
+                    elif message.media == MessageMediaType.STORY:
+                        # Choose the tag from the SAME helper that produced the URL's
+                        # file_unique_id, so the tag type always matches the URL object.
+                        story_media_obj, story_media_kind = _story_media_object(message)
+                        if story_media_obj is not None and story_media_kind == 'video':
+                            content_media.append(f'<video controls src="{url}" style="max-width:100%; width:auto;'
+                                                f'height:auto; max-height:400px;"></video>')
+                        elif story_media_obj is not None:
+                            content_media.append(f'<img src="{url}" style="max-width:100%; width:auto; height:auto;'
+                                                f'max-height:400px; object-fit:contain;">')
+                    elif message.media == MessageMediaType.POLL and poll_media_obj is not None:
+                        if poll_media_kind == 'video':
+                            content_media.append(f'<video controls src="{url}" style="max-width:100%; width:auto;'
+                                                f'height:auto; max-height:400px;"></video>')
+                        else:
+                            content_media.append(f'<img src="{url}" style="max-width:100%; width:auto; height:auto;'
+                                                f'max-height:400px; object-fit:contain;">')
                     content_media.append('</div>')
         
         if webpage := getattr(message, "web_page", None): # Web page preview
@@ -999,6 +1152,109 @@ class PostParser:
             logger.error(f"poll_parsing_error: {str(e)}")
             return '<div class="message-poll">[Error displaying poll]</div>'
 
+    @staticmethod
+    def _format_osm_link(location) -> Union[str, None]:
+        """Build an OpenStreetMap link for a location object, or None if coords are unusable."""
+        latitude = getattr(location, 'latitude', None) if location else None
+        longitude = getattr(location, 'longitude', None) if location else None
+        if not isinstance(latitude, (int, float)) or not isinstance(longitude, (int, float)):
+            return None
+        osm_url = f"https://www.openstreetmap.org/?mlat={latitude}&mlon={longitude}#map=16/{latitude}/{longitude}"
+        return f'<a href="{osm_url}">{latitude:.5f}, {longitude:.5f}</a>'
+
+    def _format_special_media(self, message: Message) -> Union[str, None]:
+        """Render an info block for media types that carry no downloadable file.
+
+        Covers giveaways, giveaway winners, checklists, contacts, locations, venues,
+        dice, games, invoices and UNSUPPORTED content (Kurigram 2.2.23). Each block is
+        gated on message.media so unrelated messages never render these. All new
+        Message attributes are accessed via getattr only (older objects/mocks do not
+        define them) and ALL user-controlled strings go through html.escape.
+        """
+        try:
+            media = getattr(message, 'media', None)
+            block = None
+
+            if media == MessageMediaType.GIVEAWAY and (giveaway := getattr(message, 'giveaway', None)):
+                quantity = getattr(giveaway, 'quantity', None)
+                months = getattr(giveaway, 'months', None)
+                stars = getattr(giveaway, 'stars', None)
+                until_date = getattr(giveaway, 'until_date', None)
+                description = getattr(giveaway, 'description', None)
+                block = f"🎁 Giveaway: {quantity} prize(s)"
+                if months: block += f" × {months} months Premium"
+                elif stars: block += f" × {stars} Stars"
+                if until_date is not None and hasattr(until_date, 'strftime'):
+                    block += f" — until {until_date.strftime('%d/%m/%Y')}"
+                if isinstance(description, str) and description.strip():
+                    block += f"<br>{html.escape(description.strip())}"
+
+            elif media == MessageMediaType.GIVEAWAY_WINNERS and (winners := getattr(message, 'giveaway_winners', None)):
+                winner_count = getattr(winners, 'winner_count', None)
+                quantity = getattr(winners, 'quantity', None)
+                prize_description = getattr(winners, 'prize_description', None)
+                block = f"🏆 Giveaway winners: {winner_count} of {quantity}"
+                if isinstance(prize_description, str) and prize_description.strip():
+                    block += f"<br>{html.escape(prize_description.strip())}"
+
+            elif media == MessageMediaType.CHECKLIST and (checklist := getattr(message, 'checklist', None)):
+                title = getattr(checklist, 'title', None)
+                title_str = title if isinstance(title, str) else ''
+                lines = [f"📝 {html.escape(title_str)}" if title_str else "📝 Checklist"]
+                for task in (getattr(checklist, 'tasks', None) or []):
+                    completed = bool(getattr(task, 'completed_by', None) or getattr(task, 'completion_date', None))
+                    mark = "☑" if completed else "☐"
+                    task_text = getattr(task, 'text', '')
+                    task_str = task_text if isinstance(task_text, str) else str(task_text)
+                    lines.append(f"{mark} {html.escape(task_str)}")
+                block = '<br>'.join(lines)
+
+            elif media == MessageMediaType.CONTACT and (contact := getattr(message, 'contact', None)):
+                first_name = getattr(contact, 'first_name', None) or ''
+                last_name = getattr(contact, 'last_name', None) or ''
+                phone_number = getattr(contact, 'phone_number', None) or ''
+                full_name = ' '.join(part for part in [str(first_name), str(last_name)] if part)
+                block = f"👤 {html.escape(full_name)}"
+                if phone_number:
+                    block += f" — {html.escape(str(phone_number))}"
+
+            elif media == MessageMediaType.LOCATION and (location := getattr(message, 'location', None)):
+                osm_link = self._format_osm_link(location)
+                block = f"📍 Location: {osm_link}" if osm_link else "📍 Location"
+
+            elif media == MessageMediaType.VENUE and (venue := getattr(message, 'venue', None)):
+                venue_title = getattr(venue, 'title', None) or ''
+                venue_address = getattr(venue, 'address', None) or ''
+                venue_label = ', '.join(part for part in [str(venue_title), str(venue_address)] if part)
+                block = f"📍 {html.escape(venue_label)}" if venue_label else "📍 Venue"
+                if osm_link := self._format_osm_link(getattr(venue, 'location', None)):
+                    block += f" — {osm_link}"
+
+            elif media == MessageMediaType.DICE and (dice := getattr(message, 'dice', None)):
+                dice_emoji = getattr(dice, 'emoji', None) or '🎲'
+                dice_value = getattr(dice, 'value', None)
+                block = f"🎲 {html.escape(str(dice_emoji))}: {dice_value}"
+
+            elif media == MessageMediaType.GAME:
+                game_title = getattr(getattr(message, 'game', None), 'title', None)
+                if isinstance(game_title, str) and game_title.strip():
+                    block = f"🎮 Game: {html.escape(game_title.strip())}"
+                else:
+                    block = "🎮 Game"
+
+            elif media == MessageMediaType.INVOICE:
+                block = "🧾 Invoice"
+
+            elif media == MessageMediaType.UNSUPPORTED:
+                block = "⚠️ This post contains content not supported by the bridge — open it in Telegram."
+
+            if block is None:
+                return None
+            return f'<div class="message-special">{block}</div>'
+        except Exception as e:
+            logger.error(f"special_media_parsing_error: message_id {getattr(message, 'id', 'unknown')}, error {str(e)}")
+            return None
+
     def _get_file_unique_id(self, message: Message) -> Union[str, None]:
         try:
             media_mapping = {
@@ -1010,7 +1266,12 @@ class PostParser:
                 MessageMediaType.VIDEO_NOTE:    lambda m: m.video_note.file_unique_id,
                 MessageMediaType.ANIMATION:     lambda m: m.animation.file_unique_id,
                 MessageMediaType.STICKER:       lambda m: m.sticker.file_unique_id,
-                MessageMediaType.WEB_PAGE:      lambda m: m.web_page.photo.file_unique_id if m.web_page and m.web_page.photo else None
+                MessageMediaType.WEB_PAGE:      lambda m: m.web_page.photo.file_unique_id if m.web_page and m.web_page.photo else None,
+                # New media types (Kurigram 2.2.23): getattr-only access, the
+                # attributes do not exist on older Message objects/mocks.
+                MessageMediaType.LIVE_PHOTO:    lambda m: getattr(getattr(m, 'live_photo', None), 'file_unique_id', None),
+                MessageMediaType.STORY:         lambda m: getattr(_story_media_object(m)[0], 'file_unique_id', None),
+                MessageMediaType.POLL:          lambda m: getattr(_poll_media_object(m)[0], 'file_unique_id', None),
             }
             
             if message.media in media_mapping:
@@ -1059,6 +1320,7 @@ class PostParser:
                     return
 
                 file_unique_id = ''
+                new_media_obj = None  # selected object among the Kurigram 2.2.23 media sources
                 if   message.photo:      file_unique_id = message.photo.file_unique_id
                 elif message.video:      file_unique_id = message.video.file_unique_id
                 elif message.document:   file_unique_id = message.document.file_unique_id
@@ -1069,6 +1331,24 @@ class PostParser:
                 elif message.sticker:    file_unique_id = message.sticker.file_unique_id
                 elif message.web_page and message.web_page.photo:
                     file_unique_id = message.web_page.photo.file_unique_id
+                # New media types (Kurigram 2.2.23): getattr-only, the attributes do
+                # not exist on older Message objects/mocks. paid_media is deliberately
+                # NOT collected — it cannot be downloaded (paid content).
+                elif getattr(message, 'live_photo', None):
+                    new_media_obj = message.live_photo
+                elif (story_media := _story_media_object(message)[0]) is not None:
+                    new_media_obj = story_media
+                elif (poll_media := _poll_media_object(message)[0]) is not None:
+                    new_media_obj = poll_media
+
+                if new_media_obj is not None:
+                    # The >100MB message.video guard above does not cover these
+                    # sources (live photo, story video, poll description video) —
+                    # apply the same "don't cache large videos" rule here.
+                    file_size = getattr(new_media_obj, 'file_size', None)
+                    if isinstance(file_size, int) and file_size > 100 * 1024 * 1024:
+                        return
+                    file_unique_id = getattr(new_media_obj, 'file_unique_id', '') or ''
 
                 if file_unique_id:
                     added_ts = datetime.now().timestamp()
