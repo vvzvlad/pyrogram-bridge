@@ -10,17 +10,11 @@ Stage 1 (anti-hang) regression tests:
   worker, and task_done stays balanced so queue.join() completes.
 - Gate cancellation during the spacing wait does not lose the permit.
 """
-import os
-import sys
 import time
 import asyncio
 from types import SimpleNamespace
 
 import pytest
-
-# Add project root to sys.path and mock the config module (same pattern as the other tests).
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-sys.modules['config'] = __import__('tests.mock_config', fromlist=['get_settings'])
 
 import tg_throttle
 import tg_cache

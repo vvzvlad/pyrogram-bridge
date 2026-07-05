@@ -36,15 +36,10 @@ All 206 responses that carry data return byte-for-byte identical slices old vs n
 real regression is hidden behind an "accepted difference".
 """
 import os
-import sys
 import time
 import logging
 
 import pytest
-
-# Add project root to sys.path and mock the config module (same pattern as the other tests).
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-sys.modules['config'] = __import__('tests.mock_config', fromlist=['get_settings'])
 
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient

@@ -16,9 +16,7 @@ Covers:
 - 4.4 sanitize coverage (XSS): a <script> / onerror= / javascript: payload is stripped in
       ALL outputs — rss, html-feed, single-post html, and json — each with exactly one pass.
 """
-import os
 import re
-import sys
 import copy
 import pickle
 import asyncio
@@ -27,9 +25,6 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
-
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-sys.modules['config'] = __import__('tests.mock_config', fromlist=['get_settings'])
 
 from pyrogram.enums import MessageMediaType
 
@@ -287,6 +282,27 @@ async def test_xss_stripped_in_single_post_html_debug():
     #    appears only in escaped form (proving html.escape ran).
     assert "<script>" not in html_out, "debug raw dump left a live <script> tag"
     assert "&lt;script&gt;" in html_out, "debug raw dump was not html-escaped"
+
+
+@pytest.mark.asyncio
+async def test_xss_in_title_escaped_in_debug_html():
+    # Issue #13: the debug branch of _format_html embeds data["html"]["title"], which is
+    # generated from user-controlled content and never passes through bleach. A poll whose
+    # question carries a <script> tag yields the title "📊 Poll: <script>alert(1)</script>"
+    # verbatim — it must be html-escaped before being embedded in the debug output.
+    msg = make_message(25, media=MessageMediaType.POLL)
+    msg.poll = SimpleNamespace(question="<script>alert(1)</script>")
+    parser = PostParser(_make_client_returning(msg))
+    html_out = await parser.get_post("testchan", 25, "html", debug=True)
+
+    # No live <script> tag anywhere in the output (title div, body, footer, raw <pre>).
+    assert "<script>" not in html_out, "debug html left a live <script> tag"
+    # The title div itself carries the payload only in escaped form (proving html.escape
+    # ran on the title, not just on the raw_message <pre> dump).
+    title_lines = [line for line in html_out.split("\n") if 'class="title"' in line]
+    assert title_lines, "debug output must contain the title div"
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in title_lines[0], \
+        "title was not html-escaped in debug output"
 
 
 @pytest.mark.asyncio

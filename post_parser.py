@@ -486,7 +486,10 @@ class PostParser:
         html_content = []
 
         if debug:
-            html_content.append(f'<div class="title">Title: {data["html"]["title"]}</div><br>')
+            # title comes from _generate_title (user-controlled post text) and never goes
+            # through bleach — escape it before embedding, same as raw_message below.
+            title_escaped = html.escape(str(data["html"]["title"]))
+            html_content.append(f'<div class="title">Title: {title_escaped}</div><br>')
         html_content.append(f'<div class="message-body">{data["html"]["body"]}</div>')
         html_content.append(f'<div class="message-footer">{data["html"]["footer"]}</div>')
         
