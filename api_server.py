@@ -40,7 +40,8 @@ from rss_generator import generate_channel_rss, generate_channel_html
 from post_parser import PostParser
 from url_signer import verify_media_digest, generate_media_digest
 from file_io import (DB_PATH, init_db_sync, get_all_media_file_ids_sync,
-                     update_media_file_access_sync, remove_media_file_ids_sync,
+                     update_media_file_access_sync, update_media_file_access_bulk_sync,
+                     remove_media_file_ids_sync,
                      get_mime_type_sync, set_mime_type_sync)
 
 # Global python-magic instance for MIME type detection
@@ -139,6 +140,57 @@ async def _supervised(factory, name: str, min_restart_interval: float = 60.0):
             await asyncio.sleep(min_restart_interval - elapsed)
 
 
+# Access-time write accumulator. A /media cache hit used to touch SQLite on the hot path
+# (a threadpool hop + connect + UPDATE per request), which starves the threadpool under
+# active RSS polling. Instead a cache hit just records the timestamp here — a dict write
+# on the single-threaded event loop is cheap and atomic — and a periodic background task
+# flushes the whole batch to SQLite in one executemany. Keys use str(channel) to match the
+# TEXT channel column; mixing str/int would make the UPDATE's WHERE silently never match,
+# so the access-time would stop advancing and the file would fall out of the 20-day cache.
+ACCESS_FLUSH_INTERVAL = 60  # seconds between access-time flushes
+_access_updates: dict[tuple[str, int, str], float] = {}
+
+
+async def _flush_access_updates() -> None:
+    """Flush the accumulated access timestamps to SQLite in one bulk UPDATE.
+
+    Snapshot-then-clear atomically on the loop: capture the current dict reference and
+    replace the module global with a fresh empty dict in ONE synchronous step (before any
+    await), so cache-hit writes arriving DURING the flush land in the new dict and are not
+    lost. The bulk UPDATE runs off-loop via asyncio.to_thread. An empty batch is a no-op.
+    """
+    global _access_updates
+    if not _access_updates:
+        return
+    pending = _access_updates
+    _access_updates = {}
+    entries = [(channel, post_id, file_unique_id, added)
+               for (channel, post_id, file_unique_id), added in pending.items()]
+    try:
+        await asyncio.to_thread(update_media_file_access_bulk_sync, DB_PATH, entries)
+    except Exception:
+        # Bulk write failed: re-queue this batch so the access-times are not lost (a lost
+        # timestamp would eventually evict a still-used file from the 20-day cache). Use
+        # setdefault so any FRESHER write accumulated during the flush is never overwritten
+        # by our stale snapshot. Runs on the loop with no await before the mutation, so this
+        # is race-free. Re-raise so the flush loop logs it.
+        for key, added in pending.items():
+            _access_updates.setdefault(key, added)
+        raise
+
+
+async def _access_flush_loop() -> None:
+    """Periodically flush the access-time accumulator (runs under _supervised)."""
+    while True:
+        await asyncio.sleep(ACCESS_FLUSH_INTERVAL)
+        try:
+            await _flush_access_updates()
+        except Exception as e:
+            # Log and keep looping: a transient SQLite error must not drop the batch's
+            # successors. (_supervised still restarts us if this ever raises out.)
+            logger.error(f"access_flush_error: {e}")
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     setup_logging(Config["log_level"])
@@ -161,9 +213,11 @@ async def lifespan(_: FastAPI):
     # CRITICAL and restarted, so a crash can no longer silently stop cache sweeping or downloads.
     background_task = asyncio.create_task(_supervised(cache_media_files, "cache_media_files"))
     worker_task = asyncio.create_task(_supervised(background_download_worker, "background_download_worker"))
+    access_flush_task = asyncio.create_task(_supervised(_access_flush_loop, "access_flush_loop"))
     yield
     background_task.cancel() # Cleanup
     worker_task.cancel()
+    access_flush_task.cancel()
     try:
         await background_task
     except asyncio.CancelledError:
@@ -172,6 +226,17 @@ async def lifespan(_: FastAPI):
         await worker_task
     except asyncio.CancelledError:
         pass
+    try:
+        await access_flush_task
+    except asyncio.CancelledError:
+        pass
+    # Final flush AFTER the loop task is cancelled (no race with a loop-driven flush) and
+    # BEFORE the threadpool is shut down (to_thread still has its executor), so the last
+    # <=ACCESS_FLUSH_INTERVAL seconds of access-times are persisted on shutdown.
+    try:
+        await _flush_access_updates()
+    except Exception as e:
+        logger.error(f"access_flush_shutdown_error: {e}")
     await client.stop()
     # Shut the io threadpool down so its threads don't linger past a reload/restart.
     io_executor.shutdown(wait=False)
@@ -538,16 +603,11 @@ async def download_media_file(channel: Union[str, int], post_id: int, file_uniqu
                 logger.error(f"cleanup_error: Failed to remove zero-size cached file {cache_path}: {e}")
             # Do not raise error here, proceed to download below
         else:
-            # File exists and is not zero size, update access timestamp and return
+            # File exists and is not zero size, record access timestamp and return.
+            # Record into the accumulator instead of touching SQLite on the hot path; the
+            # background flush persists it. Key channel as str(channel) — see _access_updates.
             logger.info(f"Found cached media file: {cache_path}")
-            try:
-                await asyncio.to_thread(
-                    update_media_file_access_sync,
-                    DB_PATH, str(channel), post_id, file_unique_id,
-                    datetime.now().timestamp()
-                )
-            except Exception as e:
-                logger.error(f"Failed to update timestamp for {channel}/{post_id}/{file_unique_id}: {str(e)}")
+            _access_updates[(str(channel), post_id, file_unique_id)] = datetime.now().timestamp()
             return cache_path, False
 
     file_id = await find_file_id_in_message(message, file_unique_id)
@@ -1074,17 +1134,9 @@ async def get_media(channel: str, post_id: int, file_unique_id: str, request: Re
             if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
                 # File is already in cache — skip semaphore and serve directly
                 logger.info(f"pre_semaphore_cache_hit: {channel}/{post_id}/{file_unique_id}")
-                # Fire-and-forget timestamp update with error handling to avoid silent failures
-                async def _update_access(_ch, _pid, _fid):
-                    try:
-                        await asyncio.to_thread(
-                            update_media_file_access_sync,
-                            DB_PATH, str(_ch), _pid, _fid,
-                            datetime.now().timestamp()
-                        )
-                    except Exception as _e:
-                        logger.warning(f"Failed to update access time for {_ch}/{_pid}/{_fid}: {_e}")
-                asyncio.create_task(_update_access(channel, post_id, file_unique_id))
+                # Record the access time into the accumulator instead of firing a per-hit
+                # SQLite write. Key channel as str(channel) — see _access_updates.
+                _access_updates[(str(channel), post_id, file_unique_id)] = datetime.now().timestamp()
                 return await prepare_file_response(cache_path, request=request,
                                                    media_key=(str(channel), post_id, file_unique_id))
 
