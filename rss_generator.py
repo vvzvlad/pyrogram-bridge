@@ -22,7 +22,7 @@ from pyrogram import errors, Client
 from pyrogram.types import Message
 from post_parser import PostParser
 from config import get_settings
-from tg_throttle import tg_rpc
+from tg_throttle import tg_rpc_bounded
 from bleach.css_sanitizer import CSSSanitizer
 from bleach import clean as HTMLSanitizer
 
@@ -503,13 +503,10 @@ async def _reply_enrichment(client: Client, messages: list[Message]) -> list[Mes
     for chat_id, chat_msgs in chat_messages.items():
         ids_to_fetch = [m.id for m in chat_msgs]
         try:
-            # Throttle under the global RPC gate and bound the call so a hung
-            # get_messages cannot pin the gate (wait_for wraps the RPC, not the gate entry).
-            async with tg_rpc():
-                fetched = await asyncio.wait_for(
-                    client.get_messages(chat_id, ids_to_fetch),
-                    timeout=Config["tg_rpc_timeout"],
-                )
+            # Throttle under the global RPC gate and bound the call via the shared
+            # tg_rpc_bounded so a hung get_messages cannot pin the gate.
+            async with tg_rpc_bounded(Config["tg_rpc_timeout"]):
+                fetched = await client.get_messages(chat_id, ids_to_fetch)
             # get_messages may return a single Message or a list
             if not isinstance(fetched, list):
                 fetched = [fetched]

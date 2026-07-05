@@ -917,7 +917,12 @@ async def get_raw_post_json(channel: str, post_id: int, request: Request, token:
         if isinstance(channel, str) and channel.startswith('-100'):
             channel_id = int(channel)
             
-        message = await client.client.get_messages(channel_id, post_id)
+        # Bound the RPC (stage-1 DoD: every Telegram RPC has a timeout). This
+        # endpoint is not under the tg_rpc gate, so a hang here only blocks this
+        # one request, but leaving it unbounded still violates the invariant.
+        message = await asyncio.wait_for(
+            client.client.get_messages(channel_id, post_id), timeout=30
+        )
         if not message:
             raise HTTPException(status_code=404, detail="Post not found")
             

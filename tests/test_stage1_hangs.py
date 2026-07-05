@@ -97,9 +97,12 @@ async def test_gate_cancel_during_spacing_releases_permit(monkeypatch):
 async def test_worker_survives_errors_and_balances_task_done(monkeypatch):
     import api_server
 
-    # Speed up the worker's post-download / flood-wait sleeps.
-    async def _fast_sleep(*_a, **_k):
-        return
+    # Record (and skip) the worker's sleeps so we can assert the FloodWait branch
+    # actually backed off — otherwise deleting `except FloodWait` (dropping it into
+    # the generic handler) leaves this test green.
+    sleeps = []
+    async def _fast_sleep(delay=0, *_a, **_k):
+        sleeps.append(delay)
     monkeypatch.setattr(api_server.asyncio, "sleep", _fast_sleep)
 
     # Fresh queue so we don't interfere with (or depend on) module state.
@@ -129,6 +132,13 @@ async def test_worker_survives_errors_and_balances_task_done(monkeypatch):
 
         # The worker stayed alive across the Exception and the FloodWait and drained all items.
         assert processed == ["boom", "flood", "ok"]
+
+        # The FloodWait branch (caught BEFORE the generic Exception) backed off by
+        # min(value + 5, 900) = min(1 + 5, 900) = 6, distinct from the success path's
+        # post-download sleep of 2. Asserting the 6 pins the dedicated branch: if it
+        # were removed (FloodWait falling into `except Exception`), no 6 would appear.
+        assert 6 in sleeps, sleeps  # FloodWait(value=1) -> backoff 6
+        assert 2 in sleeps, sleeps  # "ok" success -> post-download sleep 2
     finally:
         worker.cancel()
         with pytest.raises(asyncio.CancelledError):

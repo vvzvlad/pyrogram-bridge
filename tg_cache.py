@@ -21,7 +21,7 @@ from types import SimpleNamespace
 from typing import Any, Optional, Union, List
 from pyrogram import Client
 from pyrogram.types import Chat, Message
-from tg_throttle import tg_rpc
+from tg_throttle import tg_rpc_bounded
 from config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -141,16 +141,12 @@ async def cached_get_chat_history(client: Client, channel_id: Union[str, int], l
     
     try:
         logger.info(f"history_cache_request: fetching fresh history for channel {channel_id}, limit {limit}")
-        # Hold the global RPC gate only for the live fetch. The paginated `async for`
-        # cannot be wrapped in wait_for directly, so collect it in an inner coroutine
-        # and bound THAT with the timeout. wait_for wraps only the RPC body, never the
-        # gate entry (`async with tg_rpc()`), so legitimate queue backpressure is not
-        # mistaken for a hang.
-        async with tg_rpc():
-            async def _collect():
-                # Full paginated history; bounded by the outer wait_for.
-                return [m async for m in client.get_chat_history(channel_id, limit=limit)]
-            messages = await asyncio.wait_for(_collect(), timeout=Config["tg_rpc_timeout"])
+        # Hold the global RPC gate for the live fetch and bound the RPC body with the
+        # timeout — gate outside, timeout inside — via the shared tg_rpc_bounded (so the
+        # tricky nesting is not re-derived here). The timeout covers the whole paginated
+        # fetch; see the note in tg_rpc_bounded.
+        async with tg_rpc_bounded(Config["tg_rpc_timeout"]):
+            messages = [m async for m in client.get_chat_history(channel_id, limit=limit)]
         await asyncio.to_thread(_save_history_to_cache, channel_id, messages, limit)
         
         return messages
@@ -222,9 +218,8 @@ async def cached_get_chat(client: Client, channel_id: Union[str, int]) -> Simple
         return SimpleNamespace(**cached)
 
     logger.info(f"chatinfo_cache_request: fetching fresh chat info for channel {channel_id}")
-    async with tg_rpc():
-        # Bound the RPC itself, not the gate entry above it.
-        chat = await asyncio.wait_for(client.get_chat(channel_id), timeout=Config["tg_rpc_timeout"])
+    async with tg_rpc_bounded(Config["tg_rpc_timeout"]):
+        chat = await client.get_chat(channel_id)
 
     data = {
         'id': getattr(chat, 'id', None),
