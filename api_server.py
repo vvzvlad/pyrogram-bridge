@@ -15,7 +15,6 @@ import re
 import uuid
 import mimetypes
 from typing import List, Union, Any
-from urllib.parse import quote
 
 import json
 from datetime import datetime
@@ -23,9 +22,9 @@ import time
 from contextlib import asynccontextmanager
 import random
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import uvloop
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.background import BackgroundTask
 import sys
 
@@ -34,14 +33,15 @@ from pyrogram import errors
 from pyrogram.types import Message
 from pyrogram.enums import MessageMediaType
 from fastapi import FastAPI, HTTPException, Response, Request
-from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from telegram_client import TelegramClient
 from config import get_settings, setup_logging
 from rss_generator import generate_channel_rss, generate_channel_html
 from post_parser import PostParser
 from url_signer import verify_media_digest, generate_media_digest
 from file_io import (DB_PATH, init_db_sync, get_all_media_file_ids_sync,
-                     update_media_file_access_sync, remove_media_file_ids_sync,
+                     update_media_file_access_sync, update_media_file_access_bulk_sync,
+                     remove_media_file_ids_sync,
                      get_mime_type_sync, set_mime_type_sync)
 
 # Global python-magic instance for MIME type detection
@@ -51,14 +51,35 @@ magic_mime = magic.Magic(mime=True)
 class ZeroSizeFileError(Exception):
     """Custom exception for zero-size files found or downloaded."""
 
-class RequestLoggingMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        # Log only method and URL at debug level to avoid flooding logs on active RSS polling
-        logger.debug(f"Request: {request.method} {request.url}")
+class RequestLoggingMiddleware:
+    """Pure-ASGI request logger (no BaseHTTPMiddleware).
+
+    BaseHTTPMiddleware runs the downstream app in a separate anyio task and pumps the
+    response through an in-memory stream, which adds per-request overhead and interacts
+    badly with streaming bodies, background tasks and client cancellation. This plain
+    ASGI middleware only wraps `send` to observe the response status line, so it never
+    buffers the body — the FileResponse stream flows straight through untouched.
+    """
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        # Log only method and path (with query, matching the old request.url logging) at
+        # debug level to avoid flooding logs on active RSS polling.
+        _qs = scope.get("query_string") or b""
+        _path = scope["path"] + (f"?{_qs.decode('latin-1')}" if _qs else "")
+        logger.debug(f"Request: {scope['method']} {_path}")
+
+        async def send_wrapper(message):
+            if message["type"] == "http.response.start":
+                logger.debug(f"Response status: {message['status']}")
+            await send(message)
+
         try:
-            response = await call_next(request)
-            logger.debug(f"Response status: {response.status_code}")
-            return response
+            await self.app(scope, receive, send_wrapper)
         except Exception as e:
             logger.error(f"Request processing error: {str(e)}")
             raise
@@ -71,6 +92,22 @@ Config = get_settings()
 HTTP_DOWNLOAD_SEMAPHORE = asyncio.Semaphore(3)  # semaphore for live HTTP media requests
 BACKGROUND_DOWNLOAD_SEMAPHORE = asyncio.Semaphore(2)  # semaphore for background cache worker
 download_queue = asyncio.Queue(maxsize=100)
+# How stale a temp_* file's mtime must be before a serve refreshes it (keeps the 1h
+# sweeper from deleting an actively-viewed video). Well below 1h so the file stays alive,
+# but large enough that the mtime — and thus FileResponse's ETag — is stable within any
+# such window; a view running longer than one interval costs at most one safe 200
+# If-Range restart per interval (a full re-fetch, never corruption).
+TEMP_MTIME_REFRESH_INTERVAL = 300  # seconds
+
+# In-flight download dedup registry: maps (channel, post_id, file_unique_id) to the
+# shared Future of an ongoing download. The FIRST request for a key runs the download in
+# a DETACHED task and shares its Future; concurrent requests await that Future instead of
+# starting their own download. Detaching the download means a client disconnecting (which
+# cancels its request coroutine) can never cancel the download nor leave the Future
+# forever-pending — so waiters can't hang. See _download_deduped.
+_inflight: dict[tuple[str, int, str], asyncio.Future] = {}
+# Strong refs to detached download tasks so they are not garbage-collected mid-flight.
+_inflight_tasks: set[asyncio.Task] = set()
 
 async def _supervised(factory, name: str, min_restart_interval: float = 60.0):
     """Run factory() forever, restarting it if it dies with a non-cancellation error.
@@ -103,11 +140,70 @@ async def _supervised(factory, name: str, min_restart_interval: float = 60.0):
             await asyncio.sleep(min_restart_interval - elapsed)
 
 
+# Access-time write accumulator. A /media cache hit used to touch SQLite on the hot path
+# (a threadpool hop + connect + UPDATE per request), which starves the threadpool under
+# active RSS polling. Instead a cache hit just records the timestamp here — a dict write
+# on the single-threaded event loop is cheap and atomic — and a periodic background task
+# flushes the whole batch to SQLite in one executemany. Keys use str(channel) to stay
+# consistent with the string form written at insert time and to not lean on SQLite's
+# implicit column-affinity coercion (the channel column is TEXT, so a bound int would be
+# coerced and still match — but we key the accumulator by the same type we store, rather
+# than depend on that).
+ACCESS_FLUSH_INTERVAL = 60  # seconds between access-time flushes
+_access_updates: dict[tuple[str, int, str], float] = {}
+
+
+async def _flush_access_updates() -> None:
+    """Flush the accumulated access timestamps to SQLite in one bulk UPDATE.
+
+    Snapshot-then-clear atomically on the loop: capture the current dict reference and
+    replace the module global with a fresh empty dict in ONE synchronous step (before any
+    await), so cache-hit writes arriving DURING the flush land in the new dict and are not
+    lost. The bulk UPDATE runs off-loop via asyncio.to_thread. An empty batch is a no-op.
+    """
+    global _access_updates
+    if not _access_updates:
+        return
+    pending = _access_updates
+    _access_updates = {}
+    entries = [(channel, post_id, file_unique_id, added)
+               for (channel, post_id, file_unique_id), added in pending.items()]
+    try:
+        await asyncio.to_thread(update_media_file_access_bulk_sync, DB_PATH, entries)
+    except Exception:
+        # Bulk write failed: re-queue this batch so the access-times are not lost (a lost
+        # timestamp would eventually evict a still-used file from the 20-day cache). Use
+        # setdefault so any FRESHER write accumulated during the flush is never overwritten
+        # by our stale snapshot. Runs on the loop with no await before the mutation, so this
+        # is race-free. Re-raise so the flush loop logs it.
+        for key, added in pending.items():
+            _access_updates.setdefault(key, added)
+        raise
+
+
+async def _access_flush_loop() -> None:
+    """Periodically flush the access-time accumulator (runs under _supervised)."""
+    while True:
+        await asyncio.sleep(ACCESS_FLUSH_INTERVAL)
+        try:
+            await _flush_access_updates()
+        except Exception as e:
+            # Log and keep looping: a transient SQLite error must not drop the batch's
+            # successors. (_supervised still restarts us if this ever raises out.)
+            logger.error(f"access_flush_error: {e}")
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     setup_logging(Config["log_level"])
 
-    
+    # Enlarge the default threadpool: SQLite/python-magic/pickle/os.walk all run via
+    # asyncio.to_thread, and the interpreter default (min(32, cpu+4) = 5-6 on a 1-2 CPU
+    # container) is too small under load. Configurable via IO_THREAD_POOL_SIZE.
+    loop = asyncio.get_running_loop()
+    io_executor = ThreadPoolExecutor(max_workers=Config["io_thread_pool_size"], thread_name_prefix="io")
+    loop.set_default_executor(io_executor)
+
     base_cache_dir = os.path.abspath("./data/cache")
     os.makedirs(base_cache_dir, exist_ok=True) # Create cache directory
 
@@ -119,9 +215,11 @@ async def lifespan(_: FastAPI):
     # CRITICAL and restarted, so a crash can no longer silently stop cache sweeping or downloads.
     background_task = asyncio.create_task(_supervised(cache_media_files, "cache_media_files"))
     worker_task = asyncio.create_task(_supervised(background_download_worker, "background_download_worker"))
+    access_flush_task = asyncio.create_task(_supervised(_access_flush_loop, "access_flush_loop"))
     yield
     background_task.cancel() # Cleanup
     worker_task.cancel()
+    access_flush_task.cancel()
     try:
         await background_task
     except asyncio.CancelledError:
@@ -130,7 +228,20 @@ async def lifespan(_: FastAPI):
         await worker_task
     except asyncio.CancelledError:
         pass
+    try:
+        await access_flush_task
+    except asyncio.CancelledError:
+        pass
+    # Final flush AFTER the loop task is cancelled (no race with a loop-driven flush) and
+    # BEFORE the threadpool is shut down (to_thread still has its executor), so the last
+    # <=ACCESS_FLUSH_INTERVAL seconds of access-times are persisted on shutdown.
+    try:
+        await _flush_access_updates()
+    except Exception as e:
+        logger.error(f"access_flush_shutdown_error: {e}")
     await client.stop()
+    # Shut the io threadpool down so its threads don't linger past a reload/restart.
+    io_executor.shutdown(wait=False)
 
 app = FastAPI(title="Pyrogram Bridge", lifespan=lifespan)
 app.add_middleware(RequestLoggingMiddleware)
@@ -234,9 +345,43 @@ async def delayed_delete_file(file_path: str, delay: int = 300) -> None:
 
 
 async def prepare_file_response(file_path: str, request: Request, delete_after: bool = False,
-                                media_key: tuple[str, int, str] | None = None) -> StreamingResponse:
-    """Prepare a streaming file response with HTTP Range request support."""
-    if not os.path.exists(file_path):
+                                media_key: tuple[str, int, str] | None = None) -> Response:
+    """Serve a cached media file via Starlette's FileResponse.
+
+    FileResponse handles Range/If-Range/206/416/multipart and sets
+    Accept-Ranges/ETag/Last-Modified itself, and reads the file efficiently (no per-64KB
+    to_thread hop that starved the threadpool). We keep: the early 404 pre-check, the MIME
+    logic (python-magic + SQLite type cache), the stage-2 temp_* mtime touch, and the
+    delete_after BackgroundTask.
+    """
+    # `request` is unused now that FileResponse parses the Range header itself, but the
+    # signature is kept for call-site compatibility (and future needs).
+
+    # Keep an actively-viewed large-video temp file alive: refresh its mtime so the 1h
+    # sweeper (which deletes temp_* by mtime) won't remove it out from under a viewer.
+    # DEBOUNCED: FileResponse derives ETag/Last-Modified from mtime, so touching on EVERY
+    # serve would change the validators per request. We only refresh when the mtime is
+    # already older than TEMP_MTIME_REFRESH_INTERVAL — far below the 1h sweeper window, so
+    # the file stays alive, and the ETag is stable within any such window (a view running
+    # longer than one interval costs at most one safe 200 If-Range restart per interval).
+    if os.path.basename(file_path).startswith("temp_"):
+        try:
+            age = time.time() - await asyncio.to_thread(os.path.getmtime, file_path)
+            if age > TEMP_MTIME_REFRESH_INTERVAL:
+                await asyncio.to_thread(os.utime, file_path, None)
+        except OSError as e:
+            logger.debug(f"Failed to refresh mtime for {file_path}: {e}")
+
+    # Take ONE authoritative stat and hand it to FileResponse as stat_result. This both
+    # (a) preserves the 404 semantics: FileResponse with stat_result=None re-stats at
+    # send-time and raises a RuntimeError (-> 500, escaping this handler's try/except) if
+    # the file was swept between here and the send; and (b) makes the ETag/Last-Modified
+    # reflect exactly the mtime observed after the optional touch above. The remaining
+    # narrow window (deleted between this stat and FileResponse's own open) truncates the
+    # body — that pre-existed the FileResponse migration and is not handled here.
+    try:
+        stat_result = await asyncio.to_thread(os.stat, file_path)
+    except FileNotFoundError:
         raise HTTPException(status_code=404, detail="File not found")
 
     media_type: str | None = None
@@ -263,109 +408,119 @@ async def prepare_file_response(file_path: str, request: Request, delete_after: 
 
     logger.debug(f"Determined media type for {os.path.basename(file_path)}: {media_type}")
 
-    try:
-        total_size = os.path.getsize(file_path)
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="File not found")
-    range_header = request.headers.get("range")
-
-    if range_header:
-        # Parse Range header according to RFC 7233
-        try:
-            range_value = range_header.strip()
-            if not range_value.startswith("bytes="):
-                raise ValueError("Only bytes ranges are supported")
-            range_spec = range_value[len("bytes="):]
-            if range_spec.startswith("-"):
-                # Suffix range: bytes=-N (last N bytes)
-                suffix_length = int(range_spec[1:])
-                start = max(0, total_size - suffix_length)
-                end = total_size - 1
-            elif range_spec.endswith("-"):
-                # Open-ended range: bytes=START-
-                start = int(range_spec[:-1])
-                end = total_size - 1
-            else:
-                # Full range: bytes=START-END
-                start_str, end_str = range_spec.split("-", 1)
-                start = int(start_str)
-                end = int(end_str)
-        except (ValueError, IndexError) as e:
-            logger.debug(f"Invalid Range header '{range_header}': {e}")
-            return Response(
-                status_code=416,
-                headers={"Content-Range": f"bytes */{total_size}"}
-            )
-
-        # Clamp end to file size - 1 (RFC 7233 allows end >= total_size)
-        end = min(end, total_size - 1)
-
-        # If start is beyond file size, return 416
-        if start >= total_size:
-            return Response(
-                status_code=416,
-                headers={"Content-Range": f"bytes */{total_size}"}
-            )
-
-        content_length = end - start + 1
-        status_code = 206
-        headers = {
-            "Content-Disposition": (
-                f"inline; filename=\"{os.path.basename(file_path)}\"; "
-                f"filename*=UTF-8''{quote(os.path.basename(file_path))}"
-            ),
-            # Files are addressed by file_unique_id which is immutable in Telegram,
-            # so it is safe to cache them aggressively on the client side.
-            "Cache-Control": "public, max-age=86400, immutable",
-            "Accept-Ranges": "bytes",
-            "Content-Range": f"bytes {start}-{end}/{total_size}",
-            "Content-Length": str(content_length),
-        }
-    else:
-        # No Range header — serve full file with status 200
-        start = 0
-        end = total_size - 1
-        status_code = 200
-        headers = {
-            "Content-Disposition": (
-                f"inline; filename=\"{os.path.basename(file_path)}\"; "
-                f"filename*=UTF-8''{quote(os.path.basename(file_path))}"
-            ),
-            # Files are addressed by file_unique_id which is immutable in Telegram,
-            # so it is safe to cache them aggressively on the client side.
-            "Cache-Control": "public, max-age=86400, immutable",
-            "Accept-Ranges": "bytes",
-            "Content-Length": str(total_size),
-        }
-
-    chunk_size = 64 * 1024  # 64 KB chunks
-
-    async def file_chunk_generator():
-        """Async generator that reads file in chunks; each chunk is a separate open/seek/read/close."""
-        bytes_remaining = end - start + 1
-        offset = start
-        while bytes_remaining > 0:
-            to_read = min(chunk_size, bytes_remaining)
-            def read_at(path, off, size):
-                # Open, seek, read, and close within a single thread call to avoid fd leaks
-                with open(path, "rb") as f:
-                    f.seek(off)
-                    return f.read(size)
-            data = await asyncio.to_thread(read_at, file_path, offset, to_read)
-            if not data:
-                break
-            bytes_remaining -= len(data)
-            offset += len(data)
-            yield data
-
+    # Delete the temporary file once the response has been fully sent (stage-2 delete_after).
+    # FileResponse runs this BackgroundTask after streaming the body.
     background = BackgroundTask(delayed_delete_file, file_path) if delete_after else None
-    return StreamingResponse(
-        content=file_chunk_generator(),
-        status_code=status_code,
+
+    # FileResponse handles Range/If-Range/206/416/multipart and sets
+    # Accept-Ranges/ETag/Last-Modified itself (from the stat_result we pass). Do NOT
+    # hand-build Content-Disposition: FileResponse forms it from filename= —
+    # `inline; filename="x"` for an ASCII name, adding `filename*=UTF-8''x` only for a
+    # non-ASCII name. It uses setdefault, so a manual header would OVERRIDE it, not double
+    # it; letting FileResponse own it keeps the RFC 5987 encoding correct.
+    #
+    # Files are addressed by file_unique_id which is immutable in Telegram, so it is safe
+    # to cache them aggressively on the client side.
+    return FileResponse(
+        file_path,
         media_type=media_type,
-        headers=headers,
+        filename=os.path.basename(file_path),
+        content_disposition_type="inline",
+        stat_result=stat_result,
+        headers={"Cache-Control": "public, max-age=86400, immutable"},
         background=background,
     )
+
+def _media_download_timeout(file_size: int) -> float:
+    """Scale the download timeout with file size.
+
+    Effective floor of `media_download_min_speed` bytes/s (timeout ≈ size / min_speed),
+    clamped to [media_download_timeout_min, media_download_timeout_max] seconds.
+    A non-positive/unknown size falls back to the minimum timeout.
+    """
+    min_t = Config["media_download_timeout_min"]
+    max_t = Config["media_download_timeout_max"]
+    min_speed = Config["media_download_min_speed"]
+    if file_size <= 0 or min_speed <= 0:
+        return float(min_t)
+    return float(min(max_t, max(min_t, file_size // min_speed)))
+
+
+async def _download_atomic(file_id: str, final_path: str, timeout: float) -> str:
+    """Download a media file through a unique partial path and atomically publish it.
+
+    Invariant enforced here: a file that exists at a FINAL name (`{file_unique_id}` or
+    `temp_{file_unique_id}`) is ALWAYS complete. The downloader only ever writes to a
+    unique `{final_path}.part.{hex}` path; the file appears at its final name solely via
+    os.rename (atomic on POSIX). The finally block ALWAYS removes our partial (on timeout,
+    cancel, zero-size, or losing a rename race), so no stub is ever served or left behind.
+
+    Raises ZeroSizeFileError if the download produced a missing/zero-size file.
+    """
+    part_path = f"{final_path}.part.{uuid.uuid4().hex}"
+    try:
+        await client.safe_download_media(file_id, part_path, timeout=timeout)
+        if not os.path.exists(part_path) or os.path.getsize(part_path) == 0:
+            raise ZeroSizeFileError(
+                f"Downloaded file for {final_path} is zero size or missing after download attempt."
+            )
+        # Publish atomically, but only if nobody else already produced the final file
+        # (a concurrent request that won the race). rename is atomic on POSIX.
+        if not os.path.exists(final_path):
+            os.rename(part_path, final_path)
+        return final_path
+    finally:
+        # Always clean up our partial: timeout, cancellation, zero-size, or race loser
+        # (rename skipped because final_path already existed).
+        if os.path.exists(part_path):
+            try:
+                os.remove(part_path)
+            except OSError as e:
+                logger.warning(f"cleanup_error: Failed to remove partial file {part_path}: {e}")
+
+
+async def _download_deduped(channel: Union[str, int], post_id: int, file_unique_id: str) -> tuple[Union[str, None], bool]:
+    """Deduplicate concurrent downloads of the same media by (channel, post_id, fid).
+
+    The first request for a key runs download_media_file in a DETACHED task and shares its
+    Future; concurrent requests await the same Future (bounded by wait_for). The detached
+    task sets the Future's result/exception (on success/failure) and its finally ALWAYS
+    pops the key — so both happen before the task ends: a completed Future never leaves the
+    key stuck, and a client disconnect (cancelling only the awaiting request coroutine) can
+    neither cancel the download nor hang other waiters.
+    """
+    key = (str(channel), post_id, file_unique_id)
+    fut = _inflight.get(key)
+    if fut is None:
+        loop = asyncio.get_running_loop()
+        fut = loop.create_future()
+        _inflight[key] = fut
+
+        async def _runner():
+            try:
+                result = await download_media_file(channel, post_id, file_unique_id)
+                if not fut.done():
+                    fut.set_result(result)
+            except BaseException as e:  # noqa: BLE001 — must forward ANY failure to waiters
+                if not fut.done():
+                    fut.set_exception(e)
+            finally:
+                _inflight.pop(key, None)
+
+        task = asyncio.create_task(_runner())
+        _inflight_tasks.add(task)
+        task.add_done_callback(_inflight_tasks.discard)
+        # Retrieve the exception in a done-callback to silence "exception was never
+        # retrieved" if every waiter disconnects before awaiting the Future.
+        fut.add_done_callback(lambda f: f.cancelled() or f.exception())
+
+    # Waiter timeout: a generous safety net above the maximum per-download timeout (the
+    # download is itself internally bounded), so a live download always completes first.
+    waiter_timeout = float(Config["media_download_timeout_max"]) + 120.0
+    # shield so a timed-out / cancelled waiter does NOT cancel the shared Future that the
+    # detached task owns and other waiters depend on.
+    return await asyncio.wait_for(asyncio.shield(fut), timeout=waiter_timeout)
+
 
 async def download_media_file(channel: Union[str, int], post_id: int, file_unique_id: str) -> tuple[Union[str, None], bool]:
     """
@@ -410,18 +565,27 @@ async def download_media_file(channel: Union[str, int], post_id: int, file_uniqu
             logger.error(f"Failed to get video file size for message {post_id}: {str(e)}")
     
     if is_large_video:
-        # For large video, download without permanent caching; use a temporary file
+        # For large video, download without permanent caching; use a temporary file.
         temp_file_path = os.path.join(post_dir, f"temp_{file_unique_id}")
-        if os.path.exists(temp_file_path):
+        # A temp_{fid} file now only ever appears via atomic rename (see _download_atomic),
+        # so its presence GUARANTEES a complete file — serve it directly.
+        if os.path.exists(temp_file_path) and os.path.getsize(temp_file_path) > 0:
             logger.info(f"Temporary file {temp_file_path} already exists, serving cached large video")
             return temp_file_path, False
         file_id = await find_file_id_in_message(message, file_unique_id)
         if not file_id:
             logger.error(f"Media with file_unique_id {file_unique_id} not found in message {post_id}")
             raise HTTPException(status_code=404, detail="File not found in message")
-        logger.info(f"Downloading large video file {file_unique_id} to temporary path {temp_file_path}")
+        # Scale the timeout with size (≈256 KB/s floor) so slow big-video downloads aren't
+        # cut short at the fixed 120s used for regular files.
         try:
-            file_path = await client.safe_download_media(file_id, temp_file_path)
+            file_size = int(message.video.file_size or 0)
+        except Exception:
+            file_size = 0
+        timeout = _media_download_timeout(file_size)
+        logger.info(f"Downloading large video file {file_unique_id} to temporary path {temp_file_path} (timeout={timeout:.0f}s)")
+        try:
+            file_path = await _download_atomic(file_id, temp_file_path, timeout)
         except asyncio.TimeoutError:
             logger.error(f"Timeout downloading large video {file_unique_id}")
             raise HTTPException(status_code=504, detail="Download timeout")
@@ -441,16 +605,11 @@ async def download_media_file(channel: Union[str, int], post_id: int, file_uniqu
                 logger.error(f"cleanup_error: Failed to remove zero-size cached file {cache_path}: {e}")
             # Do not raise error here, proceed to download below
         else:
-            # File exists and is not zero size, update access timestamp and return
+            # File exists and is not zero size, record access timestamp and return.
+            # Record into the accumulator instead of touching SQLite on the hot path; the
+            # background flush persists it. Key channel as str(channel) — see _access_updates.
             logger.info(f"Found cached media file: {cache_path}")
-            try:
-                await asyncio.to_thread(
-                    update_media_file_access_sync,
-                    DB_PATH, str(channel), post_id, file_unique_id,
-                    datetime.now().timestamp()
-                )
-            except Exception as e:
-                logger.error(f"Failed to update timestamp for {channel}/{post_id}/{file_unique_id}: {str(e)}")
+            _access_updates[(str(channel), post_id, file_unique_id)] = datetime.now().timestamp()
             return cache_path, False
 
     file_id = await find_file_id_in_message(message, file_unique_id)
@@ -470,46 +629,17 @@ async def download_media_file(channel: Union[str, int], post_id: int, file_uniqu
 
         raise HTTPException(status_code=404, detail="File not found in message")
 
-    # Use a unique temp path to avoid race conditions when concurrent requests download the same file
-    temp_path = cache_path + f".tmp.{uuid.uuid4().hex}"
+    # Download through a unique `.part.` file and atomically publish to the final cache
+    # path. _download_atomic owns the zero-size check, the race-loser cleanup, and the
+    # rename-only-if-absent logic, keeping the "final name = complete file" invariant.
     try:
-        file_path = await client.safe_download_media(file_id, temp_path)
+        file_path = await _download_atomic(file_id, cache_path, timeout=float(Config["media_download_timeout_min"]))
     except asyncio.TimeoutError:
         logger.error(f"Timeout downloading media {file_unique_id}")
-        # Clean up the temp file if it was created
-        if os.path.exists(temp_path):
-            try:
-                os.remove(temp_path)
-            except OSError:
-                pass
         raise HTTPException(status_code=504, detail="Download timeout")
 
-    # Check if the downloaded temp file exists and has a size greater than zero
-    if not file_path or not os.path.exists(temp_path) or os.path.getsize(temp_path) == 0:
-        logger.error(f"download_failed_zero_size: Downloaded file {file_unique_id} for {channel}/{post_id} is zero size or missing.")
-        # Attempt to clean up the invalid temp file
-        if os.path.exists(temp_path):
-            try:
-                os.remove(temp_path)
-                logger.info(f"Removed zero-size temp file: {temp_path}")
-            except OSError as e:
-                logger.error(f"cleanup_error: Failed to remove zero-size temp file {temp_path}: {e}")
-        # Raise specific error to indicate download failure
-        raise ZeroSizeFileError(f"Downloaded file {file_unique_id} for {channel}/{post_id} is zero size or missing after download attempt.")
-
-    # Atomic rename: if another concurrent request already wrote the final file, discard our temp copy
-    if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
-        logger.info(f"Concurrent download already completed for {file_unique_id}, discarding temp file")
-        try:
-            os.remove(temp_path)
-        except OSError as e:
-            logger.warning(f"cleanup_error: Failed to remove temp file {temp_path}: {e}")
-        return cache_path, False
-
-    # Atomically move temp file to final cache path (atomic on POSIX)
-    os.rename(temp_path, cache_path)
     logger.info(f"Downloaded media file {file_unique_id} to {cache_path}")
-    return cache_path, False
+    return file_path, False
 
 
 def remove_old_cached_files_sync(media_files: list, cache_dir: str) -> tuple[list, int]:
@@ -565,8 +695,9 @@ def remove_old_cached_files_sync(media_files: list, cache_dir: str) -> tuple[lis
     for root, _, files in os.walk(cache_dir):
         for file in files:
             is_large_video_temp = file.startswith("temp_")
-            # Match exactly the format generated in download_media_file: {name}.tmp.{32 hex chars}
-            is_race_temp = bool(re.match(r'^.+\.tmp\.[0-9a-f]{32}$', file))
+            # Match the partial-download suffixes: the new `.part.{32 hex}` and the legacy
+            # `.tmp.{32 hex}` (old stubs may still be on disk after the rename to .part.).
+            is_race_temp = bool(re.match(r'^.+\.(part|tmp)\.[0-9a-f]{32}$', file))
             if not (is_large_video_temp or is_race_temp):
                 continue
             file_path = os.path.join(root, file)
@@ -934,6 +1065,46 @@ async def get_raw_post_json(channel: str, post_id: int, request: Request, token:
         raise HTTPException(status_code=500, detail=error_message) from e
 
 
+@app.get("/ping")
+async def ping() -> JSONResponse:
+    """Lightweight liveness probe for the container healthcheck.
+
+    Reflects process/event-loop liveness (always answers in microseconds) and TG liveness
+    from the watchdog's last-probe data. It MUST NOT issue any Telegram RPC (no get_me,
+    no safe_get_messages), touch SQLite, or walk the filesystem — that is the whole point:
+    it stays instant and truthful even while a real TG RPC is hung. It only reads the
+    already-recorded watchdog timestamp and the is_connected bool.
+    """
+    age = client.watchdog_last_ok_age()          # seconds since last OK probe, None if never
+    # is_connected is None before client.start() and a bool afterwards; coerce so the JSON
+    # "connected" field is always a bool (never null) and the pre-start window reports false.
+    connected = bool(client.client.is_connected)
+    threshold = Config["tg_ping_unhealthy_after"]
+    # age is None right after boot: the watchdog hasn't run its first probe yet. Treat that
+    # as healthy (gate on connected only) so a freshly-started container is not killed before
+    # its first probe cycle — otherwise start_period would have to cover a full watchdog interval.
+    #
+    # The staleness branch (age >= threshold => degraded) is only meaningful while the watchdog
+    # is running to refresh age. With the watchdog DISABLED (TG_WATCHDOG_ENABLED=false) nothing
+    # refreshes age — yet a disconnect-flap restart can still stamp it once (see _restart_client,
+    # which runs before the watchdog-enabled gate), after which age only grows. Letting that
+    # stale age drive /ping to 503 would spuriously fail the container healthcheck on a live
+    # connection and trigger an autoheal restart. So gate staleness on the watchdog being on;
+    # with it off, /ping is a pure connectivity check (no zombie-session detection — that
+    # TG-liveness signal only exists while the watchdog runs).
+    healthy = connected and (
+        not Config["tg_watchdog_enabled"] or age is None or age < threshold
+    )
+    return JSONResponse(
+        {
+            "status": "ok" if healthy else "degraded",
+            "connected": connected,
+            "last_probe_age_s": round(age, 1) if age is not None else None,
+            "threshold_s": threshold,
+        },
+        status_code=200 if healthy else 503,
+    )
+
 @app.get("/health")
 @app.get("/health/{token}")
 async def health_check(request: Request, token: str | None = None) -> Response:
@@ -979,7 +1150,7 @@ async def health_check(request: Request, token: str | None = None) -> Response:
 
 @app.get("/media/{channel}/{post_id}/{file_unique_id}/{digest}", response_model=None)
 @app.get("/media/{channel}/{post_id}/{file_unique_id}", response_model=None)
-async def get_media(channel: str, post_id: int, file_unique_id: str, request: Request, digest: str | None = None) -> StreamingResponse|Response:
+async def get_media(channel: str, post_id: int, file_unique_id: str, request: Request, digest: str | None = None) -> Response:
     try:
         url = f"{channel}/{post_id}/{file_unique_id}"
         if not verify_media_digest(url, digest):
@@ -1005,29 +1176,46 @@ async def get_media(channel: str, post_id: int, file_unique_id: str, request: Re
             if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
                 # File is already in cache — skip semaphore and serve directly
                 logger.info(f"pre_semaphore_cache_hit: {channel}/{post_id}/{file_unique_id}")
-                # Fire-and-forget timestamp update with error handling to avoid silent failures
-                async def _update_access(_ch, _pid, _fid):
-                    try:
-                        await asyncio.to_thread(
-                            update_media_file_access_sync,
-                            DB_PATH, str(_ch), _pid, _fid,
-                            datetime.now().timestamp()
-                        )
-                    except Exception as _e:
-                        logger.warning(f"Failed to update access time for {_ch}/{_pid}/{_fid}: {_e}")
-                asyncio.create_task(_update_access(channel, post_id, file_unique_id))
+                # Record the access time into the accumulator instead of firing a per-hit
+                # SQLite write. Key channel as str(channel) — see _access_updates.
+                _access_updates[(str(channel), post_id, file_unique_id)] = datetime.now().timestamp()
                 return await prepare_file_response(cache_path, request=request,
                                                    media_key=(str(channel), post_id, file_unique_id))
 
             _sem_wait_start = _time.monotonic()
-            async with HTTP_DOWNLOAD_SEMAPHORE:  # limit concurrent live HTTP downloads
+            # Bound the wait for a live-download permit: a saturated semaphore must not
+            # hang the request indefinitely. wait_for wraps ONLY the acquire; the permit
+            # is released in the finally below only if the acquire actually succeeded (a
+            # timed-out acquire never holds a permit, so it must not release one).
+            #
+            # CONSCIOUS TRADE-OFF (stage-2 review): the permit is held by the REQUEST, not
+            # the detached download task. So this bounds concurrent *requests* (admission
+            # control with a fast 503 on saturation), not strictly concurrent *downloads*:
+            # if a client disconnects, its request coroutine releases the permit while the
+            # detached download keeps running, so a burst of disconnects across DIFFERENT
+            # files can transiently exceed the limit of live Telegram downloads. This is
+            # deliberate — the download surviving a disconnect is the whole point of the
+            # in-flight registry, and moving the permit into the runner would forfeit the
+            # fast 503 (a saturated request would instead hang on the future for up to the
+            # waiter timeout). Each download is itself timeout-bounded, so the overrun is
+            # transient. If prod observation (stage 7) shows real download-count overrun
+            # under disconnect churn, strengthen with a separate download-side limiter.
+            try:
+                await asyncio.wait_for(HTTP_DOWNLOAD_SEMAPHORE.acquire(), timeout=30)
+            except asyncio.TimeoutError:
+                logger.warning(f"http_semaphore_timeout: {channel}/{post_id}/{file_unique_id} waited >30s for HTTP_DOWNLOAD_SEMAPHORE")
+                return Response(status_code=503, content="Server busy, please retry",
+                                headers={"Retry-After": "30"})
+            try:
                 _sem_wait = _time.monotonic() - _sem_wait_start
                 if _sem_wait > 0.5:
                     logger.warning(f"diag_semaphore_wait: {channel}/{post_id}/{file_unique_id} waited {_sem_wait:.3f}s for HTTP_DOWNLOAD_SEMAPHORE")
                 _dl_start = _time.monotonic()
-                file_path, delete_after = await download_media_file(channel_id, post_id, file_unique_id)
+                file_path, delete_after = await _download_deduped(channel_id, post_id, file_unique_id)
                 _dl_elapsed = _time.monotonic() - _dl_start
                 logger.info(f"diag_download_timing: {channel}/{post_id}/{file_unique_id} download_media_file took {_dl_elapsed:.3f}s (semaphore_wait={_sem_wait:.3f}s)")
+            finally:
+                HTTP_DOWNLOAD_SEMAPHORE.release()
             if not file_path:
                 raise HTTPException(status_code=404, detail="File not found")
             if file_path:
@@ -1043,6 +1231,13 @@ async def get_media(channel: str, post_id: int, file_unique_id: str, request: Re
             
     except HTTPException:
         raise
+    except errors.FloodWait as e:
+        # MUST precede `except errors.RPCError` (FloodWait subclasses RPCError): a temporary
+        # Telegram throttle must return a retryable 429, never a permanent 404.
+        retry_after = min(int(e.value) + random.randint(1, 30), 300)
+        logger.warning(f"media_flood_wait: {channel}/{post_id}/{file_unique_id} retry after {retry_after}s")
+        return Response(status_code=429, content="Telegram flood wait",
+                        headers={"Retry-After": str(retry_after)})
     except errors.RPCError as e:
         logger.error(f"Media request RPC error for {channel}/{post_id}/{file_unique_id}: {type(e).__name__} - {str(e)}")
         raise HTTPException(status_code=404, detail="File not found in Telegram") from e

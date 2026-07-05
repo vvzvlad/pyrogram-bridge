@@ -21,15 +21,12 @@ from pyrogram.enums import MessageMediaType
 from bleach.css_sanitizer import CSSSanitizer   
 from bleach import clean as HTMLSanitizer
 from config import get_settings
-from file_io import upsert_media_file_id_sync, DB_PATH
+from file_io import upsert_media_file_ids_bulk_sync, DB_PATH
 from url_signer import generate_media_digest
 
 Config = get_settings()
 
 logger = logging.getLogger(__name__)
-
-# Module-level counter for in-flight persist tasks (used only in diagnostics)
-_persist_pending_count = 0
 
 
 #tests
@@ -65,6 +62,12 @@ _persist_pending_count = 0
 class PostParser:
     def __init__(self, client):
         self.client = client
+        # Media file-id records collected during rendering. _save_media_file_ids
+        # appends (channel, post_id, file_unique_id, ts) tuples here instead of
+        # touching asyncio/DB directly (see 4.2). A fresh PostParser is created per
+        # request and rendering runs in a single thread, so this list is thread-safe.
+        # The caller flushes it once via upsert_media_file_ids_bulk_sync after render.
+        self._pending_media_ids: List[tuple] = []
 
     @staticmethod
     def get_all_possible_flags() -> List[str]:
@@ -106,7 +109,14 @@ class PostParser:
                 logger.error(f"post_not_found_or_empty: channel {prepared_channel_id}, post_id {post_id}")
                 return None
             
-            processed_message = self.process_message(message)
+            # Single-post outputs need sanitized body/footer (no whole-feed pass exists here).
+            # raw_message is only needed for JSON output and for debug HTML.
+            include_raw = (output_type == 'json') or debug
+            processed_message = self.process_message(message, include_raw=include_raw, sanitize=True)
+
+            # Flush media file-id records collected during rendering with a single bulk upsert.
+            await self._flush_pending_media_ids()
+
             if output_type == 'html':
                 return self._format_html(processed_message, debug)
             elif output_type == 'json':
@@ -480,11 +490,15 @@ class PostParser:
         html_content.append(f'<div class="message-body">{data["html"]["body"]}</div>')
         html_content.append(f'<div class="message-footer">{data["html"]["footer"]}</div>')
         
-        # Add raw JSON debug output if debug is enabled
+        # Add raw JSON debug output if debug is enabled.
+        # raw_message is the full str(message) serialization and may contain user-controlled
+        # text with HTML/JS — escape it before dropping it into the <pre> (bleach can't run
+        # here because <pre> is not in the allowed-tags whitelist and would be stripped).
         if debug:
+            raw_escaped = html.escape(str(data.get("raw_message", "")))
             html_content.append(f'<pre class="debug-json" style="background: #f5f5f5;'
                                 f'padding: 10px; margin-top: 20px; overflow-x: auto; font-size: 10px;'
-                                f'white-space: pre-wrap;">{data["raw_message"]}</pre>')
+                                f'white-space: pre-wrap;">{raw_escaped}</pre>')
         html_data = '\n'.join(html_content)
         return html_data
 
@@ -500,11 +514,39 @@ class PostParser:
         
         return return_html
 
-    def process_message(self, message: Message) -> Dict[Any, Any]:
-        # Compute html body once — avoids triple _generate_html_body calls
+    def process_message(self, message: Message, include_raw: bool = False, sanitize: bool = True) -> Dict[Any, Any]:
+        """Build the processed representation of a message.
+
+        Args:
+            message: the Pyrogram message.
+            include_raw: when True, compute the (expensive) full ``str(message)``
+                serialization into ``result['raw_message']``. Only JSON output and
+                debug HTML need it; feed generation must pass False to avoid
+                serializing every post.
+            sanitize: when True, run the html body and footer through a single
+                bleach pass each. Single-post HTML and JSON need this (there is no
+                whole-feed pass on those paths). Feed generation passes False and
+                relies on the final sanitize in rss_generator (per-post for RSS,
+                whole-feed for HTML), so no
+                fragment is sanitized more than once.
+        """
+        # Compute html body once — avoids triple _generate_html_body calls.
+        # The internal per-fragment sanitize passes were removed (4.4); sanitize
+        # exactly once per output boundary here when requested.
         html_body = self._generate_html_body(message)
+        # NOTE (stage-4 4.4 consequence): flags are now extracted from the PRE-sanitize
+        # body (the per-fragment sanitize that used to run inside _generate_html_body was
+        # removed). Legitimate links are unaffected — bleach keeps whitelisted
+        # <a href="http(s)://…"> — so link/foreign_channel/mention flags are identical for
+        # normal content. They can differ ONLY for URL-like text that bleach would strip
+        # (e.g. a URL inside a disallowed attribute); flags are non-security (used for
+        # exclude_flags filtering / display), so this edge divergence is accepted rather
+        # than re-adding a per-message sanitize pass that 4.4 deliberately eliminated.
         flags = self._extract_flags(message, html_body=html_body)
         footer = self.generate_html_footer(message, flags_list=flags)
+        if sanitize:
+            html_body = self._sanitize_html(html_body)
+            footer = self._sanitize_html(footer)
         result = {
             'channel': self.get_channel_username(message),
             'message_id': message.id,
@@ -523,8 +565,10 @@ class PostParser:
             'media_group_id': message.media_group_id,
             'service': getattr(message, "service", None),
             'show_caption_above_media': getattr(message, 'show_caption_above_media', False),
-            'raw_message': str(message)
         }
+        if include_raw:
+            # Full serialization of the message — expensive; only for JSON/debug.
+            result['raw_message'] = str(message)
         
         # Add webpage data if available
         if webpage := getattr(message, "web_page", None):
@@ -671,8 +715,10 @@ class PostParser:
         if message.forward_origin: content_body.append(f"--- Forwarded post end ---") # Forward info end
         content_body.append(f'</div><br>')
 
+        # NOTE: sanitize is NOT applied here. Sanitization happens exactly once per
+        # output boundary (process_message for single-post/JSON; in rss_generator the
+        # per-post pass for RSS and the whole-feed pass for HTML). See the map (4.4).
         html_body = '\n'.join(content_body)
-        html_body = self._sanitize_html(html_body)
         return html_body
 
     def _generate_html_media(self, message: Message) -> str:
@@ -751,8 +797,9 @@ class PostParser:
                     content_media.append(webpage_html)
                     content_media.append('</div>')
 
+        # Not sanitized here — this fragment is embedded in the body and sanitized
+        # once at the output boundary (see the 4.4 sanitize coverage map).
         html_media = '\n'.join(content_media)
-        html_media = self._sanitize_html(html_media)
         return html_media
 
 
@@ -832,8 +879,9 @@ class PostParser:
             flags_html = self._format_flags(current_flags)
             content_footer.append('<br>' + flags_html)
             
+        # Not sanitized here — sanitized once at the output boundary (4.4 coverage map):
+        # process_message for single-post/JSON; per-post (RSS) / whole-feed (HTML) for feeds.
         html_footer = '\n'.join(content_footer)
-        html_footer = self._sanitize_html(html_footer)
         return html_footer
 
 
@@ -919,8 +967,10 @@ class PostParser:
                 if links:
                     parts.append('&nbsp;|&nbsp;'.join(links))
 
+            # Raw fragment — embedded in the footer, sanitized once at the output
+            # boundary (see the 4.4 sanitize coverage map). Not sanitized here.
             result_html = '<br>'.join(parts) if parts else None
-            return self._sanitize_html(result_html) if result_html else None
+            return result_html if result_html else None
             
         except Exception as e:
             logger.error(f"reactions_views_links_error: message_id {message.id}, error {str(e)}")
@@ -969,15 +1019,31 @@ class PostParser:
             logger.error(f"file_id_extraction_error: media_type {message.media}, error {str(e)}")
             return None
 
-    async def _persist_media_file_id_async(self, channel: str, post_id: int, file_unique_id: str, added: float) -> None:
-        """Persist a single media file ID record to SQLite (fire-and-forget)."""
+    async def _flush_pending_media_ids(self) -> None:
+        """Persist media file-id records collected during rendering with ONE bulk upsert.
+
+        Called by the caller (get_post / rss_generator) after rendering completes.
+        Runs the blocking SQLite write in a thread. No-op when nothing was collected.
+        """
+        entries = self._pending_media_ids
+        if not entries:
+            return
         try:
-            await asyncio.to_thread(upsert_media_file_id_sync, DB_PATH, channel, post_id, file_unique_id, added)
-            logger.debug(f"persist_media_file_id: upserted {channel}/{post_id}/{file_unique_id}")
+            await asyncio.to_thread(upsert_media_file_ids_bulk_sync, DB_PATH, entries)
+            logger.debug(f"persist_media_file_ids_bulk: upserted {len(entries)} records")
         except Exception as e:
-            logger.error(f"file_id_save_error: error upserting {channel}/{post_id}/{file_unique_id}, error {str(e)}")
+            logger.error(f"file_id_bulk_save_error: error bulk-upserting {len(entries)} records, error {str(e)}")
+        finally:
+            # Clear regardless of outcome so a retry does not double-persist a stale batch.
+            self._pending_media_ids = []
 
     def _save_media_file_ids(self, message: Message) -> None:
+        """Collect a media file-id record for later bulk persistence.
+
+        IMPORTANT (4.2): this runs inside the render thread, so it must NOT touch
+        asyncio or the DB. It only appends to self._pending_media_ids; the caller
+        flushes the batch via _flush_pending_media_ids() after rendering.
+        """
         try:
             channel_username = self.get_channel_username(message)
             if not channel_username:
@@ -1003,29 +1069,8 @@ class PostParser:
 
                 if file_unique_id:
                     added_ts = datetime.now().timestamp()
-                    try:
-                        loop = asyncio.get_running_loop()
-                        if loop.is_running():
-                            global _persist_pending_count
-                            task = loop.create_task(
-                                self._persist_media_file_id_async(channel_username, message.id, file_unique_id, added_ts)
-                            )
-                            _persist_pending_count += 1
-
-                            def _on_task_done(t):
-                                global _persist_pending_count
-                                _persist_pending_count -= 1
-
-                            task.add_done_callback(_on_task_done)
-
-                            if _persist_pending_count > 5:
-                                logger.warning(f"persist_task_queue: {_persist_pending_count} pending _persist_media_file_id_async tasks (msg {message.id})")
-                            logger.debug(f"persist_task_created: queued for {channel_username}/{message.id}/{file_unique_id}, total pending: {_persist_pending_count}")
-                        else:
-                            # Fallback sync path (should not occur during normal FastAPI runtime)
-                            upsert_media_file_id_sync(DB_PATH, channel_username, message.id, file_unique_id, added_ts)
-                    except Exception as e:
-                        logger.error(f"file_id_save_error: error saving {channel_username}/{message.id}/{file_unique_id}, error {str(e)}")
+                    # Thread-safe: just append; the caller persists the batch.
+                    self._pending_media_ids.append((channel_username, message.id, file_unique_id, added_ts))
 
         except Exception as e:
             logger.error(f"file_id_collection_error: message_id {message.id}, error {str(e)}")
