@@ -33,7 +33,7 @@ from pyrogram import errors
 from pyrogram.types import Message
 from pyrogram.enums import MessageMediaType
 from fastapi import FastAPI, HTTPException, Response, Request
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from telegram_client import TelegramClient
 from config import get_settings, setup_logging
 from rss_generator import generate_channel_rss, generate_channel_html
@@ -1064,6 +1064,46 @@ async def get_raw_post_json(channel: str, post_id: int, request: Request, token:
         logger.error(error_message)
         raise HTTPException(status_code=500, detail=error_message) from e
 
+
+@app.get("/ping")
+async def ping() -> JSONResponse:
+    """Lightweight liveness probe for the container healthcheck.
+
+    Reflects process/event-loop liveness (always answers in microseconds) and TG liveness
+    from the watchdog's last-probe data. It MUST NOT issue any Telegram RPC (no get_me,
+    no safe_get_messages), touch SQLite, or walk the filesystem — that is the whole point:
+    it stays instant and truthful even while a real TG RPC is hung. It only reads the
+    already-recorded watchdog timestamp and the is_connected bool.
+    """
+    age = client.watchdog_last_ok_age()          # seconds since last OK probe, None if never
+    # is_connected is None before client.start() and a bool afterwards; coerce so the JSON
+    # "connected" field is always a bool (never null) and the pre-start window reports false.
+    connected = bool(client.client.is_connected)
+    threshold = Config["tg_ping_unhealthy_after"]
+    # age is None right after boot: the watchdog hasn't run its first probe yet. Treat that
+    # as healthy (gate on connected only) so a freshly-started container is not killed before
+    # its first probe cycle — otherwise start_period would have to cover a full watchdog interval.
+    #
+    # The staleness branch (age >= threshold => degraded) is only meaningful while the watchdog
+    # is running to refresh age. With the watchdog DISABLED (TG_WATCHDOG_ENABLED=false) nothing
+    # refreshes age — yet a disconnect-flap restart can still stamp it once (see _restart_client,
+    # which runs before the watchdog-enabled gate), after which age only grows. Letting that
+    # stale age drive /ping to 503 would spuriously fail the container healthcheck on a live
+    # connection and trigger an autoheal restart. So gate staleness on the watchdog being on;
+    # with it off, /ping is a pure connectivity check (no zombie-session detection — that
+    # TG-liveness signal only exists while the watchdog runs).
+    healthy = connected and (
+        not Config["tg_watchdog_enabled"] or age is None or age < threshold
+    )
+    return JSONResponse(
+        {
+            "status": "ok" if healthy else "degraded",
+            "connected": connected,
+            "last_probe_age_s": round(age, 1) if age is not None else None,
+            "threshold_s": threshold,
+        },
+        status_code=200 if healthy else 503,
+    )
 
 @app.get("/health")
 @app.get("/health/{token}")

@@ -123,6 +123,17 @@ def get_settings() -> dict[str, Any]:
         "tg_watchdog_heartbeat_every": _parse_int_env("TG_WATCHDOG_HEARTBEAT_EVERY", 30),
         "tg_disconnect_flap_limit": _parse_int_env("TG_DISCONNECT_FLAP_LIMIT", 3),
         "tg_disconnect_flap_window": _parse_int_env("TG_DISCONNECT_FLAP_WINDOW", 120),
+        # /ping reports TG as unhealthy once the last successful watchdog probe is older than
+        # this many seconds. Default is derived from the watchdog cadence: it is roughly how
+        # long the watchdog itself would take to give up and trigger a restart —
+        # interval * (failures + 1) + timeout. With the defaults (60,3,10) that is 250s, so a
+        # transient slow probe never flaps /ping, but a genuinely stuck session (no successful
+        # probe for ~4 min) surfaces as 503 before/around the time the watchdog restarts.
+        "tg_ping_unhealthy_after": _parse_int_env(
+            "TG_PING_UNHEALTHY_AFTER",
+            _parse_int_env("TG_WATCHDOG_INTERVAL", 60) * (_parse_int_env("TG_WATCHDOG_FAILURES", 3) + 1)
+            + _parse_int_env("TG_WATCHDOG_TIMEOUT", 10),
+        ),
         # Media download timeout scales with file size (large videos): the per-download
         # timeout is clamped to [min, max] seconds, with an effective floor of
         # `media_download_min_speed` bytes/s (timeout ≈ file_size / min_speed).
