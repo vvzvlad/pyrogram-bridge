@@ -96,6 +96,27 @@ def update_media_file_access_sync(db_path: str, channel: str, post_id: int, file
         )
 
 
+def update_media_file_access_bulk_sync(db_path: str, entries: List[tuple]) -> None:
+    """Update the access timestamp for multiple existing media file ID records.
+
+    entries: iterable of (channel, post_id, file_unique_id, added) tuples.
+    Uses executemany (one connection, one commit) so a batch of cache-hit access
+    updates costs a single SQLite transaction instead of one connect+UPDATE per hit.
+    Rows that do not exist are simply not matched by the WHERE clause (no-op), mirroring
+    the single-row update_media_file_access_sync. An empty batch is a no-op.
+    """
+    if not entries:
+        return
+    with _db_connection(db_path) as conn:
+        conn.executemany(
+            "UPDATE media_file_ids SET added = ? WHERE channel = ? AND post_id = ? AND file_unique_id = ?",
+            # Reorder each (channel, post_id, file_unique_id, added) tuple to match the
+            # UPDATE's placeholder order (added first, then the WHERE key columns).
+            [(added, channel, post_id, file_unique_id)
+             for (channel, post_id, file_unique_id, added) in entries],
+        )
+
+
 def get_all_media_file_ids_sync(db_path: str) -> List[dict]:
     """Return all rows from media_file_ids as a list of dicts."""
     with _db_connection(db_path) as conn:
