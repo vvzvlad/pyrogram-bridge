@@ -181,6 +181,36 @@ async def test_rss_feed_does_not_enrich_replies(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# History over-fetch fork: RSS over-fetches limit*2 (headroom for grouping/trim),
+# HTML fetches exactly limit. This is a REAL behavioral fork that the golden oracle
+# CANNOT see (its fake_get_chat_history ignores the limit kwarg and returns the whole
+# corpus, so both paths trim to GOLDEN_LIMIT identically). A refactor that accidentally
+# unified the two would pass every golden test — so lock the forwarded limit here.
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_rss_overfetches_history_html_does_not(monkeypatch):
+    N = 7
+    seen = {}
+
+    async def fake_get_chat(client, channel):
+        return SimpleNamespace(title="Test", username="testchan", id=-1001234567890)
+
+    async def spy_get_history(client, channel, limit=20):
+        seen.setdefault("limits", []).append(limit)
+        return []
+
+    monkeypatch.setattr("tg_cache.cached_get_chat", fake_get_chat, raising=False)
+    monkeypatch.setattr("tg_cache.cached_get_chat_history", spy_get_history, raising=False)
+
+    await generate_channel_rss("testchan", client=SimpleNamespace(), limit=N)
+    assert seen["limits"] == [2 * N], f"RSS must over-fetch history limit*2, got {seen['limits']}"
+
+    seen["limits"] = []
+    await generate_channel_html("testchan", client=SimpleNamespace(), limit=N)
+    assert seen["limits"] == [N], f"HTML must fetch history limit (no over-fetch), got {seen['limits']}"
+
+
+# --------------------------------------------------------------------------- #
 # Shared error handling in _prepare_feed_posts, verified through BOTH formatters.
 # The golden oracle cannot see these paths (§3.9/§3.10 are error branches), so they
 # are locked here. FEED_FUNCS lets each case assert RSS and HTML behave identically.
