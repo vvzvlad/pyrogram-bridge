@@ -14,7 +14,6 @@ import logging
 import asyncio
 import re
 import time
-from html import escape as html_escape
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Optional
@@ -24,8 +23,7 @@ from pyrogram.types import Message
 from post_parser import PostParser
 from config import get_settings
 from tg_throttle import tg_rpc_bounded
-from bleach.css_sanitizer import CSSSanitizer
-from bleach import clean as HTMLSanitizer
+from sanitizer import sanitize_html
 
 Config = get_settings()
 
@@ -327,21 +325,37 @@ def _render_pipeline(messages: list[Message],
                      exclude_flags: str | None,
                      exclude_text: str | None,
                      merge_seconds: int,
-                     time_based_merge: bool):
+                     time_based_merge: bool,
+                     channel: str | int):
     """
-    Full synchronous feed render pipeline (grouping + trimming + rendering).
+    Full synchronous feed render pipeline (grouping + trimming + rendering + sanitize).
 
     Runs entirely in a worker thread via a single asyncio.to_thread call. It contains
     NO await, NO asyncio primitives, NO create_task/get_running_loop — all the CPU-heavy
-    work (deepcopy, grouping, bleach-free rendering) happens here off the event loop.
+    work (deepcopy, grouping, rendering, bleach) happens here off the event loop.
     Media file-id records are accumulated on post_parser._pending_media_ids and flushed
     by the caller after this returns.
+
+    `channel` is used only for the sanitize log_context (grep-ability).
     """
     if time_based_merge:
         messages = _create_time_based_media_groups(messages, merge_seconds)
     message_groups = _create_messages_groups(messages)
     message_groups = _trim_messages_groups(message_groups, limit)
-    return _render_messages_groups(message_groups, post_parser, exclude_flags, exclude_text)
+    posts = _render_messages_groups(message_groups, post_parser, exclude_flags, exclude_text)
+    # Sanitize each surviving (post-filter) post exactly once, here in the worker
+    # thread — no per-post thread hop / per-post CSSSanitizer anymore. Per-post
+    # granularity means a failed post is html.escape()d in isolation instead of the
+    # whole feed (registry §3.5), and an unbalanced fragment is normalized within its
+    # OWN post rather than swallowing the following ones (registry §3.4). sanitize_html
+    # is fail-closed (registry §3.2). For the HTML path the <hr> divider is joined in
+    # the formatter AFTER this, so it survives sanitize (registry §3.3).
+    for post in posts:
+        post['html'] = sanitize_html(
+            post['html'],
+            log_context=f"channel {channel}, message_id {post['message_id']}",
+        )
+    return posts
 
 
 async def generate_channel_rss(channel: str | int,
@@ -433,6 +447,7 @@ async def generate_channel_rss(channel: str | int,
             final_posts = await asyncio.to_thread(
                 _render_pipeline, messages, post_parser, limit,
                 exclude_flags, exclude_text, merge_seconds, Config['time_based_merge'],
+                channel,
             )
         finally:
             # Persist media file-ids collected during rendering with a single bulk
@@ -463,38 +478,10 @@ async def generate_channel_rss(channel: str | int,
             fe.link(href=post_link)
             
             fe.description(post['text'].replace('\n', ' '))
-            # Sanitize heavy HTML in thread to avoid blocking the loop
-            try:
-                def _sanitize_sync(html_raw: str) -> str:
-                    css_sanitizer = CSSSanitizer(
-                        allowed_css_properties=["max-width", "max-height", "object-fit", "width", "height"]
-                    )
-                    return HTMLSanitizer(
-                        html_raw,
-                        tags=['p', 'a', 'b', 'i', 'strong', 'em', 'ul', 'ol', 'li', 'br', 'div', 'span', 'img', 'video', 'audio', 'source'],
-                        attributes={
-                            'a': ['href', 'title', 'target'],
-                            'img': ['src', 'alt', 'style'],
-                            'video': ['controls', 'src', 'style'],
-                            'audio': ['controls', 'style'],
-                            'source': ['src', 'type'],
-                            'div': ['class', 'style'],
-                            'span': ['class']
-                        },
-                        protocols=['http', 'https', 'tg'],
-                        css_sanitizer=css_sanitizer,
-                        strip=True,
-                    )
-                sanitized_html = await asyncio.to_thread(_sanitize_sync, post['html'])
-            except Exception as e:
-                # FAIL CLOSED: since 4.4 removed the per-fragment passes, post['html'] is
-                # raw channel-controlled HTML, and this is its ONLY sanitize. If bleach
-                # itself throws (e.g. RecursionError on pathological nested HTML), do NOT
-                # emit the raw payload (that would be stored XSS) — html.escape it so the
-                # content survives as inert text.
-                logger.error(f"rss_html_sanitization_error: channel {channel}, message_id {post['message_id']}, error {str(e)}")
-                sanitized_html = html_escape(post['html'])
-            fe.content(content=sanitized_html, type='CDATA')
+            # post['html'] is already sanitized per-post inside _render_pipeline
+            # (single project-wide bleach config, fail-closed). No per-post thread
+            # hop / CSSSanitizer here anymore.
+            fe.content(content=post['html'], type='CDATA')
             
             if post['date'] is not None:
                 pub_date = datetime.fromtimestamp(post['date'], tz=timezone.utc)
@@ -657,6 +644,7 @@ async def generate_channel_html(channel: str | int,
             final_posts = await asyncio.to_thread(
                 _render_pipeline, messages, post_parser, limit,
                 exclude_flags, exclude_text, merge_seconds, Config['time_based_merge'],
+                channel,
             )
         finally:
             # Persist media file-ids collected during rendering with a single bulk
@@ -666,44 +654,14 @@ async def generate_channel_html(channel: str | int,
         processing_elapsed = time.time() - processing_start_time
         logger.debug(f"html_messages_processing_timing: channel {channel}, {len(final_posts)} posts processed in {processing_elapsed:.3f} seconds")
 
-        # Generate HTML content
+        # Generate HTML content.
         html_gen_start_time = time.time()
-        # Concatenate HTML in thread to avoid blocking the loop on large payloads
-        html_posts = [post['html'] for post in final_posts]
-        def _concat_html(parts: list[str]) -> str:
-            return '\n<hr class="post-divider">\n'.join(parts)
-        html = await asyncio.to_thread(_concat_html, html_posts)
-        
-        # Optionally re-sanitize the final big HTML to ensure safety without blocking the loop
-        try:
-            def _sanitize_sync(html_raw: str) -> str:
-                css_sanitizer = CSSSanitizer(
-                    allowed_css_properties=["max-width", "max-height", "object-fit", "width", "height"]
-                )
-                return HTMLSanitizer(
-                    html_raw,
-                    tags=['p', 'a', 'b', 'i', 'strong', 'em', 'ul', 'ol', 'li', 'br', 'div', 'span', 'img', 'video', 'audio', 'source'],
-                    attributes={
-                        'a': ['href', 'title', 'target'],
-                        'img': ['src', 'alt', 'style'],
-                        'video': ['controls', 'src', 'style'],
-                        'audio': ['controls', 'style'],
-                        'source': ['src', 'type'],
-                        'div': ['class', 'style'],
-                        'span': ['class']
-                    },
-                    protocols=['http', 'https', 'tg'],
-                    css_sanitizer=css_sanitizer,
-                    strip=True,
-                )
-            html = await asyncio.to_thread(_sanitize_sync, html)
-        except Exception as e:
-            # FAIL CLOSED (see the RSS path): `html` is now the raw concatenated feed
-            # (4.4 removed the per-fragment passes). If bleach throws, html.escape the
-            # whole feed rather than returning raw channel HTML/JS to the client.
-            logger.error(f"html_final_sanitization_error: channel {channel}, error {str(e)}")
-            html = html_escape(html)
-        
+        # Each post is already sanitized per-post inside _render_pipeline. Join with the
+        # <hr> divider AFTER sanitize so the divider survives (registry §3.3), and each
+        # post's DOM was normalized within its own fragment (registry §3.4). The join is
+        # a trivial string op — no worker thread needed.
+        html = '\n<hr class="post-divider">\n'.join(post['html'] for post in final_posts)
+
         html_gen_elapsed = time.time() - html_gen_start_time
         logger.debug(f"html_generation_timing: channel {channel}, HTML generated in {html_gen_elapsed:.3f} seconds")
         

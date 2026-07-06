@@ -18,8 +18,7 @@ from datetime import datetime
 from typing import Union, Dict, Any, List, Optional
 from pyrogram.types import Message
 from pyrogram.enums import MessageMediaType
-from bleach.css_sanitizer import CSSSanitizer   
-from bleach import clean as HTMLSanitizer
+from sanitizer import sanitize_html
 from config import get_settings
 from file_io import upsert_media_file_ids_bulk_sync, DB_PATH
 from url_signer import generate_media_digest
@@ -700,41 +699,10 @@ class PostParser:
     
 
     def _sanitize_html(self, html_raw: str) -> str:
-        import time as _time
-        sanitize_start = _time.monotonic()
-        allowed_tags = ['p', 'a', 'b', 'i', 'strong',
-                        'em', 's', 'del', 'ul', 'ol', 'li', 'br',
-                        'div', 'span', 'img', 'video', 'audio',
-                        'source']
-        allowed_attributes = {
-            'a': ['href', 'title', 'target'],
-            'img': ['src', 'alt', 'style'],
-            'video': ['controls', 'src', 'style'],
-            'audio': ['controls', 'style'],
-            'source': ['src', 'type'],
-            'div': ['class', 'style'],
-            'span': ['class']
-        }
-
-        try:
-            css_sanitizer = CSSSanitizer(
-                allowed_css_properties=["max-width", "max-height", "object-fit", "width", "height"]
-            )
-            sanitized_html = HTMLSanitizer(
-                html_raw,
-                tags=allowed_tags,
-                attributes=allowed_attributes,
-                protocols=['http', 'https', 'tg'],
-                css_sanitizer=css_sanitizer,
-                strip=True,
-            )
-            elapsed = _time.monotonic() - sanitize_start
-            if elapsed > 0.05:
-                logger.warning(f"diag_sanitize_slow: bleach.clean() took {elapsed:.3f}s, input_len={len(html_raw)}")
-            return sanitized_html
-        except Exception as e:
-            logger.error(f"html_sanitization_error: error {str(e)}")
-            return html_raw
+        # Delegate to the single project-wide bleach config (sanitizer.sanitize_html).
+        # This drops the former fail-open branch: sanitize_html is fail-closed and
+        # html.escape()s on any bleach error (registry §3.2).
+        return sanitize_html(html_raw)
 
     def _format_forward_info(self, message: Message) -> Union[str, None]:
         if forward_origin := getattr(message, "forward_origin", None):

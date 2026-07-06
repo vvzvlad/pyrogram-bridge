@@ -468,10 +468,13 @@ async def test_rss_fails_closed_when_sanitizer_raises(monkeypatch):
     monkeypatch.setattr("tg_cache.cached_get_chat_history", fake_get_history, raising=False)
 
     # Force bleach to blow up (e.g. the RecursionError class already seen in prod).
-    # rss_generator imports it as `from bleach import clean as HTMLSanitizer`.
+    # API relocation: the single bleach config now lives in sanitizer.py, which imports
+    # it as `from bleach import clean as HTMLSanitizer`; sanitize_html resolves the name
+    # at call time, so patching sanitizer.HTMLSanitizer triggers the fail-closed path.
+    import sanitizer as sanitizer_module
     def boom(*a, **k):
         raise RecursionError("bleach exploded")
-    monkeypatch.setattr(rss_module, "HTMLSanitizer", boom, raising=True)
+    monkeypatch.setattr(sanitizer_module, "HTMLSanitizer", boom, raising=True)
 
     rss = await generate_channel_rss("testchan", client=SimpleNamespace(), limit=5)
     chunks = re.findall(r"<!\[CDATA\[(.*?)\]\]>", rss, re.DOTALL)
