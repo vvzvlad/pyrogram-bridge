@@ -732,7 +732,7 @@
 <img src="http://test.example.com/media/embedoka/1380/AgADvPIxG_ZGIUo/a9e857b4" style="max-width:100%; width:auto; height:auto;max-height:400px; object-fit:contain;">
 </div>
 <br>
-Если <a href="https://t.me/embedoka/1334">предыдущий адаптер</a> был прям &quot;находкой&quot;, то вот идея не столь однозначного адаптера: можно назвать это 1000 и 1 способ выломать RJ-45 к чертям 😈<br><br>А внутри у неё неонка  <a href="https://www.olimex.com/Products/USB-Modules/Ethernet/USB-GIGABIT/resources/rtl8153.pdf">RTL8153</a><br><br>@embedoka
+Если <a href="https://t.me/embedoka/1334">предыдущий адаптер</a> был прям &quot;находкой&quot;, то вот идея не столь однозначного адаптера: можно назвать это 1000 и 1 способ выломать RJ-45 к чертям 😈<br><br>А внутри у неё <s>неонка</s>  <a href="https://www.olimex.com/Products/USB-Modules/Ethernet/USB-GIGABIT/resources/rtl8153.pdf">RTL8153</a><br><br>@embedoka
 <br>
 </div><br></div>
 <div class="message-footer"><br>
@@ -751,7 +751,7 @@
 </div>
 <br>
 
-The SM9 module boasts <b>hardware compatibility</b> with NVIDIA Jetson series modules. Customers using NVIDIA Jetson-based products <b>can seamlessly replace</b> the original module with SM9 without hardware development efforts— simply unplug the NVIDIA module, plug in SM9, and complete hardware integration. <br><br>Ай-да китайцы, ай-да молодцы. Правильной дорогой идут, нефиг Nvidia булки расслаблять 😅<br><br>Понятно, что вопрос поддержки компиляторов и вот это всё тоже немаловажен, но DeepSeek R1 distilled 7B and 1.5B на ней уже запустили и <a href="https://sophon.ai/post/439.html">отбенчмарками</a> (скрин в коментах).<br><br>Кстати-кстати, это не просто рандомный китайский стартап, а перелицованный старый добрый Bitmain - мировой лидер в разработке и производстве чипов для майнинга крипты (и AI темой они начали заниматься еще в эпоху криптолихорадки - в общем, всегда держат руку на пульсе).<br><br>@embedoka
+The SM9 module boasts <b>hardware compatibility</b> with NVIDIA Jetson series modules. Customers using NVIDIA Jetson-based products <b>can seamlessly replace</b> the original module with SM9 without hardware development efforts— simply unplug the NVIDIA module, plug in SM9, and complete hardware integration. <br><br>Ай-да китайцы, ай-да молодцы. Правильной дорогой идут, нефиг Nvidia булки расслаблять 😅<br><br>Понятно, что вопрос поддержки компиляторов и вот это всё тоже немаловажен, но DeepSeek R1 distilled 7B and 1.5B на ней уже запустили и <a href="https://sophon.ai/post/439.html">отбенчмарками</a> (скрин в коментах).<br><br>Кстати-кстати, это не просто рандомный китайский стартап, а <s>перелицованный</s> старый добрый Bitmain - мировой лидер в разработке и производстве чипов для майнинга крипты (и AI темой они начали заниматься еще в эпоху криптолихорадки - в общем, всегда держат руку на пульсе).<br><br>@embedoka
 <br>
 </div><br></div>
 <div class="message-footer"><br>
@@ -784,7 +784,7 @@ The SM9 module boasts <b>hardware compatibility</b> with NVIDIA Jetson series mo
       <description>В электронике тоже есть своё правило№34: На любую вашу хотелку существует готовая реализация в интегральном исполнении (с) Doka 😅  Правило#35: если нет микросхемы, перепроверь еще раз у китайцев   Правило#36: всегда существует еще более тупая дешевая дискретная реализация нужного функционала из говна и палок на рассыпухе  Правило#37: рассыпуха под рукой всегда будет не той мощности, которая нужна в данный момент, поэтому TO-3 балласт будет соседствовать с 0201   Правило#38:  Всегда существует реализация которая займет больше времени на разработку и отладку и вы выберете именно ее  Правило#39:  [Если вы не китаец, то] что бы вы не делали у китайцев этот же функционал реализован проще  @embedoka</description>
       <content:encoded><![CDATA[<div class="message-body"><div class="post">
 В электронике тоже есть своё <a href="https://ru.wikipedia.org/wiki/%D0%9F%D1%80%D0%B0%D0%B2%D0%B8%D0%BB%D0%BE_34">правило№34</a>:<br>
-На любую вашу хотелку существует готовая реализация в интегральном исполнении (с) Doka 😅<br><br><b>Правило#35</b>: если нет микросхемы, перепроверь еще раз у китайцев <br><br><b>Правило#36</b>: всегда существует еще более тупая дешевая дискретная реализация нужного функционала из говна и палок на рассыпухе<br><br><b>Правило#37</b>: рассыпуха под рукой всегда будет не той мощности, которая нужна в данный момент, поэтому <a href="https://en.wikipedia.org/wiki/TO-3">TO-3</a> балласт будет соседствовать с 0201 <br><br><b>Правило#38</b>:  Всегда существует реализация которая займет больше времени на разработку и отладку и вы выберете именно ее<br><b><br>Правило#39</b>:  [Если вы не китаец, то] что бы вы не делали у китайцев этот же функционал реализован проще<br><br>@embedoka
+На любую вашу хотелку существует готовая реализация в интегральном исполнении (с) Doka 😅<br><br><b>Правило#35</b>: если нет микросхемы, перепроверь еще раз у китайцев <br><br><b>Правило#36</b>: всегда существует еще более <s>тупая</s> дешевая дискретная реализация нужного функционала <s>из говна и палок</s> на рассыпухе<br><br><b>Правило#37</b>: рассыпуха под рукой всегда будет не той мощности, которая нужна в данный момент, поэтому <a href="https://en.wikipedia.org/wiki/TO-3">TO-3</a> балласт будет соседствовать с 0201 <br><br><b>Правило#38</b>:  Всегда существует реализация которая займет больше времени на разработку и отладку и вы выберете именно ее<br><b><br>Правило#39</b>:  [Если вы не китаец, то] что бы вы не делали у китайцев этот же функционал реализован проще<br><br>@embedoka
 <br>
 </div><br></div>
 <div class="message-footer"><br>
@@ -857,7 +857,7 @@ The SM9 module boasts <b>hardware compatibility</b> with NVIDIA Jetson series mo
 <img src="http://test.example.com/media/embedoka/1388/AgADC_kxG0xOKUg/42b2fd35" style="max-width:100%; width:auto; height:auto;max-height:400px; object-fit:contain;">
 </div>
 <br>
-Наконец-то что-то дельное про нишевый микро-бизнес в эмбеддед за последние годы <a href="https://habr.com/ru/companies/moysklad/articles/931072/">прочёл</a>. А не про эти ваши диктофоны с телесисек, которым 100 лет в обед и которые уже всем в смартфон не впились (остались нишевые применения, но они сильно завязаны на гос.регуляторику).<br><br>TLDR: Чел из Омска разработал и теперь производит платы-&quot;обманки&quot; для уменьшения костов дорогостоящего ремонта холодильника. Маркетплейсы душат комиссией, но на хлеб с маслом хватает (в масштабах выпро-живания в миллионнике).<br><br>PS: если кому-то попадалось схожее чтиво (да еще и с юнит-экономикой) - кидайте в коменты 🙏<br><br>@embedoka
+Наконец-то что-то дельное про нишевый микро-бизнес в эмбеддед за последние годы <a href="https://habr.com/ru/companies/moysklad/articles/931072/">прочёл</a>. А не про эти ваши диктофоны с телесисек, которым 100 лет в обед и которые уже всем в смартфон не впились (остались нишевые применения, но они сильно завязаны на гос.регуляторику).<br><br>TLDR: Чел из Омска разработал и теперь производит платы-&quot;обманки&quot; для уменьшения костов дорогостоящего ремонта холодильника. Маркетплейсы душат комиссией, но на хлеб с маслом хватает (в масштабах <s>вы</s>про-живания в миллионнике).<br><br>PS: если кому-то попадалось схожее чтиво (да еще и с юнит-экономикой) - кидайте в коменты 🙏<br><br>@embedoka
 <br>
 </div><br></div>
 <div class="message-footer"><br>
@@ -999,7 +999,7 @@ The SM9 module boasts <b>hardware compatibility</b> with NVIDIA Jetson series mo
       <link>https://t.me/embedoka/1396</link>
       <description>640 КБ хватит всем</description>
       <content:encoded><![CDATA[<div class="message-body"><div class="post">
-640 КБ хватит всем
+<s>640 КБ хватит всем</s>
 <br>
 </div><br></div>
 <div class="message-footer"><br>
@@ -1416,7 +1416,7 @@ The SM9 module boasts <b>hardware compatibility</b> with NVIDIA Jetson series mo
 <video controls src="http://test.example.com/media/embedoka/1424/AgADW4oAAnlTuUg/ce36e0bb" style="max-width:100%; width:auto;height:auto; max-height:400px;"></video>
 </div>
 <br>
-<b>Невероятно, но  rust </b>🤯<br><br><b>Topola PCB</b> - роутер и автороутер печатных плат, написанный на расте. Проект в активной фазе развития, судя по локализации пилят его наши восточные соседи разрабатывается на европейские деньги (грант известной <a href="https://t.me/vlsihub/586">NLnet</a>). Что интересно: название перекликается с отечественным продуктом из 2000х с аналогичным функционалом 😅<br><br>🔗 <a href="https://topola.dev/" target="_blank">https://topola.dev/</a><br>🐱 <a href="https://codeberg.org/topola/topola" target="_blank">https://codeberg.org/topola/topola</a><br><br>PS: Есть даже <a href="https://topola.dev/app/">веб-версия</a>, а вот поддерживаемых форматов я не нашёл нигде  🤓<br><br>@embedoka
+<b>Невероятно, но  rust </b>🤯<br><br><b>Topola PCB</b> - роутер и автороутер печатных плат, написанный на расте. Проект в активной фазе развития, судя по локализации <s>пилят его наши восточные соседи</s> разрабатывается на европейские деньги (грант известной <a href="https://t.me/vlsihub/586">NLnet</a>). Что интересно: название перекликается с отечественным продуктом из 2000х с аналогичным функционалом 😅<br><br>🔗 <a href="https://topola.dev/" target="_blank">https://topola.dev/</a><br>🐱 <a href="https://codeberg.org/topola/topola" target="_blank">https://codeberg.org/topola/topola</a><br><br>PS: Есть даже <a href="https://topola.dev/app/">веб-версия</a>, а вот поддерживаемых форматов я не нашёл нигде  🤓<br><br>@embedoka
 <br>
 </div><br></div>
 <div class="message-footer"><br>

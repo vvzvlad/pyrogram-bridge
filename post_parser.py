@@ -18,8 +18,7 @@ from datetime import datetime
 from typing import Union, Dict, Any, List, Optional
 from pyrogram.types import Message
 from pyrogram.enums import MessageMediaType
-from bleach.css_sanitizer import CSSSanitizer   
-from bleach import clean as HTMLSanitizer
+from sanitizer import sanitize_html
 from config import get_settings
 from file_io import upsert_media_file_ids_bulk_sync, DB_PATH
 from url_signer import generate_media_digest
@@ -638,10 +637,10 @@ class PostParser:
                 serializing every post.
             sanitize: when True, run the html body and footer through a single
                 bleach pass each. Single-post HTML and JSON need this (there is no
-                whole-feed pass on those paths). Feed generation passes False and
-                relies on the final sanitize in rss_generator (per-post for RSS,
-                whole-feed for HTML), so no
-                fragment is sanitized more than once.
+                feed-level pass on those paths). Feed generation passes False and
+                relies on the per-post sanitize in rss_generator._render_pipeline
+                (per-post for BOTH RSS and HTML), so no fragment is sanitized more
+                than once.
         """
         # Compute html body once — avoids triple _generate_html_body calls.
         # The internal per-fragment sanitize passes were removed (4.4); sanitize
@@ -700,41 +699,10 @@ class PostParser:
     
 
     def _sanitize_html(self, html_raw: str) -> str:
-        import time as _time
-        sanitize_start = _time.monotonic()
-        allowed_tags = ['p', 'a', 'b', 'i', 'strong',
-                        'em', 's', 'del', 'ul', 'ol', 'li', 'br',
-                        'div', 'span', 'img', 'video', 'audio',
-                        'source']
-        allowed_attributes = {
-            'a': ['href', 'title', 'target'],
-            'img': ['src', 'alt', 'style'],
-            'video': ['controls', 'src', 'style'],
-            'audio': ['controls', 'style'],
-            'source': ['src', 'type'],
-            'div': ['class', 'style'],
-            'span': ['class']
-        }
-
-        try:
-            css_sanitizer = CSSSanitizer(
-                allowed_css_properties=["max-width", "max-height", "object-fit", "width", "height"]
-            )
-            sanitized_html = HTMLSanitizer(
-                html_raw,
-                tags=allowed_tags,
-                attributes=allowed_attributes,
-                protocols=['http', 'https', 'tg'],
-                css_sanitizer=css_sanitizer,
-                strip=True,
-            )
-            elapsed = _time.monotonic() - sanitize_start
-            if elapsed > 0.05:
-                logger.warning(f"diag_sanitize_slow: bleach.clean() took {elapsed:.3f}s, input_len={len(html_raw)}")
-            return sanitized_html
-        except Exception as e:
-            logger.error(f"html_sanitization_error: error {str(e)}")
-            return html_raw
+        # Delegate to the single project-wide bleach config (sanitizer.sanitize_html).
+        # This drops the former fail-open branch: sanitize_html is fail-closed and
+        # html.escape()s on any bleach error (registry §3.2).
+        return sanitize_html(html_raw)
 
     def _format_forward_info(self, message: Message) -> Union[str, None]:
         if forward_origin := getattr(message, "forward_origin", None):
@@ -831,7 +799,7 @@ class PostParser:
 
         # NOTE: sanitize is NOT applied here. Sanitization happens exactly once per
         # output boundary (process_message for single-post/JSON; in rss_generator the
-        # per-post pass for RSS and the whole-feed pass for HTML). See the map (4.4).
+        # per-post pass in _render_pipeline for BOTH RSS and HTML). See the map (4.4).
         html_body = '\n'.join(content_body)
         return html_body
 
@@ -1036,7 +1004,8 @@ class PostParser:
             content_footer.append('<br>' + flags_html)
             
         # Not sanitized here — sanitized once at the output boundary (4.4 coverage map):
-        # process_message for single-post/JSON; per-post (RSS) / whole-feed (HTML) for feeds.
+        # process_message for single-post/JSON; per-post in _render_pipeline for feeds
+        # (both RSS and HTML).
         html_footer = '\n'.join(content_footer)
         return html_footer
 

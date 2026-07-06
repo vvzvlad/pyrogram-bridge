@@ -384,6 +384,56 @@ async def test_xss_in_media_caption_stripped_in_feeds(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# §3.4 — per-post sanitize ISOLATION (stage-1 load-bearing invariant, PR #36).
+# A dangling/unbalanced tag in post A must be normalized WITHIN A's own fragment and
+# cannot swallow post B (cross-post DOM/XSS bleed). This holds because _render_pipeline
+# runs a SEPARATE bleach.clean per post and the formatter joins the <hr> divider AFTER
+# sanitize. A FUTURE stage that rejoins BEFORE sanitizing would reintroduce the bleed
+# and pass every single-message XSS test — so this 2-post case MUST turn it red.
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_unbalanced_post_does_not_swallow_next_post_html_feed(monkeypatch):
+    # Post A carries a dangling <div><b> with NO closers; post B is well-formed and
+    # carries a unique marker. _Str.html feeds the raw tags into the pre-sanitize body
+    # exactly as a real message with entities would.
+    msg_a = make_message(50, text="<div><b>DANGLING_A no closers here",
+                         date=datetime(2024, 1, 1, 12, 5, 0, tzinfo=timezone.utc))
+    msg_b = make_message(51, text="INTACT_B_MARKER",
+                         date=datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc))
+
+    async def fake_get_chat(client, channel):
+        return SimpleNamespace(title="Test", username="testchan", id=-1001234567890)
+
+    async def fake_get_history(client, channel, limit=20):
+        return [msg_a, msg_b]  # A is newer than B -> A rendered first
+
+    monkeypatch.setattr("tg_cache.cached_get_chat", fake_get_chat, raising=False)
+    monkeypatch.setattr("tg_cache.cached_get_chat_history", fake_get_history, raising=False)
+
+    html = await generate_channel_html("testchan", client=SimpleNamespace(), limit=5)
+
+    # The divider survives (joined AFTER per-post sanitize) and splits the feed into
+    # exactly two TOP-LEVEL fragments. A join-before-sanitize regression strips the
+    # non-whitelisted <hr> entirely (strip=True) -> this alone already goes red.
+    parts = html.split('<hr class="post-divider">')
+    assert len(parts) == 2, "expected exactly one top-level post-divider between the two posts"
+    frag_a, frag_b = parts
+
+    # A's dangling tags were balanced WITHIN A's own fragment, NOT deferred past the
+    # divider. A rejoin-before-sanitize regression closes them only at the very end of
+    # the whole feed (after B), leaving frag_a with more opens than closes.
+    assert "DANGLING_A" in frag_a
+    assert frag_a.count("<div") == frag_a.count("</div>"), "post A's <div> not closed within its own fragment"
+    assert frag_a.count("<b>") == frag_a.count("</b>"), "post A's <b> not closed within its own fragment"
+
+    # B is intact, lives at top level, and is itself balanced — never nested inside A
+    # (its marker must not have been trapped before A's divider).
+    assert "INTACT_B_MARKER" in frag_b, "post B content missing/swallowed by post A"
+    assert "INTACT_B_MARKER" not in frag_a, "post B content bled into post A's fragment"
+    assert frag_b.count("<div") == frag_b.count("</div>"), "post B fragment not self-contained"
+
+
+# --------------------------------------------------------------------------- #
 # Review round-1: the new bulk-upsert SQL executed for real (not mocked).
 # --------------------------------------------------------------------------- #
 def test_bulk_upsert_media_file_ids_real_sql(tmp_path):
@@ -468,10 +518,13 @@ async def test_rss_fails_closed_when_sanitizer_raises(monkeypatch):
     monkeypatch.setattr("tg_cache.cached_get_chat_history", fake_get_history, raising=False)
 
     # Force bleach to blow up (e.g. the RecursionError class already seen in prod).
-    # rss_generator imports it as `from bleach import clean as HTMLSanitizer`.
+    # API relocation: the single bleach config now lives in sanitizer.py, which imports
+    # it as `from bleach import clean as HTMLSanitizer`; sanitize_html resolves the name
+    # at call time, so patching sanitizer.HTMLSanitizer triggers the fail-closed path.
+    import sanitizer as sanitizer_module
     def boom(*a, **k):
         raise RecursionError("bleach exploded")
-    monkeypatch.setattr(rss_module, "HTMLSanitizer", boom, raising=True)
+    monkeypatch.setattr(sanitizer_module, "HTMLSanitizer", boom, raising=True)
 
     rss = await generate_channel_rss("testchan", client=SimpleNamespace(), limit=5)
     chunks = re.findall(r"<!\[CDATA\[(.*?)\]\]>", rss, re.DOTALL)
