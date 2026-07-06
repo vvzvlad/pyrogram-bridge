@@ -5,8 +5,10 @@
 
 Two layers:
   * 5a — the MEDIA_SOURCES table + renderers reproduce the three old ladders
-    (_get_file_unique_id, _save_media_file_ids, _generate_html_media) byte-for-byte:
-    a fragment-level snapshot oracle (tests/test_data/media_fragments.json) plus
+    (_get_file_unique_id, _save_media_file_ids, _generate_html_media). The fragment
+    snapshot (tests/test_data/media_fragments.json) is the PRE-REFACTOR BASE reference,
+    captured against the base post_parser.py; the 5a code reproduces it byte-for-byte
+    (two fragments carry registered §3.14 deltas — see fr.REGISTERED_DELTAS). Plus
     table/selector/invariant unit tests.
   * 5b — the registered fixes (§3.13 large-file guard for every object, §3.14 the
     message-media div is closed in every branch) live in test_stage5b_media_fixes.py.
@@ -54,8 +56,11 @@ def test_media_fragment_matches_snapshot(parser, case_name):
     parser._pending_media_ids = []
     html = parser._generate_html_media(factory())
     collected = [[c, p, f] for c, p, f, _ in parser._pending_media_ids]
-    assert html == snapshot[case_name]["html"], f"fragment HTML diverged for {case_name}"
-    assert collected == snapshot[case_name]["collected"], f"collection diverged for {case_name}"
+    # The snapshot is the pre-refactor BASE reference; the two §3.14 fragments carry a
+    # registered 5b delta (the now-closed message-media div), so expect their 5b bytes.
+    expected = fr.REGISTERED_DELTAS.get(case_name, snapshot[case_name])
+    assert html == expected["html"], f"fragment HTML diverged for {case_name}"
+    assert collected == expected["collected"], f"collection diverged for {case_name}"
 
 
 def test_snapshot_covers_every_spec_case():

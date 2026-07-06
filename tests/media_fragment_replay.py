@@ -4,9 +4,15 @@
 
 Captures the raw `_generate_html_media` output (BEFORE sanitize) for every media
 render kind and edge branch, as a SEPARATE oracle layer from the stage-0 feed goldens
-(spec §4: "два слоя эталонов, не смешивать"). The 5a refactor (MEDIA_SOURCES table +
-renderers) must reproduce these fragments byte-for-byte; 5b intentionally changes two
-of them (§3.13 large-file guard is collection-only, §3.14 unclosed-div close).
+(spec §4: "два слоя эталонов, не смешивать").
+
+`media_fragments.json` is the PRE-REFACTOR BASE reference: it was captured by running
+THIS harness against the BASE `post_parser.py` checkout (the pre-refactor code), NOT
+against stage-5 code — so it is a genuine base-anchored golden layer, not a circular
+self-snapshot of the refactor. The 5a refactor (MEDIA_SOURCES table + renderers) must
+reproduce these base fragments byte-for-byte. The ONLY 5b-registered changes vs the base
+are the two entries in REGISTERED_DELTAS (§3.14 unclosed-div close); the §3.13 large-file
+guard is collection-only and changes no fragment bytes.
 
 Cases whose type exists in the recorded corpus could be pulled from it, but the media
 FRAGMENT is a pure function of a single Message, so deterministic hand-built mocks give
@@ -126,6 +132,27 @@ def build_cases():
 
 
 # --------------------------------------------------------------------------- #
+# Registered 5b deltas vs the pre-refactor base snapshot.
+#
+# Spec §3.14: the empty <div class="message-media"> container is now CLOSED in every
+# render branch. The base (pre-refactor) code left it OPEN whenever the selected media
+# object had no usable file_unique_id, so the base snapshot captured an unbalanced div
+# for exactly these two cases. `collected` is byte-identical to the base; only `html`
+# differs by the added `</div>`. These are the ONLY fragments the 5b registered fixes
+# change relative to the pre-refactor base — every other case reproduces base bytes.
+REGISTERED_DELTAS = {
+    "file_unique_id_none": {
+        "collected": [],
+        "html": "<div class=\"message-media\">\n</div>",
+    },
+    "webpage_without_photo": {
+        "collected": [],
+        "html": "<div class=\"message-media\">\n</div>\n<div class=\"webpage-preview\">\n<div class=\"webpage-preview\" style=\"border-left: 3px solid #ccc; padding-left: 10px; margin: 10px 0;\">\n<div class=\"webpage-title\" style=\"font-weight:bold; margin:5px 0;\">\n<a href=\"https://example.com\" target=\"_blank\">Example</a></div>\n<div class=\"webpage-url\" style=\"color:#666; font-size:0.9em;margin-bottom:5px;\">https://example.com</div>\n</div>\n</div>",
+    },
+}
+
+
+# --------------------------------------------------------------------------- #
 # Capture / compare.
 # --------------------------------------------------------------------------- #
 def capture_fragments():
@@ -167,6 +194,9 @@ def _bootstrap_standalone():
 
 
 def generate_snapshot():
+    # WARNING: this MUST be run against the BASE (pre-refactor) `post_parser.py`, never
+    # against stage-5 code. Regenerating from stage-5 output would make the oracle a
+    # circular self-snapshot instead of a base-anchored golden layer (spec §4).
     from url_signer import KeyManager
     KeyManager.signing_key = FRAGMENT_SIGNING_KEY
     data = capture_fragments()

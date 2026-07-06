@@ -120,6 +120,17 @@ def test_small_non_video_object_still_collected(parser, media_type, attr):
     assert [(c, p, f) for c, p, f, _ in parser._pending_media_ids] == [("testchan", 11, "small")]
 
 
+def test_exactly_100mb_object_is_collected(parser):
+    # §3.13 boundary: the guard is strictly `>` 100MB, so an object of exactly 100MB is
+    # still collected. Pins the operator — a mutation to `>=` would drop this and fail.
+    obj = SimpleNamespace(file_unique_id="edge", file_id="f",
+                          file_size=100 * 1024 * 1024, mime_type="image/png")
+    msg = _msg(14, MessageMediaType.PHOTO, photo=obj)
+    parser._pending_media_ids = []
+    parser._save_media_file_ids(msg)
+    assert [(c, p, f) for c, p, f, _ in parser._pending_media_ids] == [("testchan", 14, "edge")]
+
+
 def test_large_video_still_not_collected(parser):
     # Regression: the video case (the only one guarded before 5b) still works.
     msg = _msg(12, MessageMediaType.VIDEO,
