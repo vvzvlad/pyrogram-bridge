@@ -220,8 +220,9 @@ def _render_messages_groups(messages_groups: list[list[Message]],
         try:
             if len(group) == 1: # Single message - simple case
                 one_message = group[0]
-                # Feed path: raw_message not needed and sanitize deferred to the final
-                # whole-feed pass, so each fragment is sanitized exactly once.
+                # Feed path: raw_message not needed and sanitize deferred to the per-post
+                # pass in _render_pipeline (both RSS and HTML), so each fragment is
+                # sanitized exactly once.
                 message_data = post_parser.process_message(one_message, include_raw=False, sanitize=False)
                 html_parts = [
                     f'<div class="message-body">{message_data["html"]["body"]}</div>',
