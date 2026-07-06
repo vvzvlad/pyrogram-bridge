@@ -973,7 +973,6 @@ class PostParser:
                 # Guard: channel_username may be None for private chats without a username
                 if not channel_username:
                     logger.warning(f"Could not generate media URL for message {message.id}: channel username is missing.")
-                    content_media.append('</div>')
                 else:
                     file = f"{channel_username}/{message.id}/{file_unique_id}"
                     digest = generate_media_digest(file)
@@ -1004,7 +1003,11 @@ class PostParser:
                         elif kind == 'img_200_sticker':
                             ctx.emoji = getattr(message.sticker, 'emoji', '')
                         content_media.extend(renderer(ctx))
-                    content_media.append('</div>')
+            # Registry §3.14: close the message-media container in EVERY branch. It used
+            # to be closed only when a URL was built (or the username guard fired), so a
+            # None file_unique_id (e.g. WEB_PAGE without photo) left an open <div> that
+            # html5lib later swallowed the following posts into.
+            content_media.append('</div>')
 
         if webpage := getattr(message, "web_page", None): # Web page preview
             if webpage_html := self._format_webpage(webpage, message):
@@ -1365,27 +1368,18 @@ class PostParser:
                 return
 
             if message.media:
-                # Skip large videos - they shouldn't be cached permanently.
-                # 5a keeps this message.video-only guard verbatim; registry §3.13
-                # generalises the >100MB rule to every selected object in 5b.
-                if message.video and message.video.file_size and message.video.file_size > 100 * 1024 * 1024:
-                    return
-
-                # Object selection now goes through the single MEDIA_SOURCES table
-                # instead of the old truthy-attribute if/elif ladder. paid_media has no
-                # table entry and is deliberately NOT collected (paid content).
+                # Object selection goes through the single MEDIA_SOURCES table instead
+                # of the old truthy-attribute if/elif ladder. paid_media has no table
+                # entry and is deliberately NOT collected (paid content).
                 selector = MEDIA_SOURCES.get(message.media)
                 selected_obj = selector(message)[0] if selector is not None else None
 
-                # The message.video guard above does not cover the Kurigram 2.2.23
-                # sources (live photo, story video, poll description video) — apply the
-                # same "don't cache large videos" rule to them (5b unifies this — §3.13).
-                if message.media in (MessageMediaType.LIVE_PHOTO,
-                                     MessageMediaType.STORY,
-                                     MessageMediaType.POLL):
-                    file_size = getattr(selected_obj, 'file_size', None)
-                    if isinstance(file_size, int) and file_size > 100 * 1024 * 1024:
-                        return
+                # Registry §3.13: the ">100MB don't cache" rule applies to ANY selected
+                # media object, not just message.video (the old code guarded only the
+                # video type here, plus the newer live_photo/story/poll sources).
+                file_size = getattr(selected_obj, 'file_size', None)
+                if isinstance(file_size, int) and file_size > 100 * 1024 * 1024:
+                    return
 
                 file_unique_id = getattr(selected_obj, 'file_unique_id', '') or ''
 
