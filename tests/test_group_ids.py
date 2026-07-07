@@ -244,7 +244,7 @@ async def test_none_date_post_renders_and_lands_at_feed_end(monkeypatch):
 @pytest.mark.asyncio
 async def test_none_date_group_survives_limit_slice(monkeypatch):
     # §3.12 retention: the group sort key gives None-date groups float('inf') so they sort
-    # as NEWEST and deterministically survive the [:limit] slice in _trim_messages_groups.
+    # as NEWEST and deterministically survive the [:limit] slice in _render_pipeline.
     # This test applies REAL limit pressure (limit < number of groups) so the slice actually
     # drops groups — otherwise reverting 'inf' to 0.0 (or any small key) would go unnoticed.
     # With 5 dated posts + 1 None-date post and limit=3, the surviving 3 groups must be the

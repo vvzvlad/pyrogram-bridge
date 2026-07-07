@@ -36,7 +36,6 @@ from rss_generator import (
     _render_pipeline,
     _compute_time_based_group_ids,
     _create_messages_groups,
-    _trim_messages_groups,
     _render_messages_groups,
 )
 
@@ -91,8 +90,10 @@ def _co_names(func):
 # ---------------------------------------------------------------------------
 
 def test_render_functions_are_sync():
+    # _trim_messages_groups was inlined into _render_pipeline as a `[:limit]` slice
+    # (render-pipeline cosmetics stage); the trimming path is now covered via _render_pipeline.
     for fn in (_compute_time_based_group_ids, _create_messages_groups,
-               _trim_messages_groups, _render_messages_groups, _render_pipeline):
+               _render_messages_groups, _render_pipeline):
         assert not asyncio.iscoroutinefunction(fn), f"{fn.__name__} must be a plain sync function"
 
 
@@ -154,7 +155,7 @@ def test_render_path_has_no_asyncio_side_effects():
     banned = {"create_task", "get_running_loop", "to_thread", "ensure_future"}
     funcs = [
         _render_pipeline, _compute_time_based_group_ids, _create_messages_groups,
-        _trim_messages_groups, _render_messages_groups,
+        _render_messages_groups,
         PostParser.process_message, PostParser._generate_html_body,
         PostParser._generate_html_media, PostParser.generate_html_footer,
         PostParser._reactions_views_links, PostParser._save_media_file_ids,

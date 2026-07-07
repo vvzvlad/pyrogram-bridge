@@ -19,7 +19,7 @@ from typing import Optional
 from feedgen.feed import FeedGenerator
 from pyrogram import errors, Client
 from pyrogram.types import Message
-from post_parser import PostParser
+from post_parser import PostParser, _wrap_post_html
 from config import get_settings
 from tg_throttle import tg_rpc_bounded
 from sanitizer import sanitize_html
@@ -175,17 +175,6 @@ def _create_messages_groups(messages: list[Message], group_ids: dict[int, str | 
 
     return processing_groups
 
-def _trim_messages_groups(messages_groups: list[list[Message]], limit: int):
-    """
-    Trim messages groups to limit
-
-    Plain synchronous function (contains no await): runs inside the render thread.
-    """
-    if len(messages_groups) > limit: # Trim groups if they exceed the specified limit
-        messages_groups = messages_groups[:limit]
-    
-    return messages_groups
-
 def _render_messages_groups(messages_groups: list[list[Message]],
                                     post_parser: PostParser,
                                     exclude_flags: str | None = None,
@@ -211,12 +200,8 @@ def _render_messages_groups(messages_groups: list[list[Message]],
                 # pass in _render_pipeline (both RSS and HTML), so each fragment is
                 # sanitized exactly once.
                 message_data = post_parser.process_message(one_message, include_raw=False, sanitize=False)
-                html_parts = [
-                    f'<div class="message-body">{message_data["html"]["body"]}</div>',
-                    f'<div class="message-footer">{message_data["html"]["footer"]}</div>'
-                ]
                 rendered_posts.append({
-                    'html': '\n'.join(html_parts),
+                    'html': _wrap_post_html(message_data["html"]["body"], message_data["html"]["footer"]),
                     'date': message_data['date'],
                     'message_id': message_data['message_id'],
                     'title': message_data['html']['title'],
@@ -255,13 +240,8 @@ def _render_messages_groups(messages_groups: list[list[Message]],
                 # date (registry §3.7), matching a single post of the same message.
                 footer_html = post_parser.generate_html_footer(main_raw, flags_list=merged_flags)
 
-                html_parts = [
-                    f'<div class="message-body">{combined_html_body}</div>',
-                    f'<div class="message-footer">{footer_html}</div>'
-                ]
-
                 rendered_posts.append({
-                    'html': '\n'.join(html_parts),
+                    'html': _wrap_post_html(combined_html_body, footer_html),
                     'date': main_message['date'],
                     'message_id': main_message['message_id'],
                     'title': main_message['html']['title'],
@@ -277,16 +257,13 @@ def _render_messages_groups(messages_groups: list[list[Message]],
     # Filter posts by exclude_flags
     if exclude_flags:
         exclude_flag_list = [flag.strip() for flag in exclude_flags.split(',')] # Split comma-separated flags into list
-        filtered_posts = []
-        for post in rendered_posts:
-            # If "all" is specified and the post has any flags, exclude the post.
-            if "all" in exclude_flag_list and post['flags']:
-                continue
-            # Exclude post if any flag in the exclude list is present in the post's flags.
-            if any(flag in post['flags'] for flag in exclude_flag_list):
-                continue
-            filtered_posts.append(post)
-        rendered_posts = filtered_posts
+        rendered_posts = [
+            post for post in rendered_posts
+            # Keep a post unless "all" is requested and it carries any flag, or any of
+            # its flags appears in the exclude list.
+            if not ("all" in exclude_flag_list and post['flags'])
+            and not any(flag in post['flags'] for flag in exclude_flag_list)
+        ]
     
     # Filter posts by exclude_text
     if exclude_text:
@@ -336,7 +313,8 @@ def _render_pipeline(messages: list[Message],
         message_groups = _create_messages_groups(messages, group_ids)
     else:
         message_groups = _create_messages_groups(messages)
-    message_groups = _trim_messages_groups(message_groups, limit)
+    # Trim groups if they exceed the requested limit (slice is a no-op when shorter).
+    message_groups = message_groups[:limit]
     posts = _render_messages_groups(message_groups, post_parser, exclude_flags, exclude_text)
     # Sanitize each surviving (post-filter) post exactly once, here in the worker
     # thread — no per-post thread hop / per-post CSSSanitizer anymore. Per-post

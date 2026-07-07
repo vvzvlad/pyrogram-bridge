@@ -175,6 +175,23 @@ MEDIA_SOURCES: Dict[Any, Callable[[Message], Tuple[Any, Optional[str]]]] = {
 }
 
 
+# Inline media-sizing style literals, named so the renderers below read as intent
+# rather than magic numbers. Values are substituted verbatim into the style strings,
+# so the emitted bytes are unchanged.
+MEDIA_MAX_HEIGHT_PX = "400px"        # standard image/video max-height
+MEDIA_MAX_HEIGHT_SMALL_PX = "200px"  # looping/sticker media max-height
+MEDIA_MAX_WIDTH_PX = "400px"         # audio player max-width
+
+
+def _wrap_post_html(body: str, footer: str) -> str:
+    """Shared post-HTML shell: the message-body + message-footer div pair joined by a
+    single newline. Used by PostParser._format_html (single/debug post) and by both
+    branches of rss_generator._render_messages_groups (single message and merged
+    group), so the emitted byte structure stays identical across all three call sites."""
+    return (f'<div class="message-body">{body}</div>\n'
+            f'<div class="message-footer">{footer}</div>')
+
+
 @dataclass
 class RenderCtx:
     """Everything a renderer needs. _generate_html_media assembles it (URL signing,
@@ -193,34 +210,34 @@ class RenderCtx:
 # byte-for-byte fidelity is the stage-5a contract.
 def _render_img_400(ctx: 'RenderCtx') -> List[str]:
     return [f'<img src="{ctx.url}" style="max-width:100%; width:auto; height:auto;'
-            f'max-height:400px; object-fit:contain;">']
+            f'max-height:{MEDIA_MAX_HEIGHT_PX}; object-fit:contain;">']
 
 
 def _render_video_400(ctx: 'RenderCtx') -> List[str]:
     return [f'<video controls src="{ctx.url}" style="max-width:100%; width:auto;'
-            f'height:auto; max-height:400px;"></video>']
+            f'height:auto; max-height:{MEDIA_MAX_HEIGHT_PX};"></video>']
 
 
 def _render_audio(ctx: 'RenderCtx') -> List[str]:
-    return [f'<audio controls style="width:100%; max-width:400px;">'
+    return [f'<audio controls style="width:100%; max-width:{MEDIA_MAX_WIDTH_PX};">'
             f'<source src="{ctx.url}" type="{ctx.mime}"></audio>',
             '<br>']
 
 
 def _render_video_loop_200(ctx: 'RenderCtx') -> List[str]:
     return [f'<video controls autoplay loop muted src="{ctx.url}"'
-            f'style="max-width:100%; width:auto; height:auto; max-height:200px;'
+            f'style="max-width:100%; width:auto; height:auto; max-height:{MEDIA_MAX_HEIGHT_SMALL_PX};'
             f'object-fit:contain;"></video>']
 
 
 def _render_img_200_sticker(ctx: 'RenderCtx') -> List[str]:
     return [f'<img src="{ctx.url}" alt="Sticker {ctx.emoji}" style="max-width:100%;'
-            f'width:auto; height:auto; max-height:200px; object-fit:contain;">']
+            f'width:auto; height:auto; max-height:{MEDIA_MAX_HEIGHT_SMALL_PX}; object-fit:contain;">']
 
 
 def _render_video_loop_400(ctx: 'RenderCtx') -> List[str]:
     return [f'<video controls autoplay loop muted src="{ctx.url}"'
-            f'style="max-width:100%; width:auto; height:auto; max-height:400px;'
+            f'style="max-width:100%; width:auto; height:auto; max-height:{MEDIA_MAX_HEIGHT_PX};'
             f'object-fit:contain;"></video>']
 
 
@@ -732,8 +749,7 @@ class PostParser:
             # through bleach — escape it before embedding, same as raw_message below.
             title_escaped = html.escape(str(data["html"]["title"]))
             html_content.append(f'<div class="title">Title: {title_escaped}</div><br>')
-        html_content.append(f'<div class="message-body">{data["html"]["body"]}</div>')
-        html_content.append(f'<div class="message-footer">{data["html"]["footer"]}</div>')
+        html_content.append(_wrap_post_html(data["html"]["body"], data["html"]["footer"]))
         
         # Add raw JSON debug output if debug is enabled.
         # raw_message is the full str(message) serialization and may contain user-controlled
@@ -776,17 +792,17 @@ class PostParser:
                 than once.
         """
         # Compute html body once — avoids triple _generate_html_body calls.
-        # The internal per-fragment sanitize passes were removed (4.4); sanitize
-        # exactly once per output boundary here when requested.
+        # The internal per-fragment sanitize passes are gone; sanitize runs exactly
+        # once at the output boundary here when requested, never inside body/footer.
         html_body = self._generate_html_body(message)
-        # NOTE (stage-4 4.4 consequence): flags are now extracted from the PRE-sanitize
-        # body (the per-fragment sanitize that used to run inside _generate_html_body was
-        # removed). Legitimate links are unaffected — bleach keeps whitelisted
-        # <a href="http(s)://…"> — so link/foreign_channel/mention flags are identical for
-        # normal content. They can differ ONLY for URL-like text that bleach would strip
-        # (e.g. a URL inside a disallowed attribute); flags are non-security (used for
-        # exclude_flags filtering / display), so this edge divergence is accepted rather
-        # than re-adding a per-message sanitize pass that 4.4 deliberately eliminated.
+        # NOTE: flags are extracted from the PRE-sanitize body (there is no longer a
+        # per-fragment sanitize inside _generate_html_body). Legitimate links are
+        # unaffected — bleach keeps whitelisted <a href="http(s)://…"> — so
+        # link/foreign_channel/mention flags are identical for normal content. They can
+        # differ ONLY for URL-like text that bleach would strip (e.g. a URL inside a
+        # disallowed attribute); flags are non-security (used for exclude_flags filtering
+        # / display), so this edge divergence is accepted rather than re-adding the
+        # per-message sanitize pass that was deliberately eliminated.
         flags = self._extract_flags(message, html_body=html_body)
         footer = self.generate_html_footer(message, flags_list=flags)
         if sanitize:
@@ -930,9 +946,9 @@ class PostParser:
         if message.forward_origin: content_body.append(f"--- Forwarded post end ---") # Forward info end
         content_body.append(f'</div><br>')
 
-        # NOTE: sanitize is NOT applied here. Sanitization happens exactly once per
+        # NOTE: sanitize is NOT applied here. Sanitization happens exactly once at the
         # output boundary (process_message for single-post/JSON; in rss_generator the
-        # per-post pass in _render_pipeline for BOTH RSS and HTML). See the map (4.4).
+        # per-post pass in _render_pipeline for BOTH RSS and HTML).
         html_body = '\n'.join(content_body)
         return html_body
 
@@ -1017,7 +1033,7 @@ class PostParser:
                     content_media.append('</div>')
 
         # Not sanitized here — this fragment is embedded in the body and sanitized
-        # once at the output boundary (see the 4.4 sanitize coverage map).
+        # once at the output boundary (single sanitize pass, see process_message).
         html_media = '\n'.join(content_media)
         return html_media
 
@@ -1098,7 +1114,7 @@ class PostParser:
             flags_html = self._format_flags(current_flags)
             content_footer.append('<br>' + flags_html)
             
-        # Not sanitized here — sanitized once at the output boundary (4.4 coverage map):
+        # Not sanitized here — sanitized once at the output boundary:
         # process_message for single-post/JSON; per-post in _render_pipeline for feeds
         # (both RSS and HTML).
         html_footer = '\n'.join(content_footer)
@@ -1193,7 +1209,7 @@ class PostParser:
                     parts.append('&nbsp;|&nbsp;'.join(links))
 
             # Raw fragment — embedded in the footer, sanitized once at the output
-            # boundary (see the 4.4 sanitize coverage map). Not sanitized here.
+            # boundary (single sanitize pass, see process_message). Not sanitized here.
             result_html = '<br>'.join(parts) if parts else None
             return result_html if result_html else None
             
