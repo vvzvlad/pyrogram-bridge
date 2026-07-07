@@ -9,7 +9,6 @@
 # pylance: disable=reportMissingImports, reportMissingModuleSource
 # mypy: disable-error-code="import-untyped"
 
-import copy
 import logging
 import asyncio
 import re
@@ -46,72 +45,80 @@ class ChannelNotFound(Exception):
         self.channel_identifier = channel_identifier
         super().__init__(str(channel_identifier))
 
-def _create_time_based_media_groups(messages: list[Message], merge_seconds: int = 5) -> list[Message]:
-    """
-    Create media groups based on time difference between messages
+def _compute_time_based_group_ids(messages: list[Message], merge_seconds: int = 5) -> dict[int, str | int]:
+    """Return {message.id: effective_media_group_id} WITHOUT mutating messages.
 
     Plain synchronous function (contains no await): runs inside the render thread
     via _render_pipeline. Must not touch asyncio.
+
+    Contract: all messages belong to ONE chat (message.id is unique only per
+    chat); callers must not mix chats in a single call.
+
+    Pure re-implementation of the old _create_time_based_media_groups mutation,
+    reproducing its result for every input the old code survived on PRODUCTION
+    data (naive kurigram dates). Inputs only aware-date test mocks could produce
+    (fully-None and aware+None mixes, where the old code clustered the None-date
+    tail by insertion order incl. truthy-id adoption) are deliberately replaced
+    (registry §3.11):
+      - messages WITHOUT a date do not participate in time clustering and get
+        NO mapping entry (their own media_group_id still applies downstream);
+      - dated messages are ordered ascending by date via a timestamp key
+        (naive-safe: no aware/naive mix once None-date are excluded);
+      - a message joins the current cluster if the gap to the PREVIOUS message
+        is <= merge_seconds; the gap is a NAIVE datetime subtraction
+        (msg.date - prev.date).total_seconds(), exactly as the old code — NOT a
+        timestamp diff (they diverge across a DST fold, and the old behavior is
+        the contract);
+      - the effective id of a cluster is the FIRST TRUTHY media_group_id in
+        cluster order (old code used truthiness, not `is not None`, and
+        overwrote members' own differing ids — kept);
+      - a cluster of >= 2 members with no truthy id gets a synthetic
+        f"time_{min(dates)}" id (exact old format);
+      - singleton clusters and clusters with no effective id produce NO entries;
+        every member of a cluster with an effective id gets one.
     """
-    # Deep-copy the input list to avoid mutating cached Message objects (the cache may
-    # reuse the same objects across calls with different merge_seconds values)
-    messages = copy.deepcopy(messages)
-    # Compute fallback once so all None-date messages get the same sort key (deterministic order)
-    _sort_fallback = datetime.now(timezone.utc)
-    messages_sorted = sorted(messages, key=lambda msg: msg.date or _sort_fallback) # type: ignore
+    dated = sorted((m for m in messages if m.date is not None),
+                   key=lambda m: m.date.timestamp())  # type: ignore
+    group_ids: dict[int, str | int] = {}
+
+    def _flush(cluster: list[Message], effective: str | int | None) -> None:
+        if len(cluster) < 2:
+            return
+        if not effective:
+            # All members are dated here (None-date excluded above), so min() is safe.
+            effective = f"time_{min(m.date for m in cluster)}"  # type: ignore
+        for m in cluster:
+            group_ids[m.id] = effective
+
     cluster: list[Message] = []
-    last_msg_date: datetime = datetime.now(timezone.utc)
-    current_media_group_id: Optional[str] = None
+    effective: str | int | None = None
+    prev_date: Optional[datetime] = None
 
-    for msg in messages_sorted:
-        
+    for msg in dated:
+        mgid = getattr(msg, "media_group_id", None)
         if not cluster:
-            cluster.append(msg)
-            # Use current time as fallback when date is None
-            last_msg_date = msg.date or datetime.now(timezone.utc) # type: ignore
-            current_media_group_id = getattr(msg, "media_group_id", None)
-            continue
-        
-        # Use current time as fallback when date is None to avoid TypeError in subtraction
-        msg_date = msg.date or datetime.now(timezone.utc)
-        time_diff = (msg_date - last_msg_date).total_seconds()
-        
-        msg_media_group_id = getattr(msg, "media_group_id", None)
-        
-        if time_diff <= merge_seconds:
-            if current_media_group_id:
-                msg.media_group_id = current_media_group_id  # type: ignore
-            elif msg_media_group_id:
-                current_media_group_id = msg_media_group_id
-                for m in cluster:
-                    m.media_group_id = current_media_group_id  # type: ignore
-            cluster.append(msg)
-            # Use current time as fallback when date is None
-            last_msg_date = msg.date or datetime.now(timezone.utc) # type: ignore
-        else:
-            if len(cluster) >= 2 and not current_media_group_id:
-                dates = [m.date for m in cluster if m.date is not None]
-                if dates:
-                    min_date = min(dates)
-                    new_group_id = f"time_{min_date}"
-                    for m in cluster:
-                        m.media_group_id = new_group_id  # type: ignore
             cluster = [msg]
-            # Use current time as fallback when date is None
-            last_msg_date = msg.date or datetime.now(timezone.utc) # type: ignore
-            current_media_group_id = msg_media_group_id
-    
-    if len(cluster) >= 2 and not current_media_group_id:
-        dates = [m.date for m in cluster if m.date is not None]
-        if dates:
-            min_date = min(dates)
-            new_group_id = f"time_{min_date}"
-            for m in cluster:
-                m.media_group_id = new_group_id  # type: ignore
+            effective = mgid or None
+            prev_date = msg.date
+            continue
+        time_diff = (msg.date - prev_date).total_seconds()  # type: ignore
+        if time_diff <= merge_seconds:
+            cluster.append(msg)
+            # First truthy id in cluster order wins; keep it even if this member
+            # carries a different truthy id (the old code overwrote it).
+            if not effective and mgid:
+                effective = mgid
+            prev_date = msg.date
+        else:
+            _flush(cluster, effective)
+            cluster = [msg]
+            effective = mgid or None
+            prev_date = msg.date
 
-    return messages_sorted
+    _flush(cluster, effective)
+    return group_ids
 
-def _create_messages_groups(messages: list[Message]) -> list[list[Message]]:
+def _create_messages_groups(messages: list[Message], group_ids: dict[int, str | int] | None = None) -> list[list[Message]]:
     """
     Process messages into formatted posts, handling media groups
 
@@ -119,7 +126,11 @@ def _create_messages_groups(messages: list[Message]) -> list[list[Message]]:
     """
     processing_groups: list[list[Message]] = []
     media_groups: dict[str | int, list[Message]] = {}
-    
+    # Time-clustering supplies effective ids as a PURE mapping (no message mutation,
+    # no deepcopy). Absent an entry, the message's own media_group_id applies
+    # (registry §3.11 / spec Этап 4).
+    group_ids = group_ids or {}
+
     # First pass - collect messages and organize into processing groups
     for message in messages:
         try:
@@ -135,10 +146,11 @@ def _create_messages_groups(messages: list[Message]) -> list[list[Message]]:
                 if 'CHANNEL_CHAT_CREATED'   in str(message.service): continue
                 if 'DELETE_CHAT_PHOTO'      in str(message.service): continue
 
-            if message.media_group_id:
-                if message.media_group_id not in media_groups:
-                    media_groups[message.media_group_id] = []
-                media_groups[message.media_group_id].append(message)
+            effective_group_id = group_ids.get(message.id, message.media_group_id)
+            if effective_group_id:
+                if effective_group_id not in media_groups:
+                    media_groups[effective_group_id] = []
+                media_groups[effective_group_id].append(message)
             else:
                 processing_groups.append([message]) # Single message becomes its own processing group
                 
@@ -152,9 +164,15 @@ def _create_messages_groups(messages: list[Message]) -> list[list[Message]]:
         media_group.sort(key=lambda x: x.id, reverse=False)
         processing_groups.append(media_group)
     
-    # Sort processing groups by date of first message in each group
-    processing_groups.sort(key=lambda group: group[0].date if group[0].date else datetime.now(timezone.utc), reverse=True)
-    
+    # Sort processing groups by date of first message in each group. Timestamp-based key
+    # is naive-safe: kurigram dates are naive-local, and a None-date group used to fall
+    # back to an AWARE datetime.now(timezone.utc) here, raising TypeError on the first
+    # naive-vs-aware comparison — a 500 on ANY feed carrying a None-date post, in the
+    # DEFAULT path (registry §3.12). None-date groups now sort as newest (float('inf'))
+    # and deterministically survive the later [:limit] slice; the final post sort in
+    # _render_messages_groups (0.0 fallback) still places them at the tail of the feed.
+    processing_groups.sort(key=lambda group: group[0].date.timestamp() if group[0].date else float('inf'), reverse=True)
+
     return processing_groups
 
 def _trim_messages_groups(messages_groups: list[list[Message]], limit: int):
@@ -301,15 +319,23 @@ def _render_pipeline(messages: list[Message],
 
     Runs entirely in a worker thread via a single asyncio.to_thread call. It contains
     NO await, NO asyncio primitives, NO create_task/get_running_loop — all the CPU-heavy
-    work (deepcopy, grouping, rendering, bleach) happens here off the event loop.
+    work (grouping, rendering, bleach) happens here off the event loop.
     Media file-id records are accumulated on post_parser._pending_media_ids and flushed
     by the caller after this returns.
 
     `channel` is used only for the sanitize log_context (grep-ability).
     """
     if time_based_merge:
-        messages = _create_time_based_media_groups(messages, merge_seconds)
-    message_groups = _create_messages_groups(messages)
+        # Pure mapping msg.id -> effective_group_id (no message mutation, no deepcopy),
+        # plus a date-ASC pre-sort with the same naive-safe timestamp key (None-date last
+        # via +inf). A stable sorted() on the fetch-order input reproduces the old
+        # `messages_sorted` order — including ties — and does NOT mutate the input, so the
+        # cache-protecting deepcopy is gone (spec Этап 4).
+        group_ids = _compute_time_based_group_ids(messages, merge_seconds)
+        messages = sorted(messages, key=lambda m: m.date.timestamp() if m.date else float('inf'))
+        message_groups = _create_messages_groups(messages, group_ids)
+    else:
+        message_groups = _create_messages_groups(messages)
     message_groups = _trim_messages_groups(message_groups, limit)
     posts = _render_messages_groups(message_groups, post_parser, exclude_flags, exclude_text)
     # Sanitize each surviving (post-filter) post exactly once, here in the worker
@@ -407,7 +433,7 @@ async def _prepare_feed_posts(channel: str | int,
         logger.debug(f"{log_prefix}_reply_enrichment_timing: channel {channel}, replies enriched in {enrichment_elapsed:.3f} seconds")
 
     # 5) Process messages into groups and render them. The whole grouping/trimming/
-    # rendering pipeline is CPU-heavy (deepcopy + per-message rendering) and contains no
+    # rendering pipeline is CPU-heavy (per-message rendering) and contains no
     # await, so run it in ONE worker thread to keep the event loop responsive.
     processing_start_time = time.time()
     try:

@@ -17,7 +17,6 @@ Covers:
       ALL outputs — rss, html-feed, single-post html, and json — each with exactly one pass.
 """
 import re
-import copy
 import pickle
 import asyncio
 import threading
@@ -35,7 +34,7 @@ from rss_generator import (
     generate_channel_rss,
     generate_channel_html,
     _render_pipeline,
-    _create_time_based_media_groups,
+    _compute_time_based_group_ids,
     _create_messages_groups,
     _trim_messages_groups,
     _render_messages_groups,
@@ -92,7 +91,7 @@ def _co_names(func):
 # ---------------------------------------------------------------------------
 
 def test_render_functions_are_sync():
-    for fn in (_create_time_based_media_groups, _create_messages_groups,
+    for fn in (_compute_time_based_group_ids, _create_messages_groups,
                _trim_messages_groups, _render_messages_groups, _render_pipeline):
         assert not asyncio.iscoroutinefunction(fn), f"{fn.__name__} must be a plain sync function"
 
@@ -124,15 +123,27 @@ async def test_pipeline_runs_in_worker_thread(monkeypatch):
     assert seen["ident"] != main_ident, "render pipeline must run in a worker thread, not the loop thread"
 
 
-def test_deepcopy_of_pickled_message_does_not_crash():
+def test_time_clustering_does_not_mutate_pickled_message():
+    # Stage 4: _create_time_based_media_groups (which deep-copied the cached list and
+    # MUTATED media_group_id) is gone. Time-clustering is now a PURE mapping function; a
+    # pickled Message straight from the cache must come out untouched.
     from pyrogram.types import Message, Chat
     from pyrogram.enums import ChatType
-    m = Message(id=7, date=datetime.now(timezone.utc), text="hello",
-                chat=Chat(id=-1001, type=ChatType.CHANNEL, username="testchan"))
-    roundtripped = pickle.loads(pickle.dumps(m))   # mimics the pickle cache
-    clone = copy.deepcopy(roundtripped)            # what _create_time_based_media_groups does
-    assert clone.id == 7
-    assert clone.chat.username == "testchan"
+    base = datetime(2024, 1, 1, 12, 0, 0)  # naive, as kurigram emits
+    a = pickle.loads(pickle.dumps(Message(
+        id=7, date=base, text="hello", media_group_id="orig_A",
+        chat=Chat(id=-1001, type=ChatType.CHANNEL, username="testchan"))))
+    b = pickle.loads(pickle.dumps(Message(
+        id=8, date=base.replace(second=2), text="world", media_group_id=None,
+        chat=Chat(id=-1001, type=ChatType.CHANNEL, username="testchan"))))
+
+    mapping = _compute_time_based_group_ids([a, b], merge_seconds=5)
+
+    # The two adjacent posts are clustered under the first truthy id, but only via the
+    # RETURNED mapping — the input objects keep their original media_group_id.
+    assert mapping == {7: "orig_A", 8: "orig_A"}
+    assert a.media_group_id == "orig_A"
+    assert b.media_group_id is None
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +153,7 @@ def test_deepcopy_of_pickled_message_does_not_crash():
 def test_render_path_has_no_asyncio_side_effects():
     banned = {"create_task", "get_running_loop", "to_thread", "ensure_future"}
     funcs = [
-        _render_pipeline, _create_time_based_media_groups, _create_messages_groups,
+        _render_pipeline, _compute_time_based_group_ids, _create_messages_groups,
         _trim_messages_groups, _render_messages_groups,
         PostParser.process_message, PostParser._generate_html_body,
         PostParser._generate_html_media, PostParser.generate_html_footer,
