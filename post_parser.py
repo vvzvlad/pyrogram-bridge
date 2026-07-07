@@ -14,8 +14,9 @@ import re
 import os
 import html
 import inspect
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Union, Dict, Any, List, Optional
+from typing import Union, Dict, Any, List, Optional, Callable, Tuple
 from pyrogram.types import Message
 from pyrogram.enums import MessageMediaType
 from sanitizer import sanitize_html
@@ -105,6 +106,138 @@ def _story_media_object(message):
         if isinstance(file_unique_id, str) and file_unique_id:
             return media_obj, kind
     return None, None
+
+
+# --------------------------------------------------------------------------- #
+# Single source of truth for media handling (render-pipeline refactor, stage 5).
+#
+# MEDIA_SOURCES maps a media type to a selector returning (media object, render
+# kind). It replaces the three hand-synced ladders that used to live in
+# _get_file_unique_id (dict map), _save_media_file_ids (if/elif) and
+# _generate_html_media (elif cascade). All three now go through this table.
+#
+# kind=None means "selector-only entry": the object participates in file-id
+# extraction/collection but is NOT rendered by the dispatcher. The ONLY kind=None
+# entry is WEB_PAGE (its preview is rendered by _format_webpage). PAID_MEDIA has
+# NO entry at all: its info block is a dedicated branch in _generate_html_media
+# and it is deliberately never collected/downloaded (paid content).
+# --------------------------------------------------------------------------- #
+def _select_document(message):
+    """DOCUMENT selector: PDF documents render as a t.me link ('pdf'), everything
+    else as an image ('img_400'). The selected object is always message.document."""
+    document = message.document
+    if (document is not None and hasattr(document, 'mime_type')
+            and document.mime_type == 'application/pdf'):
+        return document, 'pdf'
+    return document, 'img_400'
+
+
+def _select_sticker(message):
+    """STICKER selector: video stickers loop as <video> ('video_loop_200'), image
+    stickers render as <img> ('img_200_sticker')."""
+    sticker = message.sticker
+    if getattr(sticker, 'is_video', False):
+        return sticker, 'video_loop_200'
+    return sticker, 'img_200_sticker'
+
+
+# Helper kinds returned by _story_media_object / _poll_media_object map to render kinds.
+_HELPER_KIND_TO_RENDER = {'video': 'video_400', 'img': 'img_400'}
+
+
+def _select_story(message):
+    """STORY selector: object choice (video over photo) is delegated to
+    _story_media_object; its helper kind is mapped to a render kind."""
+    media_obj, helper_kind = _story_media_object(message)
+    return media_obj, _HELPER_KIND_TO_RENDER.get(helper_kind)
+
+
+def _select_poll_media(message):
+    """POLL selector: object comes from _poll_media_object (description_media); its
+    helper kind is mapped to a render kind."""
+    media_obj, helper_kind = _poll_media_object(message)
+    return media_obj, _HELPER_KIND_TO_RENDER.get(helper_kind)
+
+
+MEDIA_SOURCES: Dict[Any, Callable[[Message], Tuple[Any, Optional[str]]]] = {
+    MessageMediaType.PHOTO:      lambda m: (m.photo, 'img_400'),
+    MessageMediaType.VIDEO:      lambda m: (m.video, 'video_400'),
+    MessageMediaType.ANIMATION:  lambda m: (m.animation, 'video_400'),
+    MessageMediaType.VIDEO_NOTE: lambda m: (m.video_note, 'video_400'),
+    MessageMediaType.AUDIO:      lambda m: (m.audio, 'audio'),
+    MessageMediaType.VOICE:      lambda m: (m.voice, 'audio'),
+    MessageMediaType.DOCUMENT:   _select_document,
+    MessageMediaType.STICKER:    _select_sticker,
+    MessageMediaType.LIVE_PHOTO: lambda m: (getattr(m, 'live_photo', None), 'video_loop_400'),
+    MessageMediaType.STORY:      _select_story,
+    MessageMediaType.POLL:       _select_poll_media,
+    MessageMediaType.WEB_PAGE:   lambda m: (getattr(m.web_page, 'photo', None), None),
+}
+
+
+@dataclass
+class RenderCtx:
+    """Everything a renderer needs. _generate_html_media assembles it (URL signing,
+    channel_username guard, and the mime/emoji/tg_link values chosen BY MEDIA TYPE);
+    a renderer only formats the string and never inspects the Message."""
+    url: str
+    tg_link: Optional[str] = None   # t.me deep link — only the 'pdf' renderer uses it
+    emoji: str = ''                 # sticker alt text
+    mime: Optional[str] = None      # audio/voice <source> type; default chosen by media type
+
+
+# Renderers return list[str] so the byte structure of the '\n'.join in
+# _generate_html_media is preserved (audio emits TWO items: <audio> tag + <br>;
+# pdf emits its two-append div block). Bodies are lifted VERBATIM from the old
+# if/elif branches, including the `src="{url}"style=` concatenation artifacts —
+# byte-for-byte fidelity is the stage-5a contract.
+def _render_img_400(ctx: 'RenderCtx') -> List[str]:
+    return [f'<img src="{ctx.url}" style="max-width:100%; width:auto; height:auto;'
+            f'max-height:400px; object-fit:contain;">']
+
+
+def _render_video_400(ctx: 'RenderCtx') -> List[str]:
+    return [f'<video controls src="{ctx.url}" style="max-width:100%; width:auto;'
+            f'height:auto; max-height:400px;"></video>']
+
+
+def _render_audio(ctx: 'RenderCtx') -> List[str]:
+    return [f'<audio controls style="width:100%; max-width:400px;">'
+            f'<source src="{ctx.url}" type="{ctx.mime}"></audio>',
+            '<br>']
+
+
+def _render_video_loop_200(ctx: 'RenderCtx') -> List[str]:
+    return [f'<video controls autoplay loop muted src="{ctx.url}"'
+            f'style="max-width:100%; width:auto; height:auto; max-height:200px;'
+            f'object-fit:contain;"></video>']
+
+
+def _render_img_200_sticker(ctx: 'RenderCtx') -> List[str]:
+    return [f'<img src="{ctx.url}" alt="Sticker {ctx.emoji}" style="max-width:100%;'
+            f'width:auto; height:auto; max-height:200px; object-fit:contain;">']
+
+
+def _render_video_loop_400(ctx: 'RenderCtx') -> List[str]:
+    return [f'<video controls autoplay loop muted src="{ctx.url}"'
+            f'style="max-width:100%; width:auto; height:auto; max-height:400px;'
+            f'object-fit:contain;"></video>']
+
+
+def _render_pdf(ctx: 'RenderCtx') -> List[str]:
+    return [f'<div class="document-pdf" style="padding: 10px;">',
+            f'<a href="{ctx.tg_link}" target="_blank">[PDF-файл]</a></div>']
+
+
+RENDERERS: Dict[str, Callable[['RenderCtx'], List[str]]] = {
+    'img_400':         _render_img_400,
+    'video_400':       _render_video_400,
+    'audio':           _render_audio,
+    'video_loop_200':  _render_video_loop_200,
+    'img_200_sticker': _render_img_200_sticker,
+    'video_loop_400':  _render_video_loop_400,
+    'pdf':             _render_pdf,
+}
 
 
 #tests
@@ -840,7 +973,6 @@ class PostParser:
                 # Guard: channel_username may be None for private chats without a username
                 if not channel_username:
                     logger.warning(f"Could not generate media URL for message {message.id}: channel username is missing.")
-                    content_media.append('</div>')
                 else:
                     file = f"{channel_username}/{message.id}/{file_unique_id}"
                     digest = generate_media_digest(file)
@@ -848,72 +980,35 @@ class PostParser:
 
                     logger.debug(f"Collected media file: {channel_username}/{message.id}/{file_unique_id}")
 
-                    # Check if document is a PDF file
-                    if (message.media == MessageMediaType.DOCUMENT and
-                        message.document is not None and hasattr(message.document, 'mime_type') and
-                        message.document.mime_type == 'application/pdf'):
-                        # Only attempt to create link if channel_username is available
-                        if channel_username.startswith('-100'):
-                            tg_link = f"https://t.me/c/{channel_username[4:]}/{message.id}"
-                        else:
-                            tg_link = f"https://t.me/{channel_username}/{message.id}"
-                        content_media.append(f'<div class="document-pdf" style="padding: 10px;">')
-                        content_media.append(f'<a href="{tg_link}" target="_blank">[PDF-файл]</a></div>')
-                    elif message.media in [MessageMediaType.PHOTO, MessageMediaType.DOCUMENT]:
-                        content_media.append(f'<img src="{url}" style="max-width:100%; width:auto; height:auto;'
-                                            f'max-height:400px; object-fit:contain;">')
-                    elif message.media == MessageMediaType.VIDEO:
-                        content_media.append(f'<video controls src="{url}" style="max-width:100%; width:auto;'
-                                            f'height:auto; max-height:400px;"></video>')
-                    elif message.media == MessageMediaType.ANIMATION:
-                        content_media.append(f'<video controls src="{url}" style="max-width:100%; width:auto;'
-                                            f'height:auto; max-height:400px;"></video>')
-                    elif message.media == MessageMediaType.VIDEO_NOTE:
-                        content_media.append(f'<video controls src="{url}" style="max-width:100%; width:auto;'
-                                            f'height:auto; max-height:400px;"></video>')
-                    elif message.media == MessageMediaType.AUDIO:
-                        mime_type = getattr(message.audio, 'mime_type', 'audio/mpeg')
-                        content_media.append(f'<audio controls style="width:100%; max-width:400px;">'
-                                            f'<source src="{url}" type="{mime_type}"></audio>')
-                        content_media.append('<br>')
-                    elif message.media == MessageMediaType.VOICE:
-                        mime_type = getattr(message.voice, 'mime_type', 'audio/ogg')
-                        content_media.append(f'<audio controls style="width:100%; max-width:400px;">'
-                                            f'<source src="{url}" type="{mime_type}"></audio>')
-                        content_media.append('<br>')
-                    elif message.media == MessageMediaType.STICKER:
-                        emoji = getattr(message.sticker, 'emoji', '')
-                        if getattr(message.sticker, 'is_video', False):
-                            content_media.append(f'<video controls autoplay loop muted src="{url}"'
-                                                f'style="max-width:100%; width:auto; height:auto; max-height:200px;'
-                                                f'object-fit:contain;"></video>')
-                        else:
-                            content_media.append(f'<img src="{url}" alt="Sticker {emoji}" style="max-width:100%;'
-                                                f'width:auto; height:auto; max-height:200px; object-fit:contain;">')
-                    elif message.media == MessageMediaType.LIVE_PHOTO:
-                        # Live photo is effectively a short video clip.
-                        content_media.append(f'<video controls autoplay loop muted src="{url}"'
-                                            f'style="max-width:100%; width:auto; height:auto; max-height:400px;'
-                                            f'object-fit:contain;"></video>')
-                    elif message.media == MessageMediaType.STORY:
-                        # Choose the tag from the SAME helper that produced the URL's
-                        # file_unique_id, so the tag type always matches the URL object.
-                        story_media_obj, story_media_kind = _story_media_object(message)
-                        if story_media_obj is not None and story_media_kind == 'video':
-                            content_media.append(f'<video controls src="{url}" style="max-width:100%; width:auto;'
-                                                f'height:auto; max-height:400px;"></video>')
-                        elif story_media_obj is not None:
-                            content_media.append(f'<img src="{url}" style="max-width:100%; width:auto; height:auto;'
-                                                f'max-height:400px; object-fit:contain;">')
-                    elif message.media == MessageMediaType.POLL and poll_media_obj is not None:
-                        if poll_media_kind == 'video':
-                            content_media.append(f'<video controls src="{url}" style="max-width:100%; width:auto;'
-                                                f'height:auto; max-height:400px;"></video>')
-                        else:
-                            content_media.append(f'<img src="{url}" style="max-width:100%; width:auto; height:auto;'
-                                                f'max-height:400px; object-fit:contain;">')
-                    content_media.append('</div>')
-        
+                    # Dispatch through the media table: the selector gives the render
+                    # kind, the RENDERERS map gives the fragment. mime/emoji/tg_link
+                    # defaults are chosen here BY MEDIA TYPE (the renderer never guesses);
+                    # kind None (WEB_PAGE) emits no element — the empty container matches
+                    # the old cascade where no branch matched.
+                    selector = MEDIA_SOURCES.get(message.media)
+                    kind = selector(message)[1] if selector is not None else None
+                    renderer = RENDERERS.get(kind) if kind else None
+                    if renderer is not None:
+                        ctx = RenderCtx(url=url)
+                        if kind == 'pdf':
+                            if channel_username.startswith('-100'):
+                                ctx.tg_link = f"https://t.me/c/{channel_username[4:]}/{message.id}"
+                            else:
+                                ctx.tg_link = f"https://t.me/{channel_username}/{message.id}"
+                        elif kind == 'audio':
+                            if message.media == MessageMediaType.VOICE:
+                                ctx.mime = getattr(message.voice, 'mime_type', 'audio/ogg')
+                            else:
+                                ctx.mime = getattr(message.audio, 'mime_type', 'audio/mpeg')
+                        elif kind == 'img_200_sticker':
+                            ctx.emoji = getattr(message.sticker, 'emoji', '')
+                        content_media.extend(renderer(ctx))
+            # Registry §3.14: close the message-media container in EVERY branch. It used
+            # to be closed only when a URL was built (or the username guard fired), so a
+            # None file_unique_id (e.g. WEB_PAGE without photo) left an open <div> that
+            # html5lib later swallowed the following posts into.
+            content_media.append('</div>')
+
         if webpage := getattr(message, "web_page", None): # Web page preview
             if webpage_html := self._format_webpage(webpage, message):
                 if len((message.text or message.caption or '').strip()) <= 10:
@@ -1231,28 +1326,12 @@ class PostParser:
 
     def _get_file_unique_id(self, message: Message) -> Union[str, None]:
         try:
-            media_mapping = {
-                MessageMediaType.PHOTO:         lambda m: m.photo.file_unique_id,
-                MessageMediaType.VIDEO:         lambda m: m.video.file_unique_id,
-                MessageMediaType.DOCUMENT:      lambda m: m.document.file_unique_id,
-                MessageMediaType.AUDIO:         lambda m: m.audio.file_unique_id,
-                MessageMediaType.VOICE:         lambda m: m.voice.file_unique_id,
-                MessageMediaType.VIDEO_NOTE:    lambda m: m.video_note.file_unique_id,
-                MessageMediaType.ANIMATION:     lambda m: m.animation.file_unique_id,
-                MessageMediaType.STICKER:       lambda m: m.sticker.file_unique_id,
-                MessageMediaType.WEB_PAGE:      lambda m: m.web_page.photo.file_unique_id if m.web_page and m.web_page.photo else None,
-                # New media types (Kurigram 2.2.23): getattr-only access, the
-                # attributes do not exist on older Message objects/mocks.
-                MessageMediaType.LIVE_PHOTO:    lambda m: getattr(getattr(m, 'live_photo', None), 'file_unique_id', None),
-                MessageMediaType.STORY:         lambda m: getattr(_story_media_object(m)[0], 'file_unique_id', None),
-                MessageMediaType.POLL:          lambda m: getattr(_poll_media_object(m)[0], 'file_unique_id', None),
-            }
-            
-            if message.media in media_mapping:
-                return media_mapping[message.media](message)
-            
-            return None
-            
+            selector = MEDIA_SOURCES.get(message.media)
+            if selector is None:
+                return None
+            selected_obj, _kind = selector(message)
+            return getattr(selected_obj, 'file_unique_id', None)
+
         except Exception as e:
             logger.error(f"file_id_extraction_error: media_type {message.media}, error {str(e)}")
             return None
@@ -1289,40 +1368,20 @@ class PostParser:
                 return
 
             if message.media:
-                # Skip large videos - they shouldn't be cached permanently
-                if message.video and message.video.file_size and message.video.file_size > 100 * 1024 * 1024:
+                # Object selection goes through the single MEDIA_SOURCES table instead
+                # of the old truthy-attribute if/elif ladder. paid_media has no table
+                # entry and is deliberately NOT collected (paid content).
+                selector = MEDIA_SOURCES.get(message.media)
+                selected_obj = selector(message)[0] if selector is not None else None
+
+                # Registry §3.13: the ">100MB don't cache" rule applies to ANY selected
+                # media object, not just message.video (the old code guarded only the
+                # video type here, plus the newer live_photo/story/poll sources).
+                file_size = getattr(selected_obj, 'file_size', None)
+                if isinstance(file_size, int) and file_size > 100 * 1024 * 1024:
                     return
 
-                file_unique_id = ''
-                new_media_obj = None  # selected object among the Kurigram 2.2.23 media sources
-                if   message.photo:      file_unique_id = message.photo.file_unique_id
-                elif message.video:      file_unique_id = message.video.file_unique_id
-                elif message.document:   file_unique_id = message.document.file_unique_id
-                elif message.audio:      file_unique_id = message.audio.file_unique_id
-                elif message.voice:      file_unique_id = message.voice.file_unique_id
-                elif message.video_note: file_unique_id = message.video_note.file_unique_id
-                elif message.animation:  file_unique_id = message.animation.file_unique_id
-                elif message.sticker:    file_unique_id = message.sticker.file_unique_id
-                elif message.web_page and message.web_page.photo:
-                    file_unique_id = message.web_page.photo.file_unique_id
-                # New media types (Kurigram 2.2.23): getattr-only, the attributes do
-                # not exist on older Message objects/mocks. paid_media is deliberately
-                # NOT collected — it cannot be downloaded (paid content).
-                elif getattr(message, 'live_photo', None):
-                    new_media_obj = message.live_photo
-                elif (story_media := _story_media_object(message)[0]) is not None:
-                    new_media_obj = story_media
-                elif (poll_media := _poll_media_object(message)[0]) is not None:
-                    new_media_obj = poll_media
-
-                if new_media_obj is not None:
-                    # The >100MB message.video guard above does not cover these
-                    # sources (live photo, story video, poll description video) —
-                    # apply the same "don't cache large videos" rule here.
-                    file_size = getattr(new_media_obj, 'file_size', None)
-                    if isinstance(file_size, int) and file_size > 100 * 1024 * 1024:
-                        return
-                    file_unique_id = getattr(new_media_obj, 'file_unique_id', '') or ''
+                file_unique_id = getattr(selected_obj, 'file_unique_id', '') or ''
 
                 if file_unique_id:
                     added_ts = datetime.now().timestamp()
