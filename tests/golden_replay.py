@@ -118,27 +118,21 @@ def capture_html(channel):
 _LASTBUILDDATE_RE = re.compile(r"<lastBuildDate>.*?</lastBuildDate>", re.DOTALL)
 # feedgen 1.0.0 emits no <generator>; normalized anyway as cheap insurance vs. a lib upgrade.
 _GENERATOR_RE = re.compile(r"<generator>.*?</generator>", re.DOTALL)
-# Merged-post flags are built as list(set(...)) (rss_generator.py:260-265): order depends on
-# PYTHONHASHSEED, which conftest cannot pin. Sort the flag tokens inside each flags div.
-# (This normalization is removed by the stage-2 commit referencing §3.8.)
-_FLAGS_DIV_RE = re.compile(r'<div class="message-flags">(.*?)</div>', re.DOTALL)
-
-
-def _sort_flags_div(match):
-    flags = sorted(p.strip() for p in match.group(1).split("🏷") if p.strip())
-    inner = " ".join("🏷 " + f for f in flags)
-    return f'<div class="message-flags"> {inner} </div>'
+# NOTE: the stage-0 flag-sort normalization (_FLAGS_DIV_RE / _sort_flags_div) was
+# removed in stage 2 (§3.8). Merged-post flags are now built in deterministic
+# first-seen order (rss_generator._render_messages_groups: dict.fromkeys(...)),
+# so the golden stores the real order and no normalization is needed — keeping it
+# would only mask a real flag-order regression.
 
 
 def normalize_rss(xml):
     xml = _LASTBUILDDATE_RE.sub("<lastBuildDate/>", xml)
     xml = _GENERATOR_RE.sub("<generator/>", xml)
-    xml = _FLAGS_DIV_RE.sub(_sort_flags_div, xml)
     return xml
 
 
 def normalize_html(html):
-    return _FLAGS_DIV_RE.sub(_sort_flags_div, html)
+    return html
 
 
 def golden_path(channel, kind):

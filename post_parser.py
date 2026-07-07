@@ -1055,7 +1055,12 @@ class PostParser:
                     else: emoji = "❓" # Default for unknown cases
                     reactions_html += f'<span class="reaction">{emoji} {reaction.count}&nbsp;&nbsp;</span>'
                 reactions_html = reactions_html.rstrip()
-                first_line_parts.append(reactions_html)
+                # An empty reactions object (reactions.reactions == []) produces no
+                # spans; appending the empty string would emit a leading
+                # '&nbsp;&nbsp;|&nbsp;&nbsp;' separator in the footer. Skip it
+                # (registry §3.15). Affects single posts too.
+                if reactions_html:
+                    first_line_parts.append(reactions_html)
 
             # Add views
             if views := getattr(message, "views", None):

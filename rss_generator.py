@@ -15,7 +15,6 @@ import asyncio
 import re
 import time
 from datetime import datetime, timezone
-from types import SimpleNamespace
 from typing import Optional
 from feedgen.feed import FeedGenerator
 from pyrogram import errors, Client
@@ -151,54 +150,6 @@ def _trim_messages_groups(messages_groups: list[list[Message]], limit: int):
     
     return messages_groups
 
-def processed_message_to_tg_message(processed_message: dict) -> Message:
-    """
-    Convert processed message dictionary into a Message-like object
-    containing only the attributes needed by generate_html_footer.
-    """
-    # Create a simple chat object
-    chat_info = SimpleNamespace()
-    channel_identifier = processed_message.get('channel')
-    if isinstance(channel_identifier, str) and channel_identifier.startswith('-100'):
-        setattr(chat_info, 'id', int(channel_identifier))
-        setattr(chat_info, 'username', None)
-    else:
-        setattr(chat_info, 'id', None) # Or some placeholder if needed
-        setattr(chat_info, 'username', channel_identifier)
-
-
-    # Convert reactions dict to list of objects
-    reactions_list = []
-    if reactions_dict := processed_message.get('reactions'):
-        for emoji, count in reactions_dict.items():
-            # Assuming no custom/paid reactions in this simplified structure
-            reactions_list.append(SimpleNamespace(emoji=emoji, count=count, is_paid=False, custom_emoji_id=None))
-    
-    # Recreate reactions structure expected by Pyrogram's reaction handling
-    reactions_obj = SimpleNamespace(reactions=reactions_list) if reactions_list else None
-
-    # Create the message-like object
-    tg_message_mock = SimpleNamespace(
-        id=processed_message.get('message_id'),
-        date=datetime.fromtimestamp(processed_message['date'], tz=timezone.utc) if processed_message.get('date') else None,
-        views=processed_message.get('views'),
-        reactions=reactions_obj,
-        chat=chat_info,
-        # Add other attributes if generate_html_footer or its dependencies need them
-        # For now, these seem sufficient based on the analysis of generate_html_footer
-        # and _reactions_views_links.
-        text=processed_message.get('text'), # Add text just in case
-        caption=None, # Assume caption is merged into text by process_message
-        forward_origin=None, # Not directly needed by footer generation logic itself
-        reply_to_message=None, # Not directly needed by footer generation logic itself
-        media=None, # Not needed by footer
-        service=processed_message.get('service') # Potentially needed? Added just in case.
-    )
-
-    # Cast to Message type hint for static analysis, although it's a mock object
-    return tg_message_mock # type: ignore
-
-
 def _render_messages_groups(messages_groups: list[list[Message]],
                                     post_parser: PostParser,
                                     exclude_flags: str | None = None,
@@ -240,12 +191,14 @@ def _render_messages_groups(messages_groups: list[list[Message]],
             else: # Multiple messages in group - merge text and html body
                 processed_messages = [post_parser.process_message(msg, include_raw=False, sanitize=False) for msg in group]
 
-                # Determine main message for header/footer/title
-                main_message = next(  
-                    (msg for msg in processed_messages if msg['text']),
-                    processed_messages[0]  # fallback if no message contains text
-                )
-            
+                # Determine the main message with the SAME criterion the processed dicts
+                # used: first message that has text or caption, else the first of the
+                # group. processed_messages[i] corresponds to group[i], so main_message
+                # (dict, for title/date/author) and main_raw (the real Message, for the
+                # footer) point at the same index.
+                main_idx = next((i for i, m in enumerate(group) if (m.text or m.caption)), 0)
+                main_raw = group[main_idx]
+                main_message = processed_messages[main_idx]
 
                 # Merge text fields from all messages
                 all_texts = [msg['text'] for msg in processed_messages if msg['text']]
@@ -255,19 +208,16 @@ def _render_messages_groups(messages_groups: list[list[Message]],
                 all_html_bodies = [msg['html']['body'] for msg in processed_messages if msg['html']['body']]
                 combined_html_body = '\n<br><br>\n'.join(all_html_bodies)
 
-                # Collect all unique flags from all messages in the group
-                all_flags = set()
-                for msg in processed_messages:
-                    if msg.get('flags'): # Check if flags exist and are not empty
-                        all_flags.update(msg['flags'])
-                all_flags.add("merged")
-                merged_flags = list(all_flags) # Convert back to list if needed, or keep as set
+                # Deterministic merged flags: first-seen order across the group, then
+                # 'merged' (registry §3.8 — replaces the hash-ordered list(set(...))).
+                merged_flags = list(dict.fromkeys(f for msg in processed_messages for f in msg['flags']))
+                merged_flags.append("merged")
 
-                # generate tg-message from processed message
-                tg_message = processed_message_to_tg_message(main_message)
-
-
-                footer_html = post_parser.generate_html_footer(tg_message, flags_list=merged_flags)
+                # Render the merged footer DIRECTLY from the real main Message — no
+                # dict->mock round-trip. The raw Message carries its real reactions
+                # (custom emojis get their own span, registry §3.6) and its naive-local
+                # date (registry §3.7), matching a single post of the same message.
+                footer_html = post_parser.generate_html_footer(main_raw, flags_list=merged_flags)
 
                 html_parts = [
                     f'<div class="message-body">{combined_html_body}</div>',

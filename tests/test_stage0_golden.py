@@ -3,9 +3,10 @@
 """Stage-0 golden oracle (render-pipeline refactor epic, issue #27/#34).
 
 Regenerates the RSS + HTML feeds for the frozen recorded corpus and asserts
-byte-equality against the committed goldens after the spec's declared normalizations
-(strip volatile <lastBuildDate>, sort the hash-ordered merged-flags div). Any other
-byte change = a render regression, and this test must catch it.
+byte-equality against the committed goldens after the spec's declared normalization
+(strip volatile <lastBuildDate>). Any other byte change = a render regression, and
+this test must catch it. (The stage-0 merged-flags sort normalization was removed in
+stage 2: flag order is now deterministic first-seen order — §3.8.)
 
 Guardrails: this stage only ADDS a loader + goldens + this test. No render/pipeline
 production code is touched; the goldens freeze CURRENT behavior including known bugs
@@ -60,14 +61,14 @@ def test_all_goldens_present_and_nonempty():
             assert os.path.getsize(path) > 0, f"empty golden: {path}"
 
 
-def test_normalization_sorts_merged_flags():
-    """Guard the load-bearing flag-sort normalization itself: merged-post flags are emitted
-    as list(set(...)) (hash-ordered), so the normalizer must canonicalize their order."""
-    unsorted = '<div class="message-flags"> 🏷 video 🏷 fwd 🏷 link </div>'
-    resorted = '<div class="message-flags"> 🏷 link 🏷 fwd 🏷 video </div>'
-    assert gr.normalize_html(unsorted) == gr.normalize_html(resorted)
-    # ...and it is not a no-op that would let a real reordering slip through undetected.
-    assert gr.normalize_html(unsorted) == '<div class="message-flags"> 🏷 fwd 🏷 link 🏷 video </div>'
+def test_normalization_preserves_flag_order():
+    """Stage 2 (§3.8): merged-post flags are now emitted in deterministic first-seen
+    order, so normalize_html no longer reorders the flags div — a real flag reordering
+    must reach the byte comparison instead of being masked."""
+    a = '<div class="message-flags"> 🏷 video 🏷 fwd 🏷 link </div>'
+    b = '<div class="message-flags"> 🏷 link 🏷 fwd 🏷 video </div>'
+    assert gr.normalize_html(a) != gr.normalize_html(b)
+    assert gr.normalize_html(a) == a
 
 
 def test_normalization_strips_lastbuilddate():
