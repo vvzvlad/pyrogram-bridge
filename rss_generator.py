@@ -14,6 +14,7 @@ import logging
 import asyncio
 import re
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 from feedgen.feed import FeedGenerator
@@ -27,6 +28,23 @@ from sanitizer import sanitize_html
 Config = get_settings()
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class PreparedFeed:
+    """Output of _prepare_feed_posts — everything both formatters need after
+    fetch -> enrich -> render -> filter -> sanitize."""
+    channel_username: str
+    channel_title: str            # used by RSS metadata only
+    posts: list[dict]             # rendered, filtered, sorted, SANITIZED
+
+
+class ChannelNotFound(Exception):
+    """Channel could not be resolved to a username; formatter -> create_error_feed."""
+    def __init__(self, channel_identifier):
+        # The prepared identifier (str or int), rendered into the error feed.
+        self.channel_identifier = channel_identifier
+        super().__init__(str(channel_identifier))
 
 def _create_time_based_media_groups(messages: list[Message], merge_seconds: int = 5) -> list[Message]:
     """
@@ -309,18 +327,122 @@ def _render_pipeline(messages: list[Message],
     return posts
 
 
+async def _prepare_feed_posts(channel: str | int,
+                              client: Client,
+                              *,
+                              limit: int,
+                              exclude_flags: str | None,
+                              exclude_text: str | None,
+                              merge_seconds: int,
+                              history_limit: int,
+                              enrich_replies: bool,
+                              log_prefix: str) -> PreparedFeed:
+    """Single code path feeding both feeds: validate -> resolve chat -> fetch history ->
+    (optionally) enrich replies -> render/filter/sort/sanitize in one worker thread. The
+    RSS/HTML formatters used to duplicate this ~80% verbatim; path differences are now
+    EXPLICIT parameters (history_limit: RSS over-fetches limit*2; enrich_replies: HTML-only;
+    log_prefix 'rss'|'html' keeps today's paired log-line names).
+
+    Raises ChannelNotFound (formatter -> create_error_feed), re-raises errors.FloodWait
+    for both the get_chat and the get_history path (§3.9; api_server -> HTTP 429), and
+    wraps any other resolution/history error in ValueError with unified text (§3.10).
+    """
+    # 1) Validate limit.
+    if limit < 1:
+        raise ValueError(f"limit must be positive, got {limit}")
+    if limit > 200:
+        raise ValueError(f"limit cannot exceed 200, got {limit}")
+
+    post_parser = PostParser(client=client)
+
+    # 2) Resolve the chat. NOTE: keep `from tg_cache import ...` INSIDE this function —
+    # feed tests monkeypatch tg_cache and rely on late name resolution.
+    channel_info_start_time = time.time()
+    try:
+        channel = post_parser.channel_name_prepare(channel)
+        from tg_cache import cached_get_chat
+        channel_info = await cached_get_chat(post_parser.client, channel)
+        channel_title = channel_info.title or f"Telegram: {channel}"
+        channel_username = channel_info.username or (str(channel_info.id) if channel_info.id and str(channel_info.id).startswith('-100') else None)
+        if not channel_username:
+            # Prepared channel (which could be int) is carried into the error feed.
+            logger.warning(f"Could not get username for channel {channel}, using identifier for error feed.")
+            raise ChannelNotFound(channel)
+    except (errors.UsernameInvalid, errors.UsernameNotOccupied) as e:
+        logger.warning(f"Channel not found error for {channel}: {str(e)}")
+        raise ChannelNotFound(channel) from e
+    except errors.FloodWait:
+        # Let FloodWait bubble up to api_server.py, which returns HTTP 429 with Retry-After.
+        raise
+    except ChannelNotFound:
+        # The no-username branch above — not a resolution failure to wrap in ValueError.
+        raise
+    except Exception as e:
+        logger.error(f"Error during get_chat for channel '{channel}' (type: {type(channel)}): {str(e)}", exc_info=True)
+        raise ValueError(f"Failed to get chat info for {channel}: {str(e)}") from e
+
+    channel_info_elapsed = time.time() - channel_info_start_time
+    logger.debug(f"{log_prefix}_channel_info_timing: channel {channel}, retrieved in {channel_info_elapsed:.3f} seconds")
+
+    # 3) Fetch history.
+    messages_start_time = time.time()
+    try:
+        from tg_cache import cached_get_chat_history
+        messages = await cached_get_chat_history(post_parser.client, channel, limit=history_limit)
+    except errors.FloodWait:
+        # §3.9: FloodWait from history propagates -> HTTP 429 (previously wrapped -> 400).
+        raise
+    except Exception as e:
+        logger.error(f"Error during get_chat_history for channel '{channel}' (type: {type(channel)}): {str(e)}", exc_info=True)
+        raise ValueError(f"Failed to get chat history for {channel}: {str(e)}") from e
+
+    messages_elapsed = time.time() - messages_start_time
+    logger.debug(f"{log_prefix}_messages_retrieval_timing: channel {channel}, {len(messages)} messages retrieved in {messages_elapsed:.3f} seconds")
+
+    # 4) Optional reply enrichment (HTML-only today — deliberate, keeps RSS polling cheap).
+    if enrich_replies:
+        enrichment_start_time = time.time()
+        messages = await _reply_enrichment(client, messages)
+        enrichment_elapsed = time.time() - enrichment_start_time
+        logger.debug(f"{log_prefix}_reply_enrichment_timing: channel {channel}, replies enriched in {enrichment_elapsed:.3f} seconds")
+
+    # 5) Process messages into groups and render them. The whole grouping/trimming/
+    # rendering pipeline is CPU-heavy (deepcopy + per-message rendering) and contains no
+    # await, so run it in ONE worker thread to keep the event loop responsive.
+    processing_start_time = time.time()
+    try:
+        posts = await asyncio.to_thread(
+            _render_pipeline, messages, post_parser, limit,
+            exclude_flags, exclude_text, merge_seconds, Config['time_based_merge'],
+            channel,
+        )
+    finally:
+        # Persist media file-ids collected during rendering with a single bulk upsert —
+        # in a finally so a partial render still records what it collected (the flush is
+        # best-effort and swallows its own errors, so it cannot mask a render exception).
+        await post_parser._flush_pending_media_ids()
+
+    processing_elapsed = time.time() - processing_start_time
+    logger.debug(f"{log_prefix}_messages_processing_timing: channel {channel}, {len(posts)} posts processed in {processing_elapsed:.3f} seconds")
+
+    return PreparedFeed(channel_username=channel_username, channel_title=channel_title, posts=posts)
+
+
 async def generate_channel_rss(channel: str | int,
-                                client: Client, 
-                                limit: int = 20, 
+                                client: Client,
+                                limit: int = 20,
                                 exclude_flags: str | None = None,
                                 exclude_text: str | None = None,
                                 merge_seconds: int = 5
                                 ) -> str:
     """
-    Generate RSS feed for channel using actual messages
+    Generate RSS feed for channel using actual messages.
+
+    Thin formatter over the shared _prepare_feed_posts: it only turns the prepared,
+    sanitized posts into a feedgen RSS document. RSS over-fetches (history_limit=limit*2)
+    and skips reply enrichment (enrich_replies=False).
     Args:
         channel: Telegram channel name
-        post_parser: Optional PostParser instance. If not provided, will create new one
         client: Telegram client instance
         limit: Maximum number of posts to include in the RSS feed
         exclude_flags: Flags to exclude from the RSS feed
@@ -329,44 +451,22 @@ async def generate_channel_rss(channel: str | int,
         RSS feed as string in XML format
     """
     total_start_time = time.time()
-    
-    if limit < 1:
-        raise ValueError(f"limit must be positive, got {limit}")
-    if limit > 200:
-        raise ValueError(f"limit cannot exceed 200, got {limit}")
+    base_url = Config['pyrogram_bridge_url']
 
     try:
-        post_parser = PostParser(client=client)
-            
+        prepared = await _prepare_feed_posts(
+            channel, client,
+            limit=limit, exclude_flags=exclude_flags, exclude_text=exclude_text,
+            merge_seconds=merge_seconds, history_limit=limit * 2,
+            enrich_replies=False, log_prefix="rss",
+        )
+
+        channel_username = prepared.channel_username
+        channel_title = prepared.channel_title
+        final_posts = prepared.posts
+
         fg = FeedGenerator()
         fg.load_extension('dc')
-        base_url = Config['pyrogram_bridge_url']
-        
-        channel_info_start_time = time.time()
-        try:
-            channel  = post_parser.channel_name_prepare(channel)
-            from tg_cache import cached_get_chat
-            channel_info = await cached_get_chat(post_parser.client, channel)
-            channel_title = channel_info.title or f"Telegram: {channel}"
-            channel_username = channel_info.username or (str(channel_info.id) if channel_info.id and str(channel_info.id).startswith('-100') else None)
-            if not channel_username:
-                # Use prepared channel (which could be int) for error feed if username fails
-                logger.warning(f"Could not get username for channel {channel}, using identifier for error feed.")
-                return create_error_feed(str(channel), base_url) # Ensure channel is string for error feed
-        except (errors.UsernameInvalid, errors.UsernameNotOccupied) as e:
-            logger.warning(f"Channel not found error for {channel}: {str(e)}")
-            return create_error_feed(channel, base_url)
-        except errors.FloodWait:
-            # Let FloodWait bubble up to api_server.py, which returns HTTP 429 with Retry-After header
-            raise
-        except Exception as e:
-            logger.error(f"Error during get_chat for channel '{channel}' (type: {type(channel)}): {str(e)}", exc_info=True) # Log error specifically for get_chat
-            # Re-raise the original exception to be caught by the outer handler if needed,
-            # but add specific logging here.
-            raise ValueError(f"Failed to get chat info for {channel}: {str(e)}") from e # Raise a more specific error perhaps
-        
-        channel_info_elapsed = time.time() - channel_info_start_time
-        logger.debug(f"rss_channel_info_timing: channel {channel}, retrieved in {channel_info_elapsed:.3f} seconds")
 
         # Set feed metadata
         main_name = f"{channel_title} (@{channel_username})"
@@ -375,41 +475,7 @@ async def generate_channel_rss(channel: str | int,
         fg.description(f'Telegram channel {channel_username} RSS feed')
         fg.language('ru')
         fg.id(f"{base_url}/rss/{channel_username}") # Use username for feed ID consistency
-        
-        # Collect messages
-        messages_start_time = time.time()
-        try:
-            from tg_cache import cached_get_chat_history
-            
-            messages = await cached_get_chat_history(post_parser.client, channel, limit=limit*2)
-        except Exception as e:
-            logger.error(f"Error during get_chat_history for channel '{channel}' (type: {type(channel)}): {str(e)}", exc_info=True) # Log error specifically for get_chat_history
-            raise ValueError(f"Failed to get chat history for {channel}: {str(e)}") from e # Raise a more specific error
-            
-        messages_elapsed = time.time() - messages_start_time
-        logger.debug(f"rss_messages_retrieval_timing: channel {channel}, {len(messages)} messages retrieved in {messages_elapsed:.3f} seconds")
-        
-        # Process messages into groups and render them.
-        # The whole grouping/trimming/rendering pipeline is CPU-heavy (deepcopy +
-        # per-message rendering) and contains no await, so run it in ONE worker
-        # thread to keep the event loop responsive.
-        processing_start_time = time.time()
-        try:
-            final_posts = await asyncio.to_thread(
-                _render_pipeline, messages, post_parser, limit,
-                exclude_flags, exclude_text, merge_seconds, Config['time_based_merge'],
-                channel,
-            )
-        finally:
-            # Persist media file-ids collected during rendering with a single bulk
-            # upsert — in a finally so a partial render still records what it collected
-            # (the flush is best-effort and swallows its own errors, so it cannot mask a
-            # render exception).
-            await post_parser._flush_pending_media_ids()
 
-        processing_elapsed = time.time() - processing_start_time
-        logger.debug(f"rss_messages_processing_timing: channel {channel}, {len(final_posts)} posts processed in {processing_elapsed:.3f} seconds")
-        
         # Generate feed entries
         feed_gen_start_time = time.time()
         
@@ -459,7 +525,9 @@ async def generate_channel_rss(channel: str | int,
         total_elapsed = time.time() - total_start_time
         logger.debug(f"rss_total_generation_timing: channel {channel}, total time {total_elapsed:.3f} seconds")
         return rss_feed
-        
+
+    except ChannelNotFound as e:
+        return create_error_feed(str(e.channel_identifier), base_url)
     except Exception as e:
         logger.error(f"generate_channel_rss: channel {channel}, error {str(e)}")
         raise
@@ -521,89 +589,32 @@ async def generate_channel_html(channel: str | int,
                                 merge_seconds: int = 5
                                 ) -> str:
     """
-    Generate HTML feed for channel using actual messages
+    Generate HTML feed for channel using actual messages.
+
+    Thin formatter over the shared _prepare_feed_posts: it only joins the prepared,
+    sanitized posts with the <hr> divider. HTML fetches exactly `limit` messages and
+    enables reply enrichment (enrich_replies=True).
     Args:
         channel: Telegram channel name
-        post_parser: Optional PostParser instance. If not provided, will create new one
         client: Telegram client instance
-        limit: Maximum number of posts to include in the RSS feed
-        exclude_flags: Flags to exclude from the RSS feed
+        limit: Maximum number of posts to include in the HTML feed
+        exclude_flags: Flags to exclude from the HTML feed
         exclude_text: Text to exclude from posts
     Returns:
         HTML feed as string
     """
     total_start_time = time.time()
-    
-    if limit < 1:
-        raise ValueError(f"limit must be positive, got {limit}")
-    if limit > 200:
-        raise ValueError(f"limit cannot exceed 200, got {limit}")
+    base_url = Config['pyrogram_bridge_url']
 
     try:
-        post_parser = PostParser(client=client)
-            
-        base_url = Config['pyrogram_bridge_url']
-        
-        channel_info_start_time = time.time()
-        try:
-            channel = post_parser.channel_name_prepare(channel)
-            logger.debug(f"Prepared channel identifier for HTML: {channel} (type: {type(channel)})") # Log prepared channel
-            from tg_cache import cached_get_chat
-            channel_info = await cached_get_chat(post_parser.client, channel)
-            channel_username = channel_info.username or (str(channel_info.id) if channel_info.id and str(channel_info.id).startswith('-100') else None)
-            if not channel_username:
-                logger.warning(f"Could not get username for channel {channel} in HTML generation, returning error feed structure (as string). NOTE: This should ideally return HTML error page.")
-                # For HTML, returning an error feed string might not be ideal. Consider returning a dedicated HTML error page.
-                return create_error_feed(str(channel), base_url) # Ensure channel is string for error feed
-        except (errors.UsernameInvalid, errors.UsernameNotOccupied) as e:
-            logger.warning(f"Channel not found error for {channel} in HTML generation: {str(e)}")
-            # Consider returning a dedicated HTML error page.
-            return create_error_feed(channel, base_url)
-        except errors.FloodWait:
-            # Let FloodWait bubble up to api_server.py, which returns HTTP 429 with Retry-After header
-            raise
-        except Exception as e:
-            logger.error(f"Error during get_chat for channel '{channel}' (type: {type(channel)}) in HTML generation: {str(e)}", exc_info=True)
-            raise ValueError(f"Failed to get chat info for {channel} in HTML generation: {str(e)}") from e
+        prepared = await _prepare_feed_posts(
+            channel, client,
+            limit=limit, exclude_flags=exclude_flags, exclude_text=exclude_text,
+            merge_seconds=merge_seconds, history_limit=limit,
+            enrich_replies=True, log_prefix="html",
+        )
 
-        channel_info_elapsed = time.time() - channel_info_start_time
-        logger.debug(f"html_channel_info_timing: channel {channel}, retrieved in {channel_info_elapsed:.3f} seconds")
-
-        # Collect messages
-        messages_start_time = time.time()
-        try:
-            from tg_cache import cached_get_chat_history
-            
-            messages = await cached_get_chat_history(post_parser.client, channel, limit=limit)
-        except Exception as e:
-            logger.error(f"Error during get_chat_history for channel '{channel}' (type: {type(channel)}) in HTML generation: {str(e)}", exc_info=True)
-            raise ValueError(f"Failed to get chat history for {channel} in HTML generation: {str(e)}") from e
-
-        messages_elapsed = time.time() - messages_start_time
-        logger.debug(f"html_messages_retrieval_timing: channel {channel}, {len(messages)} messages retrieved in {messages_elapsed:.3f} seconds")
-
-        # Enrich messages with reply to messages
-        enrichment_start_time = time.time()
-        messages = await _reply_enrichment(client, messages)
-        enrichment_elapsed = time.time() - enrichment_start_time
-        logger.debug(f"html_reply_enrichment_timing: channel {channel}, replies enriched in {enrichment_elapsed:.3f} seconds")
-
-        # Process messages into groups and render them in ONE worker thread
-        # (CPU-heavy, no await) to keep the event loop responsive.
-        processing_start_time = time.time()
-        try:
-            final_posts = await asyncio.to_thread(
-                _render_pipeline, messages, post_parser, limit,
-                exclude_flags, exclude_text, merge_seconds, Config['time_based_merge'],
-                channel,
-            )
-        finally:
-            # Persist media file-ids collected during rendering with a single bulk
-            # upsert — in a finally so a partial render still records what it collected.
-            await post_parser._flush_pending_media_ids()
-
-        processing_elapsed = time.time() - processing_start_time
-        logger.debug(f"html_messages_processing_timing: channel {channel}, {len(final_posts)} posts processed in {processing_elapsed:.3f} seconds")
+        final_posts = prepared.posts
 
         # Generate HTML content.
         html_gen_start_time = time.time()
@@ -620,7 +631,9 @@ async def generate_channel_html(channel: str | int,
         logger.debug(f"html_total_generation_timing: channel {channel}, total time {total_elapsed:.3f} seconds")
         
         return html
-        
+
+    except ChannelNotFound as e:
+        return create_error_feed(str(e.channel_identifier), base_url)
     except Exception as e:
         logger.error(f"html_generation_error: channel {channel}, error {str(e)}")
         raise
