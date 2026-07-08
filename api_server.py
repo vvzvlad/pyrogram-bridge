@@ -92,6 +92,36 @@ Config = get_settings()
 HTTP_DOWNLOAD_SEMAPHORE = asyncio.Semaphore(3)  # semaphore for live HTTP media requests
 BACKGROUND_DOWNLOAD_SEMAPHORE = asyncio.Semaphore(2)  # semaphore for background cache worker
 download_queue = asyncio.Queue(maxsize=100)
+# --- Failing-download backoff (negative cache) --------------------------------
+# A media file whose download keeps failing (hang/timeout/not-found) must not be
+# retried on every 60s cache sweep, nor keep occupying a scarce Pyrogram
+# transmission slot. We remember recent failures per (channel, post_id,
+# file_unique_id) and skip / fast-reject re-attempts until an exponentially
+# growing backoff elapses. Cleared on the first successful download. All access is
+# from the single event-loop thread, so a plain dict needs no lock.
+_DOWNLOAD_BACKOFF_BASE = 60.0     # seconds; backoff after the first failure
+_DOWNLOAD_BACKOFF_MAX = 3600.0    # seconds; cap on the backoff
+# key -> (consecutive_failures, retry_not_before_monotonic)
+_download_failures: dict[tuple[str, int, str], tuple[int, float]] = {}
+
+def _download_backoff_remaining(key: tuple[str, int, str]) -> float:
+    """Seconds until `key` may be retried; 0.0 if allowed now (or never failed)."""
+    entry = _download_failures.get(key)
+    if entry is None:
+        return 0.0
+    return max(0.0, entry[1] - time.monotonic())
+
+def _record_download_failure(key: tuple[str, int, str]) -> None:
+    """Register a failed download and (re)arm an exponential backoff for `key`."""
+    fails = _download_failures.get(key, (0, 0.0))[0] + 1
+    backoff = min(_DOWNLOAD_BACKOFF_MAX, _DOWNLOAD_BACKOFF_BASE * (2 ** (fails - 1)))
+    _download_failures[key] = (fails, time.monotonic() + backoff)
+    logger.warning(f"download_backoff_armed: {key[0]}/{key[1]}/{key[2]} failed {fails}x, next retry in {backoff:.0f}s")
+
+def _clear_download_failure(key: tuple[str, int, str]) -> None:
+    """Forget any recorded failure for `key` after a successful download."""
+    if _download_failures.pop(key, None) is not None:
+        logger.info(f"download_backoff_cleared: {key[0]}/{key[1]}/{key[2]} recovered")
 # How stale a temp_* file's mtime must be before a serve refreshes it (keeps the 1h
 # sweeper from deleting an actively-viewed video). Well below 1h so the file stays alive,
 # but large enough that the mtime — and thus FileResponse's ETag — is stable within any
@@ -530,9 +560,13 @@ async def _download_deduped(channel: Union[str, int], post_id: int, file_unique_
         async def _runner():
             try:
                 result = await download_media_file(channel, post_id, file_unique_id)
+                _clear_download_failure(key)
                 if not fut.done():
                     fut.set_result(result)
             except BaseException as e:  # noqa: BLE001 — must forward ANY failure to waiters
+                # Arm backoff for real failures only, never for a shutdown-time cancel.
+                if isinstance(e, Exception):
+                    _record_download_failure(key)
                 if not fut.done():
                     fut.set_exception(e)
             finally:
@@ -784,7 +818,13 @@ async def download_new_files(media_files: list, cache_dir: str) -> None:
             if not all([channel, post_id, file_unique_id]):
                 logger.error(f"Invalid file data: {file_data}")
                 continue
-                
+
+            # Skip files that recently kept failing — do not re-queue them on every 60s
+            # sweep (that retry-storm is what kept the download slots jammed). The backoff
+            # expires on its own; a successful download elsewhere clears it.
+            if _download_backoff_remaining((str(channel), int(post_id), file_unique_id)) > 0:
+                continue
+
             channel_dir = os.path.join(cache_dir, str(channel))
             post_dir = os.path.join(channel_dir, str(post_id))
             os.makedirs(post_dir, exist_ok=True)
@@ -822,17 +862,21 @@ async def background_download_worker():
         # successful get(). Cancellation propagates cleanly here (nothing to unbalance).
         item = await download_queue.get()
         channel, post_id, file_unique_id = item
+        bg_key = (str(channel), int(post_id), file_unique_id)
         logger.info(f"Background download: {channel}/{post_id}/{file_unique_id}")
         try:
             async with BACKGROUND_DOWNLOAD_SEMAPHORE:  # limit concurrent background downloads
                 await download_media_file(channel, post_id, file_unique_id)
+            _clear_download_failure(bg_key)
             await asyncio.sleep(2)
         except errors.FloodWait as e:
             # Must be caught BEFORE the generic Exception (FloodWait subclasses RPCError),
-            # otherwise the worker would hammer Telegram while under a flood wait.
+            # otherwise the worker would hammer Telegram while under a flood wait. A flood
+            # wait is a global throttle, not a per-file fault, so it does NOT arm backoff.
             logger.warning(f"bg_download_floodwait: {channel}/{post_id}/{file_unique_id} sleeping {e.value}s")
             await asyncio.sleep(min(int(e.value) + 5, 900))
         except Exception as e:
+            _record_download_failure(bg_key)
             logger.error(f"Background download error for {channel}/{post_id}/{file_unique_id}: {e}")
         finally:
             download_queue.task_done()
@@ -1212,6 +1256,16 @@ async def get_media(channel: str, post_id: int, file_unique_id: str, request: Re
                 _access_updates[(str(channel), post_id, file_unique_id)] = datetime.now().timestamp()
                 return await prepare_file_response(cache_path, request=request,
                                                    media_key=(str(channel), post_id, file_unique_id))
+
+            # A file that recently kept failing is in backoff: fast-reject instead of
+            # occupying a scarce download slot (and a Pyrogram transmission permit) on a
+            # request that will very likely hang again. Cached files already returned above,
+            # so this only guards the live-download path.
+            backoff_remaining = _download_backoff_remaining((str(channel), post_id, file_unique_id))
+            if backoff_remaining > 0:
+                logger.info(f"media_backoff_skip: {channel}/{post_id}/{file_unique_id} in backoff {backoff_remaining:.0f}s")
+                return Response(status_code=503, content="Media temporarily unavailable, retry later",
+                                headers={"Retry-After": str(int(backoff_remaining) + 1)})
 
             _sem_wait_start = _time.monotonic()
             # Bound the wait for a live-download permit: a saturated semaphore must not

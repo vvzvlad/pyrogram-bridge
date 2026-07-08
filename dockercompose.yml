@@ -29,6 +29,8 @@ services:
       # MEDIA_DOWNLOAD_TIMEOUT_MAX: 1800  # Max per-download timeout, seconds — cap for the largest videos (default: 1800)
       # MEDIA_DOWNLOAD_MIN_SPEED: 262144  # Assumed floor download speed, bytes/s — large-video timeout ≈ file_size / this, clamped to [MIN,MAX] (default: 262144 = 256 KB/s)
       # IO_THREAD_POOL_SIZE: 32           # Size of the asyncio default threadpool for blocking I/O (SQLite/python-magic/pickle/os.walk); raise on a busy 1-2 CPU box (default: 32)
+      # TG_MAX_CONCURRENT_TRANSMISSIONS: 3   # Max concurrent Telegram file transmissions (Pyrogram get_file semaphore). Kurigram default is 1, so one hung download blocks ALL media (default: 3)
+      # MEDIA_TIMEOUT_RESTART_THRESHOLD: 5   # Consecutive media-download timeouts before an in-process restart rebuilds the zombie media-DC connection (the main-DC watchdog can't see this) (default: 5)
       PYROGRAM_BRIDGE_URL: https://pgbridge.example.com
       API_PORT: 80
       TOKEN: ХХХ

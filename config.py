@@ -144,4 +144,15 @@ def get_settings() -> dict[str, Any]:
         # all run via asyncio.to_thread; the interpreter default (min(32, cpu+4)) is only 5-6
         # on a 1-2 CPU container, which starves those under load. 32 gives ample headroom.
         "io_thread_pool_size": _parse_int_env("IO_THREAD_POOL_SIZE", 32),
+        # Max concurrent Telegram file transmissions (Pyrogram get_file/save_file
+        # semaphores). Kurigram's default is 1, which lets a single hung download block
+        # ALL media downloads process-wide; 3 aligns with HTTP_DOWNLOAD_SEMAPHORE. This is
+        # only a blast-radius limiter — the real cure for a zombie media connection is the
+        # download-timeout-triggered restart below.
+        "tg_max_concurrent_transmissions": _parse_int_env("TG_MAX_CONCURRENT_TRANSMISSIONS", 3),
+        # After this many CONSECUTIVE media-download timeouts, force an in-process client
+        # restart to rebuild the (zombie) media-DC connection. Any successful download
+        # resets the streak, so this only fires on a genuine death loop, not on the odd
+        # slow large-video timeout. The watchdog cannot catch this — it probes the main DC.
+        "media_timeout_restart_threshold": _parse_int_env("MEDIA_TIMEOUT_RESTART_THRESHOLD", 5),
     }

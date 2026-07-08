@@ -33,10 +33,18 @@ class TelegramClient:
             api_hash=settings["tg_api_hash"],
             workdir=settings["session_path"],
             proxy=settings["proxy"],  # MTProto proxy config, None if not set
+            max_concurrent_transmissions=settings["tg_max_concurrent_transmissions"],
         )
         self.max_disconnects = settings["tg_disconnect_flap_limit"]      # Max disconnects within the flap window before restart
         self._shutting_down = False  # Guard to prevent re-triggering restart during shutdown
         self._restarting = False            # Guard: an intentional in-process restart is in progress
+        # Consecutive media-download timeouts. A zombie media-DC connection makes every
+        # download time out while the main-DC watchdog stays green; when this streak
+        # reaches the threshold we reuse _restart_client() to rebuild the connection. Any
+        # successful download resets it (see note_download_ok / note_download_timeout).
+        self._download_timeout_streak = 0
+        self.media_timeout_restart_threshold = settings["media_timeout_restart_threshold"]
+        self._media_recovery_task = None   # strong ref to a scheduled recovery restart task
         self._disconnect_times = []         # Monotonic timestamps of recent disconnects (sliding window)
         self.disconnect_window = settings["tg_disconnect_flap_window"]   # Seconds; window for flap detection
         self._watchdog_task = None
@@ -270,6 +278,39 @@ class TelegramClient:
             return None
         return time.monotonic() - self._wd_last_ok_monotonic
 
+    def note_download_ok(self) -> None:
+        """Reset the media-download timeout streak after any successful download."""
+        if self._download_timeout_streak:
+            logger.info(f"media_download: recovered, resetting timeout streak (was {self._download_timeout_streak})")
+        self._download_timeout_streak = 0
+
+    def note_download_timeout(self) -> None:
+        """Count a media-download timeout; force a connection-rebuilding restart on a streak.
+
+        A zombie media-DC connection makes EVERY download time out while the main-DC
+        watchdog probe (get_me) stays green, so this is the only signal that can trigger
+        recovery. The restart runs as a detached task so it never blocks the download path;
+        the streak is reset immediately so we schedule at most one restart per streak.
+        """
+        self._download_timeout_streak += 1
+        logger.warning(
+            f"media_download_timeout: streak {self._download_timeout_streak}/{self.media_timeout_restart_threshold}"
+        )
+        if self._download_timeout_streak < self.media_timeout_restart_threshold:
+            return
+        self._download_timeout_streak = 0
+        if self._restarting or self._shutting_down:
+            return
+        if self._media_recovery_task is not None and not self._media_recovery_task.done():
+            return  # a recovery restart is already scheduled/running
+        logger.critical(
+            f"media_download: {self.media_timeout_restart_threshold} consecutive download timeouts — "
+            f"scheduling media-connection restart (main-DC watchdog cannot see this)"
+        )
+        self._media_recovery_task = asyncio.create_task(
+            self._restart_client(reason="media download timeout streak")
+        )
+
     async def safe_get_messages(self, channel_id, post_id, max_retries=2):
         """Wrapper with retry logic for auth errors"""
         for attempt in range(max_retries):
@@ -289,13 +330,22 @@ class TelegramClient:
         """Wrapper with retry logic for download errors.
 
         `timeout` bounds each download attempt; for large videos the caller scales it
-        with file size (see api_server._media_download_timeout)."""
+        with file size (see api_server._media_download_timeout). A timeout cancels the
+        underlying download (freeing the Pyrogram transmission slot); a streak of timeouts
+        escalates to a connection-rebuilding restart via note_download_timeout()."""
         for attempt in range(max_retries):
             try:
-                return await asyncio.wait_for(
+                result = await asyncio.wait_for(
                     self.client.download_media(file_id, file_name=file_name),
                     timeout=timeout
                 )
+                self.note_download_ok()
+                return result
+            except asyncio.TimeoutError:
+                # Hung download: the wait_for above already cancelled it and released the
+                # get_file semaphore. Count it toward the media-connection restart streak.
+                self.note_download_timeout()
+                raise
             except Exception as e:
                 if isinstance(e, KeyError) and attempt < max_retries - 1:
                     logger.warning(f"Download auth error on attempt {attempt + 1}, retrying...")
