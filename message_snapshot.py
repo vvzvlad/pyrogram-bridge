@@ -27,7 +27,11 @@ logger = logging.getLogger(__name__)
 
 # Bump when the snapshot schema changes in a backwards-incompatible way; a mismatch
 # makes _load_entry treat the cache file as a miss (old files are simply re-fetched).
-SNAPSHOT_VERSION = 1
+# v2: added the special-media info-block types (story, contact, location, venue, dice,
+# game, giveaway, giveaway_winners, checklist, paid_media) plus live_photo. A v1 file lacks
+# these keys, so a cached special-media / live-photo message would restore with an empty
+# block — invalidate v1 files.
+SNAPSHOT_VERSION = 2
 
 
 class CachedStr(str):
@@ -189,6 +193,103 @@ def _snapshot_web_page(wp: Any) -> Optional[dict]:
     }
 
 
+# --------------------------------------------------------------------------- #
+# Special-media snapshots (issue #23 review fix).
+#
+# _format_special_media (post_parser.py) and find_file_id_in_message
+# (api_server.py) read a handful of type-specific attributes off the Message that
+# were NOT in schema v1. On a cache hit a restored Message carried media=<enum> but
+# message.<attr>=None, so the special info block silently vanished (render
+# divergence vs. a live Message). Each helper below snapshots EXACTLY the sub-fields
+# the renderer + find_file_id read for that type — nothing more, nothing less.
+# --------------------------------------------------------------------------- #
+def _snapshot_story(story: Any) -> Optional[dict]:
+    """STORY: _story_media_object / find_file_id_in_message read story.video and
+    story.photo, each by .file_unique_id (video wins over photo). The chosen object is
+    also the one _save_media_file_ids reads .file_size off for the >100MB skip, so
+    file_size is snapshotted too (else a >100MB story media would be collected on a
+    cache hit — F1). The render URL is still built from file_unique_id."""
+    if story is None:
+        return None
+    return {
+        "video": _snapshot_obj(getattr(story, "video", None), ["file_unique_id", "file_size"]),
+        "photo": _snapshot_obj(getattr(story, "photo", None), ["file_unique_id", "file_size"]),
+    }
+
+
+def _snapshot_venue(venue: Any) -> Optional[dict]:
+    """VENUE: reads .title, .address and its nested .location (.latitude/.longitude via
+    _format_osm_link)."""
+    if venue is None:
+        return None
+    return {
+        "title": getattr(venue, "title", None),
+        "address": getattr(venue, "address", None),
+        "location": _snapshot_obj(getattr(venue, "location", None), ["latitude", "longitude"]),
+    }
+
+
+def _snapshot_giveaway(giveaway: Any) -> Optional[dict]:
+    """GIVEAWAY: reads .quantity, .months, .stars, .until_date (a datetime rendered via
+    strftime) and .description. until_date is stored as isoformat and restored to a
+    datetime so the strftime branch reproduces byte-for-byte."""
+    if giveaway is None:
+        return None
+    until = getattr(giveaway, "until_date", None)
+    return {
+        "quantity": getattr(giveaway, "quantity", None),
+        "months": getattr(giveaway, "months", None),
+        "stars": getattr(giveaway, "stars", None),
+        # Only a real datetime renders (renderer gates on hasattr(.,'strftime')); anything
+        # else is dropped to None so the same "no until date" branch is taken on restore.
+        "until_date": until.isoformat() if hasattr(until, "isoformat") else None,
+        "description": getattr(giveaway, "description", None),
+    }
+
+
+def _snapshot_checklist(checklist: Any) -> Optional[dict]:
+    """CHECKLIST: reads .title (used ONLY when it isinstance str) and .tasks; each task
+    reads .text and the truthiness of .completed_by / .completion_date (→ ☑/☐).
+
+    title is stored only when it is a str (matching the renderer's isinstance gate, which
+    otherwise renders an empty title). completed_by / completion_date are stored as bools
+    (the renderer only tests their truthiness) so a live User/datetime stays JSON-safe."""
+    if checklist is None:
+        return None
+    title = getattr(checklist, "title", None)
+    snap_tasks = []
+    for task in (getattr(checklist, "tasks", None) or []):
+        text = getattr(task, "text", "")
+        # Mirror the renderer: a non-str text is str()-ified. Storing the resolved string
+        # keeps the restored value isinstance-str, reproducing the same rendered bytes.
+        text_str = text if isinstance(text, str) else str(text)
+        snap_tasks.append({
+            "text": text_str,
+            "completed_by": bool(getattr(task, "completed_by", None)),
+            "completion_date": bool(getattr(task, "completion_date", None)),
+        })
+    return {
+        "title": title if isinstance(title, str) else None,
+        "tasks": snap_tasks,
+    }
+
+
+def _snapshot_paid_media(paid_media: Any) -> Optional[dict]:
+    """PAID_MEDIA: _generate_html_media reads .stars_amount (default 0) and the LENGTH of
+    .media. Snapshot the renderer's effective stars value and the item count; the media
+    list is restored as N placeholders so len() reproduces."""
+    if paid_media is None:
+        return None
+    media = getattr(paid_media, "media", None)
+    count = len(media) if isinstance(media, (list, tuple)) else 0
+    return {
+        # Snapshot getattr(...,0) so a missing attribute restores to 0 exactly as the
+        # renderer would have defaulted it (a present None stays None on both sides).
+        "stars_amount": getattr(paid_media, "stars_amount", 0),
+        "media_count": count,
+    }
+
+
 def snapshot_message(message: Any) -> dict:
     """Extract a JSON-serializable snapshot (schema v1) from a pyrogram Message.
 
@@ -220,12 +321,34 @@ def snapshot_message(message: Any) -> dict:
         "web_page": _snapshot_web_page(getattr(message, "web_page", None)),
         "photo": _snapshot_obj(getattr(message, "photo", None), ["file_unique_id"]),
         "video": _snapshot_obj(getattr(message, "video", None), ["file_unique_id", "file_size"]),
-        "document": _snapshot_obj(getattr(message, "document", None), ["file_unique_id", "mime_type"]),
-        "audio": _snapshot_obj(getattr(message, "audio", None), ["file_unique_id", "mime_type"]),
+        # file_size is snapshotted for every type whose selected object flows into
+        # _save_media_file_ids' >100MB skip (MEDIA_SOURCES: document/audio/animation/
+        # video_note select this exact object). Without it a restored >100MB media
+        # would have file_size=None and be wrongly collected on a cache hit (F1).
+        "document": _snapshot_obj(getattr(message, "document", None), ["file_unique_id", "mime_type", "file_size"]),
+        "audio": _snapshot_obj(getattr(message, "audio", None), ["file_unique_id", "mime_type", "file_size"]),
         "voice": _snapshot_obj(getattr(message, "voice", None), ["file_unique_id", "mime_type"]),
-        "video_note": _snapshot_obj(getattr(message, "video_note", None), ["file_unique_id"]),
-        "animation": _snapshot_obj(getattr(message, "animation", None), ["file_unique_id"]),
+        "video_note": _snapshot_obj(getattr(message, "video_note", None), ["file_unique_id", "file_size"]),
+        "animation": _snapshot_obj(getattr(message, "animation", None), ["file_unique_id", "file_size"]),
         "sticker": _snapshot_obj(getattr(message, "sticker", None), ["file_unique_id", "emoji", "is_video"]),
+        # LIVE_PHOTO (Kurigram 2.2.23) renders as a video element via the video_loop_400
+        # kind. MEDIA_SOURCES/_get_file_unique_id/_save_media_file_ids read live_photo's
+        # file_unique_id + file_size (the >100MB skip); find_file_id also reads file_unique_id.
+        # Mirror the `video` allowlist so a cached live-photo message keeps its media block.
+        "live_photo": _snapshot_obj(getattr(message, "live_photo", None), ["file_unique_id", "file_size"]),
+        # Special-media info-block types (issue #23 review fix). Each reads a fixed set of
+        # sub-fields in _format_special_media / find_file_id_in_message; snapshot exactly those.
+        "story": _snapshot_story(getattr(message, "story", None)),
+        "contact": _snapshot_obj(getattr(message, "contact", None), ["first_name", "last_name", "phone_number"]),
+        "location": _snapshot_obj(getattr(message, "location", None), ["latitude", "longitude"]),
+        "venue": _snapshot_venue(getattr(message, "venue", None)),
+        "dice": _snapshot_obj(getattr(message, "dice", None), ["emoji", "value"]),
+        "game": _snapshot_obj(getattr(message, "game", None), ["title"]),
+        "giveaway": _snapshot_giveaway(getattr(message, "giveaway", None)),
+        "giveaway_winners": _snapshot_obj(
+            getattr(message, "giveaway_winners", None), ["winner_count", "quantity", "prize_description"]),
+        "checklist": _snapshot_checklist(getattr(message, "checklist", None)),
+        "paid_media": _snapshot_paid_media(getattr(message, "paid_media", None)),
     }
 
 
@@ -326,6 +449,67 @@ def _restore_str(d: Optional[dict]) -> Optional[CachedStr]:
     return CachedStr.build(d.get("plain", ""), d.get("html", d.get("plain", "")))
 
 
+# --------------------------------------------------------------------------- #
+# Special-media restores (issue #23 review fix). Mirror the snapshot helpers above:
+# rebuild each object so the exact attributes _format_special_media /
+# find_file_id_in_message read exist, restoring the special block on a cache hit.
+# --------------------------------------------------------------------------- #
+def _restore_story(d: Optional[dict]) -> Optional[SimpleNamespace]:
+    if d is None:
+        return None
+    return SimpleNamespace(
+        video=_ns(d.get("video"), ["file_unique_id", "file_size"]),
+        photo=_ns(d.get("photo"), ["file_unique_id", "file_size"]),
+    )
+
+
+def _restore_venue(d: Optional[dict]) -> Optional[SimpleNamespace]:
+    if d is None:
+        return None
+    return SimpleNamespace(
+        title=d.get("title"),
+        address=d.get("address"),
+        location=_ns(d.get("location"), ["latitude", "longitude"]),
+    )
+
+
+def _restore_giveaway(d: Optional[dict]) -> Optional[SimpleNamespace]:
+    if d is None:
+        return None
+    until = d.get("until_date")
+    return SimpleNamespace(
+        quantity=d.get("quantity"),
+        months=d.get("months"),
+        stars=d.get("stars"),
+        # Restore a datetime so hasattr(until_date, 'strftime') holds exactly as on a live
+        # object; None (no/invalid date) restores as None and the strftime branch is skipped.
+        until_date=datetime.fromisoformat(until) if until is not None else None,
+        description=d.get("description"),
+    )
+
+
+def _restore_checklist(d: Optional[dict]) -> Optional[SimpleNamespace]:
+    if d is None:
+        return None
+    restored_tasks = [
+        SimpleNamespace(
+            text=t.get("text"),
+            completed_by=t.get("completed_by"),
+            completion_date=t.get("completion_date"),
+        )
+        for t in (d.get("tasks") or [])
+    ]
+    return SimpleNamespace(title=d.get("title"), tasks=restored_tasks)
+
+
+def _restore_paid_media(d: Optional[dict]) -> Optional[SimpleNamespace]:
+    if d is None:
+        return None
+    count = d.get("media_count") or 0
+    # media is only ever len()'d by the renderer, so N placeholder items reproduce the count.
+    return SimpleNamespace(stars_amount=d.get("stars_amount"), media=[None] * count)
+
+
 class CachedMessage:
     """Duck-typed stand-in for a pyrogram Message, restored from a snapshot dict.
 
@@ -359,12 +543,28 @@ class CachedMessage:
         self.web_page = _restore_web_page(data.get("web_page"))
         self.photo = _ns(data.get("photo"), ["file_unique_id"])
         self.video = _ns(data.get("video"), ["file_unique_id", "file_size"])
-        self.document = _ns(data.get("document"), ["file_unique_id", "mime_type"])
-        self.audio = _ns(data.get("audio"), ["file_unique_id", "mime_type"])
+        self.document = _ns(data.get("document"), ["file_unique_id", "mime_type", "file_size"])
+        self.audio = _ns(data.get("audio"), ["file_unique_id", "mime_type", "file_size"])
         self.voice = _ns(data.get("voice"), ["file_unique_id", "mime_type"])
-        self.video_note = _ns(data.get("video_note"), ["file_unique_id"])
-        self.animation = _ns(data.get("animation"), ["file_unique_id"])
+        self.video_note = _ns(data.get("video_note"), ["file_unique_id", "file_size"])
+        self.animation = _ns(data.get("animation"), ["file_unique_id", "file_size"])
         self.sticker = _ns(data.get("sticker"), ["file_unique_id", "emoji", "is_video"])
+        # LIVE_PHOTO: restored like `video` so the video_loop_400 media block renders on a
+        # cache hit (file_unique_id → URL; file_size → the >100MB collection skip).
+        self.live_photo = _ns(data.get("live_photo"), ["file_unique_id", "file_size"])
+        # Special-media info-block types (issue #23 review fix): restored so the type's
+        # info block renders on a cache hit exactly as for a live Message.
+        self.story = _restore_story(data.get("story"))
+        self.contact = _ns(data.get("contact"), ["first_name", "last_name", "phone_number"])
+        self.location = _ns(data.get("location"), ["latitude", "longitude"])
+        self.venue = _restore_venue(data.get("venue"))
+        self.dice = _ns(data.get("dice"), ["emoji", "value"])
+        self.game = _ns(data.get("game"), ["title"])
+        self.giveaway = _restore_giveaway(data.get("giveaway"))
+        self.giveaway_winners = _ns(
+            data.get("giveaway_winners"), ["winner_count", "quantity", "prize_description"])
+        self.checklist = _restore_checklist(data.get("checklist"))
+        self.paid_media = _restore_paid_media(data.get("paid_media"))
 
     def __str__(self) -> str:
         return json.dumps(self._snapshot, default=str)

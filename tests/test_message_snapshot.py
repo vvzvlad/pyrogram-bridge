@@ -1,3 +1,7 @@
+# flake8: noqa
+# pylint: disable=protected-access, missing-function-docstring, missing-class-docstring
+# pylint: disable=redefined-outer-name, logging-fstring-interpolation, line-too-long
+# pylance: disable=reportMissingImports, reportMissingModuleSource
 """Tests for message_snapshot.py (issue #23, Задания 4-5,7).
 
 These verify that a pyrogram Message survives snapshot -> JSON -> restore as a
@@ -266,6 +270,72 @@ def test_normal_video_is_collected():
 
 
 # --------------------------------------------------------------------------- #
+# Test 9b — the >100MB skip must fire for every media type whose selected object
+# flows into _save_media_file_ids' size check, not just video/live_photo. Before
+# file_size was added to these snapshots a restored >100MB doc/audio/animation/
+# video_note lacked file_size and was wrongly collected on a cache hit (F1).
+# --------------------------------------------------------------------------- #
+_BIG = 200 * 1024 * 1024
+
+
+@pytest.mark.parametrize("media,attr,snap_obj", [
+    ("DOCUMENT",   "document",   {"file_unique_id": "doc_big",  "mime_type": "application/zip", "file_size": _BIG}),
+    ("AUDIO",      "audio",      {"file_unique_id": "aud_big",  "mime_type": "audio/mpeg",      "file_size": _BIG}),
+    ("ANIMATION",  "animation",  {"file_unique_id": "anim_big", "file_size": _BIG}),
+    ("VIDEO_NOTE", "video_note", {"file_unique_id": "vn_big",   "file_size": _BIG}),
+])
+def test_large_media_not_collected(media, attr, snap_obj):
+    snap = snapshot_message(SimpleNamespace())
+    snap["media"] = media
+    snap[attr] = snap_obj
+    snap["chat"] = {"id": -1001, "username": "chan", "title": "t", "usernames": None}
+    restored = restore_message(snap)
+    # file_size survives the snapshot/restore round-trip (the round-trip is the fix).
+    assert getattr(restored, attr).file_size == _BIG
+
+    pp = PostParser(None)
+    pp._save_media_file_ids(restored)
+    assert pp._pending_media_ids == []
+
+
+@pytest.mark.parametrize("media,attr,fuid,snap_obj", [
+    ("DOCUMENT",   "document",   "doc_ok",  {"file_unique_id": "doc_ok",  "mime_type": "application/zip", "file_size": 1024}),
+    ("AUDIO",      "audio",      "aud_ok",  {"file_unique_id": "aud_ok",  "mime_type": "audio/mpeg",      "file_size": 1024}),
+    ("ANIMATION",  "animation",  "anim_ok", {"file_unique_id": "anim_ok", "file_size": 1024}),
+    ("VIDEO_NOTE", "video_note", "vn_ok",   {"file_unique_id": "vn_ok",   "file_size": 1024}),
+])
+def test_normal_media_is_collected(media, attr, fuid, snap_obj):
+    snap = snapshot_message(SimpleNamespace())
+    snap["id"] = 11
+    snap["media"] = media
+    snap[attr] = snap_obj
+    snap["chat"] = {"id": -1001, "username": "chan", "title": "t", "usernames": None}
+    restored = restore_message(snap)
+
+    pp = PostParser(None)
+    pp._save_media_file_ids(restored)
+    assert len(pp._pending_media_ids) == 1
+    assert pp._pending_media_ids[0][2] == fuid
+
+
+def test_large_story_media_not_collected():
+    # A >100MB story video (selected over the photo) must be skipped on a cache hit.
+    snap = snapshot_message(SimpleNamespace())
+    snap["media"] = "STORY"
+    snap["story"] = {
+        "video": {"file_unique_id": "story_vid_big", "file_size": _BIG},
+        "photo": None,
+    }
+    snap["chat"] = {"id": -1001, "username": "chan", "title": "t", "usernames": None}
+    restored = restore_message(snap)
+    assert restored.story.video.file_size == _BIG
+
+    pp = PostParser(None)
+    pp._save_media_file_ids(restored)
+    assert pp._pending_media_ids == []
+
+
+# --------------------------------------------------------------------------- #
 # Test 10 — restored chat without username -> None, not AttributeError.
 # --------------------------------------------------------------------------- #
 def test_chat_without_username():
@@ -307,3 +377,134 @@ def test_snapshot_messages_list_roundtrip():
     restored = restore_messages(snapshot_messages(msgs))
     assert [m.id for m in restored] == [0, 1, 2]
     assert all(isinstance(m, CachedMessage) for m in restored)
+
+
+# --------------------------------------------------------------------------- #
+# Special-media round trips (issue #23 review fix). One per type: assert the exact
+# sub-fields _format_special_media / find_file_id_in_message read survive the trip.
+# These are what silently vanished on a cache hit before the allowlist was completed.
+# --------------------------------------------------------------------------- #
+def test_story_roundtrip_file_unique_id_survives():
+    story = SimpleNamespace(
+        video=SimpleNamespace(file_unique_id="story-vid"),
+        photo=SimpleNamespace(file_unique_id="story-pic"),
+    )
+    restored, _ = _roundtrip(SimpleNamespace(story=story))
+    # find_file_id_in_message / _story_media_object read story.video/photo.file_unique_id.
+    assert restored.story.video.file_unique_id == "story-vid"
+    assert restored.story.photo.file_unique_id == "story-pic"
+
+
+def test_contact_roundtrip():
+    contact = SimpleNamespace(first_name="Ann", last_name="Bee", phone_number="+15551234")
+    restored, _ = _roundtrip(SimpleNamespace(contact=contact))
+    assert restored.contact.first_name == "Ann"
+    assert restored.contact.last_name == "Bee"
+    assert restored.contact.phone_number == "+15551234"
+
+
+def test_location_roundtrip():
+    location = SimpleNamespace(latitude=51.5, longitude=-0.12)
+    restored, _ = _roundtrip(SimpleNamespace(location=location))
+    assert restored.location.latitude == 51.5
+    assert restored.location.longitude == -0.12
+
+
+def test_venue_roundtrip_with_nested_location():
+    venue = SimpleNamespace(
+        title="Big Ben", address="Westminster",
+        location=SimpleNamespace(latitude=51.5, longitude=-0.12),
+    )
+    restored, _ = _roundtrip(SimpleNamespace(venue=venue))
+    assert restored.venue.title == "Big Ben"
+    assert restored.venue.address == "Westminster"
+    assert restored.venue.location.latitude == 51.5
+    assert restored.venue.location.longitude == -0.12
+
+
+def test_dice_roundtrip():
+    restored, _ = _roundtrip(SimpleNamespace(dice=SimpleNamespace(emoji="🎯", value=6)))
+    assert restored.dice.emoji == "🎯"
+    assert restored.dice.value == 6
+
+
+def test_game_roundtrip():
+    restored, _ = _roundtrip(SimpleNamespace(game=SimpleNamespace(title="Chess")))
+    assert restored.game.title == "Chess"
+
+
+def test_giveaway_roundtrip_until_date_datetime():
+    giveaway = SimpleNamespace(
+        quantity=3, months=6, stars=None,
+        until_date=datetime(2030, 12, 31, 12, 0, 0),
+        description="Prizes!",
+    )
+    restored, _ = _roundtrip(SimpleNamespace(giveaway=giveaway))
+    assert restored.giveaway.quantity == 3
+    assert restored.giveaway.months == 6
+    # until_date must restore as a datetime so the renderer's strftime branch fires.
+    assert restored.giveaway.until_date.strftime("%d/%m/%Y") == "31/12/2030"
+    assert restored.giveaway.description == "Prizes!"
+
+
+def test_giveaway_winners_roundtrip():
+    winners = SimpleNamespace(winner_count=5, quantity=10, prize_description="Premium")
+    restored, _ = _roundtrip(SimpleNamespace(giveaway_winners=winners))
+    assert restored.giveaway_winners.winner_count == 5
+    assert restored.giveaway_winners.quantity == 10
+    assert restored.giveaway_winners.prize_description == "Premium"
+
+
+def test_checklist_roundtrip_tasks_and_completion():
+    checklist = SimpleNamespace(
+        title="Todo",
+        tasks=[
+            SimpleNamespace(text="done task", completed_by=SimpleNamespace(id=1), completion_date=None),
+            SimpleNamespace(text="open task", completed_by=None, completion_date=None),
+        ],
+    )
+    restored, _ = _roundtrip(SimpleNamespace(checklist=checklist))
+    assert restored.checklist.title == "Todo"
+    t_done, t_open = restored.checklist.tasks
+    assert t_done.text == "done task"
+    # Renderer marks ☑ when bool(completed_by or completion_date) is True.
+    assert bool(t_done.completed_by or t_done.completion_date) is True
+    assert t_open.text == "open task"
+    assert bool(t_open.completed_by or t_open.completion_date) is False
+
+
+def test_paid_media_roundtrip_stars_and_item_count():
+    paid = SimpleNamespace(stars_amount=50, media=[object(), object(), object()])
+    restored, _ = _roundtrip(SimpleNamespace(paid_media=paid))
+    assert restored.paid_media.stars_amount == 50
+    # Renderer only len()'s .media — the count must survive.
+    assert len(restored.paid_media.media) == 3
+
+
+def test_live_photo_roundtrip_file_unique_id_and_size():
+    live_photo = SimpleNamespace(file_unique_id="lp1", file_size=4096)
+    restored, _ = _roundtrip(SimpleNamespace(live_photo=live_photo))
+    # MEDIA_SOURCES/_get_file_unique_id + find_file_id read live_photo.file_unique_id;
+    # _save_media_file_ids reads file_size (the >100MB skip).
+    assert restored.live_photo.file_unique_id == "lp1"
+    assert restored.live_photo.file_size == 4096
+
+
+def test_large_live_photo_not_collected():
+    snap = snapshot_message(SimpleNamespace())
+    snap["media"] = "LIVE_PHOTO"
+    snap["live_photo"] = {"file_unique_id": "lpbig", "file_size": 200 * 1024 * 1024}
+    snap["chat"] = {"id": -1001, "username": "chan", "title": "t", "usernames": None}
+    restored = restore_message(snap)
+
+    pp = PostParser(None)
+    pp._save_media_file_ids(restored)
+    assert pp._pending_media_ids == []
+
+
+def test_special_media_defaults_present_on_empty_message():
+    restored = restore_message(snapshot_message(SimpleNamespace()))
+    for attr in ["story", "contact", "location", "venue", "dice", "game",
+                 "giveaway", "giveaway_winners", "checklist", "paid_media", "live_photo"]:
+        assert hasattr(restored, attr)
+        assert getattr(restored, attr) is None
