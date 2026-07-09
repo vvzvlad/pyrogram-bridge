@@ -47,6 +47,28 @@ from file_io import (DB_PATH, init_db_sync, get_all_media_file_ids_sync,
 # Global python-magic instance for MIME type detection
 magic_mime = magic.Magic(mime=True)
 
+# Media cache on-disk layout. Resolved once at import so every producer/consumer of the
+# cache agrees on the exact same absolute path format instead of re-deriving it inline.
+MEDIA_CACHE_DIR = os.path.abspath(os.path.join("data", "cache"))  # resolved once at import
+
+
+def media_cache_path(channel: str, post_id: int, file_unique_id: str | None = None) -> str:
+    """Single source of truth for the on-disk layout: <root>/<channel>/<post_id>[/<fid>].
+
+    Callers that need only the per-post directory omit ``file_unique_id``; passing it yields
+    the full per-file path. ``channel`` is stringified by the caller where it may be an int.
+    """
+    path = os.path.join(MEDIA_CACHE_DIR, str(channel), str(post_id))
+    if file_unique_id is not None:
+        path = os.path.join(path, file_unique_id)
+    return path
+
+
+# MIME types are immutable per file_unique_id, so a process-lifetime dict in front of
+# SQLite removes a to_thread + connect from every cache-hit response.
+_mime_types: dict[tuple[str, int, str], str] = {}
+_MIME_CACHE_MAX = 50_000  # crude bound; clear-all on overflow is fine at this size
+
 # Define custom exception for zero-size files
 class ZeroSizeFileError(Exception):
     """Custom exception for zero-size files found or downloaded."""
@@ -234,8 +256,7 @@ async def lifespan(_: FastAPI):
     io_executor = ThreadPoolExecutor(max_workers=Config["io_thread_pool_size"], thread_name_prefix="io")
     loop.set_default_executor(io_executor)
 
-    base_cache_dir = os.path.abspath("./data/cache")
-    os.makedirs(base_cache_dir, exist_ok=True) # Create cache directory
+    os.makedirs(MEDIA_CACHE_DIR, exist_ok=True) # Create cache directory
 
     # Initialize SQLite database (creates table if not present)
     await asyncio.to_thread(init_db_sync, DB_PATH)
@@ -448,9 +469,18 @@ async def prepare_file_response(file_path: str, request: Request, delete_after: 
     media_type: str | None = None
 
     if media_key is not None:
-        # Try to load the cached MIME type from the database (avoids repeated python-magic I/O)
+        # Fast path: the in-memory MIME cache. MIME is immutable per file_unique_id, so a
+        # hit here serves the response with no to_thread hop and no SQLite connection at all.
         channel_key, post_id_key, file_unique_id_key = media_key
-        media_type = await asyncio.to_thread(get_mime_type_sync, DB_PATH, channel_key, post_id_key, file_unique_id_key)
+        media_type = _mime_types.get(media_key)
+        if not media_type:
+            # Dict miss — consult the SQLite type cache (still avoids python-magic I/O).
+            media_type = await asyncio.to_thread(get_mime_type_sync, DB_PATH, channel_key, post_id_key, file_unique_id_key)
+            if media_type:
+                # Populate the dict so the next request skips the to_thread + connect.
+                if len(_mime_types) >= _MIME_CACHE_MAX:
+                    _mime_types.clear()
+                _mime_types[media_key] = media_type
 
     if not media_type:
         # Cache miss or no media_key — detect with python-magic in a thread to avoid blocking the event loop
@@ -460,9 +490,13 @@ async def prepare_file_response(file_path: str, request: Request, delete_after: 
             logger.warning(f"Failed to determine MIME type using python-magic: {str(e)}")
             media_type = None
 
-        # Persist the detected MIME type so the next request can skip python-magic
+        # Persist the detected MIME type so the next request can skip python-magic — into
+        # BOTH the SQLite type cache and the in-memory dict.
         if media_type and media_key is not None:
             await asyncio.to_thread(set_mime_type_sync, DB_PATH, channel_key, post_id_key, file_unique_id_key, media_type)
+            if len(_mime_types) >= _MIME_CACHE_MAX:
+                _mime_types.clear()
+            _mime_types[media_key] = media_type
 
     if not media_type: media_type, _ = mimetypes.guess_type(file_path)  # Fallback to mimetypes if python-magic failed
     if not media_type: media_type = "application/octet-stream"  # Final fallback to octet-stream
@@ -594,11 +628,8 @@ async def download_media_file(channel: Union[str, int], post_id: int, file_uniqu
     """
     import time as _time
     _fn_start = _time.monotonic()
-    base_cache_dir = os.path.abspath("./data/cache")
-    
     # Create nested cache structure
-    channel_dir = os.path.join(base_cache_dir, str(channel))
-    post_dir = os.path.join(channel_dir, str(post_id))
+    post_dir = media_cache_path(str(channel), post_id)
     os.makedirs(post_dir, exist_ok=True)
     
     # Convert numeric channel ID to int if needed
@@ -889,7 +920,7 @@ async def cache_media_files() -> None:
             # Load all media file ID records from SQLite
             media_files = await asyncio.to_thread(get_all_media_file_ids_sync, DB_PATH)
 
-            cache_dir = os.path.abspath("./data/cache")
+            cache_dir = MEDIA_CACHE_DIR
             updated_media_files, files_removed = await asyncio.to_thread(remove_old_cached_files_sync, media_files, cache_dir)
 
             if files_removed > 0:
@@ -923,7 +954,7 @@ def calculate_cache_stats() -> dict[str, Any]:
     Calculate cache statistics including file count, total size in MB, and time difference in days.
     Returns a dictionary with keys: 'cache_files_count', 'cache_total_size_mb', 'cache_time_diff_days', 'channels'.
     """
-    base_cache_dir = os.path.abspath("./data/cache")
+    base_cache_dir = MEDIA_CACHE_DIR
     cache_files_count = 0
     cache_total_size_bytes = 0
     channels_stats = {}
@@ -1244,10 +1275,7 @@ async def get_media(channel: str, post_id: int, file_unique_id: str, request: Re
             import time as _time
 
             # Pre-semaphore cache check: serve already-cached files without acquiring the semaphore
-            base_cache_dir = os.path.abspath("./data/cache")
-            channel_dir = os.path.join(base_cache_dir, str(channel))
-            post_dir = os.path.join(channel_dir, str(post_id))
-            cache_path = os.path.join(post_dir, file_unique_id)
+            cache_path = media_cache_path(str(channel), post_id, file_unique_id)
             if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
                 # File is already in cache — skip semaphore and serve directly
                 logger.info(f"pre_semaphore_cache_hit: {channel}/{post_id}/{file_unique_id}")

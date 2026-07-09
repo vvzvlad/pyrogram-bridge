@@ -111,6 +111,7 @@ async def test_download_atomic_race_loser_keeps_existing_final(monkeypatch, tmp_
 # --------------------------------------------------------------------------- #
 async def test_concurrent_large_video_no_partial_served(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)  # download_media_file writes under ./data/cache
+    monkeypatch.setattr(api_server, "MEDIA_CACHE_DIR", str(tmp_path / "data" / "cache"))
 
     msg = SimpleNamespace(
         media=MessageMediaType.VIDEO,
