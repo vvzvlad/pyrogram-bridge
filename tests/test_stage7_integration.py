@@ -218,6 +218,7 @@ async def test_ping_reports_degraded_promptly_while_slow_op_pending(monkeypatch)
 # --------------------------------------------------------------------------- #
 async def test_get_media_concurrent_shares_one_download_and_drains_registry(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(api_server, "MEDIA_CACHE_DIR", str(tmp_path / "data" / "cache"))
     api_server._inflight.clear()
     monkeypatch.setattr(api_server, "verify_media_digest", lambda url, digest: True)
     # Serve step is not under test here; keep it to a sentinel so we assert on dedup + registry.
@@ -249,6 +250,7 @@ async def test_get_media_concurrent_shares_one_download_and_drains_registry(monk
 
 async def test_get_media_request_cancel_does_not_stick_registry_or_hang_sibling(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(api_server, "MEDIA_CACHE_DIR", str(tmp_path / "data" / "cache"))
     api_server._inflight.clear()
     monkeypatch.setattr(api_server, "verify_media_digest", lambda url, digest: True)
     sentinel = object()

@@ -159,3 +159,46 @@ def test_mime_cache_overflow_clears_and_repopulates(sample_file, monkeypatch):
     # The next request is now a clean dict hit.
     r2 = c.get("/f")
     assert r2.status_code == 200
+
+
+# --------------------------------------------------------------------------- #
+# Task 16 — magic cold-start path: dict-miss + SQLite-miss -> python-magic ->
+# write-through to BOTH the SQLite type cache AND the in-memory dict.
+# The other stage-E tests all make SQLite HIT (get_mime_type_sync returns a value),
+# so the magic branch's dict-write (api_server.py:499) is never exercised there.
+# --------------------------------------------------------------------------- #
+def test_magic_cold_start_writes_through_to_sqlite_and_dict(sample_file, monkeypatch):
+    key = ("chanMagic", 7, "fidMagic")
+    # Dict must be empty for this key (dict-miss).
+    api_server._mime_types.pop(key, None)
+
+    calls = {"get": 0, "set": 0, "magic": 0}
+
+    def fake_get(db, ch, pid, fid):
+        calls["get"] += 1
+        return None  # SQLite MISS -> falls through to python-magic
+
+    def fake_set(db, ch, pid, fid, mime):
+        calls["set"] += 1
+        assert (ch, pid, fid) == key
+        assert mime == "image/jpeg"
+
+    def fake_magic(_path):
+        calls["magic"] += 1
+        return "image/jpeg"
+
+    monkeypatch.setattr(api_server, "get_mime_type_sync", fake_get)
+    monkeypatch.setattr(api_server, "set_mime_type_sync", fake_set)
+    monkeypatch.setattr(api_server.magic_mime, "from_file", fake_magic)
+
+    c = _make_client(sample_file, media_key=key)
+    r = c.get("/f")
+
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("image/jpeg")
+    # Cold start: dict-miss -> SQLite-miss -> python-magic detected the type.
+    assert calls["get"] == 1
+    assert calls["magic"] == 1
+    # Write-through to BOTH caches.
+    assert calls["set"] == 1                             # SQLite write-through
+    assert api_server._mime_types[key] == "image/jpeg"  # dict write-through
