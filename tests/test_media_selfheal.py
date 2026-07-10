@@ -258,3 +258,82 @@ def test_download_failures_lru_bounded(monkeypatch):
         assert remaining == [("chan", 2, "fid"), ("chan", 3, "fid"), ("chan", 4, "fid")]
     finally:
         api_server._download_failures.clear()
+
+
+# --------------------------------------------------------------------------- #
+# Backoff is capped at _DOWNLOAD_BACKOFF_MAX (min() cap at api_server.py:163)
+# --------------------------------------------------------------------------- #
+def test_backoff_capped_at_max():
+    """The exponential backoff grows as BASE * 2**(fails-1), but must never exceed
+    _DOWNLOAD_BACKOFF_MAX. With BASE=60s and MAX=600s the raw exponential overtakes the cap
+    at the 5th failure (60*2**4 = 960s > 600s), so after that many consecutive failures the
+    effective backoff must stay pinned at the cap. This test FAILS if the min(MAX, ...) cap
+    is removed (the raw exponential would then blow past 600s)."""
+    key = ("selfheal_chan", 99, "fid_cap")
+    api_server._download_failures.pop(key, None)
+
+    # Record well past the point where the raw exponential exceeds the cap: 8 failures ->
+    # raw 60*2**7 = 7680s, an order of magnitude above the 600s cap.
+    for _ in range(8):
+        api_server._record_download_failure(key)
+
+    assert api_server._download_failures[key][0] == 8  # counter really climbed that high
+    remaining = api_server._download_backoff_remaining(key)
+    # The cap holds: remaining is bounded by MAX (with a tiny slack for monotonic drift since
+    # retry_not_before was stamped). Without the min() cap this would be ~7680s.
+    assert remaining <= api_server._DOWNLOAD_BACKOFF_MAX
+    assert remaining > api_server._DOWNLOAD_BACKOFF_MAX - 5  # and it IS pinned near the cap
+
+    api_server._clear_download_failure(key)
+
+
+# --------------------------------------------------------------------------- #
+# Restart-verified callback is best-effort (try/except at telegram_client.py:250-254)
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_restart_callback_error_does_not_abort(monkeypatch, caplog):
+    """A registered restart-verified callback that RAISES must not abort recovery: the error is
+    swallowed + logged, and the restart still completes normally (watchdog re-armed, no SIGTERM
+    fallback, _restarting reset). This test FAILS if the try/except around the callback is
+    removed — the exception would then propagate to the outer handler, skip the watchdog re-arm
+    and trigger the process-restart fallback instead."""
+    c = TelegramClient()
+
+    def exploding_callback():
+        raise RuntimeError("boom in verified-restart callback")
+
+    c.set_restart_callback(exploding_callback)
+
+    # Drive a VERIFIED restart: connected client, restart + get_me both succeed so verify_ok is
+    # True and the callback fires.
+    monkeypatch.setattr(c.client, "is_connected", True)
+
+    async def fake_client_restart():
+        return None
+
+    async def fake_get_me():
+        return type("Me", (), {"id": 42})()
+
+    monkeypatch.setattr(c.client, "restart", fake_client_restart)
+    monkeypatch.setattr(c.client, "get_me", fake_get_me)
+
+    # Observe the success path (watchdog re-arm) vs the failure path (SIGTERM fallback) without
+    # actually killing the test process.
+    watchdog_rearmed = []
+    monkeypatch.setattr(c, "_start_watchdog", lambda: watchdog_rearmed.append(True))
+    sigterm_calls = []
+    monkeypatch.setattr(c, "_restart_app", lambda: sigterm_calls.append(True))
+
+    with caplog.at_level("WARNING"):
+        await c._restart_client(reason="test callback raises")
+
+    # (a) Recovery completed on the SUCCESS path despite the callback raising: watchdog re-armed,
+    # no process-restart fallback, restart flag cleared.
+    assert watchdog_rearmed == [True]
+    assert sigterm_calls == []
+    assert c._restarting is False
+    # (b) The callback error was logged (not silently dropped).
+    assert any(
+        "callback raised" in r.getMessage() and "RuntimeError" in r.getMessage()
+        for r in caplog.records
+    )
