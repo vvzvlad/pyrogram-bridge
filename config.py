@@ -140,6 +140,12 @@ def get_settings() -> dict[str, Any]:
         "media_download_timeout_min": _parse_int_env("MEDIA_DOWNLOAD_TIMEOUT_MIN", 120),
         "media_download_timeout_max": _parse_int_env("MEDIA_DOWNLOAD_TIMEOUT_MAX", 1800),
         "media_download_min_speed": _parse_int_env("MEDIA_DOWNLOAD_MIN_SPEED", 256 * 1024),
+        # Interval (seconds) between cache-sweep passes in cache_media_files. Each pass is a
+        # full media_file_ids table scan plus an os.walk of the whole cache tree, so running
+        # it every 60s under a "20 days"/"1 hour" retention policy is wasteful. A value below
+        # the 60s floor is rejected at startup (_parse_int_env exits) so a misconfiguration
+        # can never turn the sweeper into a hot loop.
+        "cache_sweep_interval": _parse_int_env("CACHE_SWEEP_INTERVAL", 900, minimum=60),
         # Size of the asyncio default ThreadPoolExecutor. SQLite/python-magic/pickle/os.walk
         # all run via asyncio.to_thread; the interpreter default (min(32, cpu+4)) is only 5-6
         # on a 1-2 CPU container, which starves those under load. 32 gives ample headroom.

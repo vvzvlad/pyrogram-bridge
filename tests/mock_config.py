@@ -40,4 +40,5 @@ def get_settings():
         "io_thread_pool_size": 32,
         "tg_max_concurrent_transmissions": 3,
         "media_timeout_restart_threshold": 5,
+        "cache_sweep_interval": 900,
     }

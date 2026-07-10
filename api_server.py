@@ -93,6 +93,14 @@ Config = get_settings()
 HTTP_DOWNLOAD_SEMAPHORE = asyncio.Semaphore(3)  # semaphore for live HTTP media requests
 BACKGROUND_DOWNLOAD_SEMAPHORE = asyncio.Semaphore(2)  # semaphore for background cache worker
 download_queue = asyncio.Queue(maxsize=100)
+# Keys currently enqueued for (or being processed by) the background download worker.
+# download_new_files re-scans the whole media table every sweep and, under a FloodWait,
+# the worker drains slowly — without this guard the SAME not-yet-downloaded file gets
+# re-enqueued on every pass, flooding the queue with duplicates. The event loop is
+# single-threaded and every check/mutation below runs with no await in between, so a plain
+# set is race-free: download_new_files adds the key before put_nowait; the worker discards
+# it in its finally alongside task_done().
+_queued_media: set[tuple[str, int, str]] = set()
 # --- Failing-download backoff (negative cache) --------------------------------
 # A media file whose download keeps failing (hang/timeout/not-found) must not be
 # retried on every 60s cache sweep, nor keep occupying a scarce Pyrogram
@@ -850,14 +858,22 @@ async def download_new_files(media_files: list, cache_dir: str) -> None:
                 
             cache_path = os.path.join(post_dir, file_unique_id)
             if not os.path.exists(cache_path):
+                # Skip files already queued/in-flight so a slow-draining queue (FloodWait)
+                # isn't refilled with duplicates on every sweep. Same key shape as the
+                # worker's bg_key. No await between this check and the add -> race-free.
+                key = (str(channel), int(post_id), file_unique_id)
+                if key in _queued_media:
+                    continue
                 try:
                     # put_nowait so a full queue raises QueueFull instead of blocking
                     # cache_media_files (and thus the sweeper) forever. `await put()`
                     # never raises QueueFull, which made the except below dead code.
+                    _queued_media.add(key)
                     download_queue.put_nowait((channel, post_id, file_unique_id))
                     files_queued += 1
                     logger.debug(f"Queued for background download: {channel}/{post_id}/{file_unique_id}")
                 except asyncio.QueueFull:
+                    _queued_media.discard(key)
                     logger.warning(f"Download queue is full, skipping {channel}/{post_id}/{file_unique_id}")
                     break
         
@@ -893,11 +909,15 @@ async def background_download_worker():
             _record_download_failure(bg_key)
             logger.error(f"Background download error for {channel}/{post_id}/{file_unique_id}: {e}")
         finally:
+            # Free the dedup slot so this file can be re-enqueued by a later sweep if it is
+            # still missing (e.g. the download failed or was throttled). No await here, so the
+            # discard and task_done() happen atomically w.r.t. download_new_files.
+            _queued_media.discard(bg_key)
             download_queue.task_done()
 
 async def cache_media_files() -> None:
     """Background task for cache management: removes old files and downloads new ones"""
-    delay = 60
+    delay = Config["cache_sweep_interval"]
     while True:
         try:
             # Load all media file ID records from SQLite
@@ -906,23 +926,29 @@ async def cache_media_files() -> None:
             cache_dir = os.path.abspath("./data/cache")
             updated_media_files, files_removed = await asyncio.to_thread(remove_old_cached_files_sync, media_files, cache_dir)
 
-            if files_removed > 0:
-                try:
-                    # Determine which entries were removed and delete them from SQLite
-                    updated_set = {
-                        (r['channel'], r['post_id'], r['file_unique_id'])
-                        for r in updated_media_files
-                    }
-                    removed_entries = [
-                        (r['channel'], r['post_id'], r['file_unique_id'])
-                        for r in media_files
-                        if (r['channel'], r['post_id'], r['file_unique_id']) not in updated_set
-                    ]
-                    if removed_entries:
-                        await asyncio.to_thread(remove_media_file_ids_sync, DB_PATH, removed_entries)
-                    logger.info(f"Removed {files_removed} old files from cache")
-                except Exception as e:
-                    logger.error(f"Failed to remove old entries from SQLite: {str(e)}")
+            try:
+                # Compute the DB diff UNCONDITIONALLY (not only when files_removed > 0):
+                # remove_old_cached_files_sync drops an entry older than 20 days from the
+                # surviving list even when its file was already gone from disk (that branch
+                # does NOT bump files_removed). If we only purged when a real file was removed,
+                # such a fileless-but-expired row would stay in SQLite forever. The surviving
+                # set reflects what is actually left after the sweep; removed_entries are the
+                # rows present in the OLD set but not in the surviving set.
+                updated_set = {
+                    (r['channel'], r['post_id'], r['file_unique_id'])
+                    for r in updated_media_files
+                }
+                removed_entries = [
+                    (r['channel'], r['post_id'], r['file_unique_id'])
+                    for r in media_files
+                    if (r['channel'], r['post_id'], r['file_unique_id']) not in updated_set
+                ]
+                if removed_entries:
+                    await asyncio.to_thread(remove_media_file_ids_sync, DB_PATH, removed_entries)
+                    logger.info(f"cache_sweep: purged {len(removed_entries)} entries "
+                                f"({files_removed} files removed from disk)")
+            except Exception as e:
+                logger.error(f"Failed to remove old entries from SQLite: {str(e)}")
 
             await download_new_files(updated_media_files, cache_dir)
 
