@@ -22,3 +22,20 @@ sys.modules['config'] = _mock_config
 # without this pin RSS <pubDate> values drift between machines (this sandbox is MSK).
 os.environ['TZ'] = 'UTC'
 time.tzset()
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _reset_media_mime_cache():
+    """Clear the process-lifetime MIME dict before each test (issue #26).
+
+    ``api_server._mime_types`` persists for the whole process, so an entry populated by one
+    test would otherwise leak into another and mask a get/magic call the next test asserts on.
+    """
+    try:
+        import api_server
+        api_server._mime_types.clear()
+    except Exception:
+        pass
+    yield

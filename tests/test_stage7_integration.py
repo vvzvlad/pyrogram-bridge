@@ -73,6 +73,7 @@ def _seed_cache(tmp_path, channel, post_id, fid, body=BODY):
 # --------------------------------------------------------------------------- #
 def test_media_route_range_prefix_0_99(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(api_server, "MEDIA_CACHE_DIR", str(tmp_path / "data" / "cache"))
     _seed_cache(tmp_path, "chan", 3, "fidR")
     monkeypatch.setattr(api_server, "verify_media_digest", lambda url, digest: True)
     # Keep the MIME path DB-free; the FileResponse/Range machinery is what we exercise.
@@ -90,6 +91,7 @@ def test_media_route_range_prefix_0_99(monkeypatch, tmp_path):
 
 def test_media_route_range_suffix_last_100(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(api_server, "MEDIA_CACHE_DIR", str(tmp_path / "data" / "cache"))
     _seed_cache(tmp_path, "chan", 3, "fidS")
     monkeypatch.setattr(api_server, "verify_media_digest", lambda url, digest: True)
     monkeypatch.setattr(api_server, "get_mime_type_sync", lambda *a, **k: None)
@@ -105,6 +107,7 @@ def test_media_route_range_suffix_last_100(monkeypatch, tmp_path):
 
 def test_media_route_range_unsatisfiable_416(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(api_server, "MEDIA_CACHE_DIR", str(tmp_path / "data" / "cache"))
     _seed_cache(tmp_path, "chan", 3, "fidU")
     monkeypatch.setattr(api_server, "verify_media_digest", lambda url, digest: True)
     monkeypatch.setattr(api_server, "get_mime_type_sync", lambda *a, **k: None)
@@ -215,6 +218,7 @@ async def test_ping_reports_degraded_promptly_while_slow_op_pending(monkeypatch)
 # --------------------------------------------------------------------------- #
 async def test_get_media_concurrent_shares_one_download_and_drains_registry(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(api_server, "MEDIA_CACHE_DIR", str(tmp_path / "data" / "cache"))
     api_server._inflight.clear()
     monkeypatch.setattr(api_server, "verify_media_digest", lambda url, digest: True)
     # Serve step is not under test here; keep it to a sentinel so we assert on dedup + registry.
@@ -246,6 +250,7 @@ async def test_get_media_concurrent_shares_one_download_and_drains_registry(monk
 
 async def test_get_media_request_cancel_does_not_stick_registry_or_hang_sibling(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(api_server, "MEDIA_CACHE_DIR", str(tmp_path / "data" / "cache"))
     api_server._inflight.clear()
     monkeypatch.setattr(api_server, "verify_media_digest", lambda url, digest: True)
     sentinel = object()
@@ -298,6 +303,7 @@ async def test_get_media_request_cancel_does_not_stick_registry_or_hang_sibling(
 # --------------------------------------------------------------------------- #
 async def test_media_cache_hit_flush_updates_str_keyed_db_row(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(api_server, "MEDIA_CACHE_DIR", str(tmp_path / "data" / "cache"))
     api_server._access_updates = {}
 
     channel, post_id, fid = "12345", 7, "fidINT"  # int-ish channel, passed as the route str

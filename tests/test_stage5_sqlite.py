@@ -46,6 +46,7 @@ def _clean_accumulator():
 @pytest.mark.asyncio
 async def test_cache_hit_records_accumulator_no_sqlite(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(api_server, "MEDIA_CACHE_DIR", str(tmp_path / "data" / "cache"))
     channel, post_id, fid = "testchan", 5, "fidHIT"
     cache_dir = tmp_path / "data" / "cache" / channel / str(post_id)
     cache_dir.mkdir(parents=True)
@@ -77,6 +78,7 @@ async def test_cache_hit_records_accumulator_no_sqlite(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_get_media_pre_semaphore_cache_hit_no_sqlite(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(api_server, "MEDIA_CACHE_DIR", str(tmp_path / "data" / "cache"))
     channel, post_id, fid = "gmchan", 11, "fidGM"
     cache_dir = tmp_path / "data" / "cache" / channel / str(post_id)
     cache_dir.mkdir(parents=True)
@@ -108,6 +110,7 @@ async def test_get_media_pre_semaphore_cache_hit_no_sqlite(tmp_path, monkeypatch
 @pytest.mark.asyncio
 async def test_cache_hit_keys_channel_as_str(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(api_server, "MEDIA_CACHE_DIR", str(tmp_path / "data" / "cache"))
     channel_int, post_id, fid = 12345, 7, "fidINT"
     cache_dir = tmp_path / "data" / "cache" / str(channel_int) / str(post_id)
     cache_dir.mkdir(parents=True)
