@@ -1416,8 +1416,8 @@ class PostParser:
         if hasattr(chat, 'usernames') and chat.usernames: # Check many usernames
             active_usernames = [u.username for u in chat.usernames if u.active]
             if active_usernames:
-                return active_usernames[0]
-        if hasattr(chat, 'username') and chat.username: return chat.username # Check single username
+                return active_usernames[0].lower() # Canonicalize: usernames are case-insensitive
+        if hasattr(chat, 'username') and chat.username: return chat.username.lower() # Check single username (canonicalized)
         
         # Return numeric ID only if no username found
         if isinstance(chat.id, int) and str(chat.id).startswith('-100'): return str(chat.id)

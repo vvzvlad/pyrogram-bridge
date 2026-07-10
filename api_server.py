@@ -44,6 +44,8 @@ from file_io import (DB_PATH, init_db_sync, get_all_media_file_ids_sync,
                      remove_media_file_ids_sync,
                      get_mime_type_sync, set_mime_type_sync)
 from tg_cache import cleanup_legacy_cache_files, sweep_tgcache
+from channel_key import canonical_channel_key
+from migrate_channel_keys import migrate_channel_keys_sync
 
 # Global python-magic instance for MIME type detection
 magic_mime = magic.Magic(mime=True)
@@ -269,6 +271,12 @@ async def lifespan(_: FastAPI):
 
     # Initialize SQLite database (creates table if not present)
     await asyncio.to_thread(init_db_sync, DB_PATH)
+
+    # One-shot migration of existing cache dirs + DB rows to the canonical channel key
+    # (case-insensitive username collapse). Runs AFTER init_db_sync and BEFORE client.start()
+    # and the background tasks. Wrapped in to_thread because it is a blocking FS-rename +
+    # SQLite routine that would otherwise stall the event loop. Idempotent: a re-run is a no-op.
+    await asyncio.to_thread(migrate_channel_keys_sync, DB_PATH, MEDIA_CACHE_DIR)
 
     # One-shot startup maintenance of the history/chatinfo cache: drop legacy pickle files
     # (which are now always a miss), age-sweep stale tgcache entries, and remove the
@@ -1311,30 +1319,32 @@ async def get_media(channel: str, post_id: int, file_unique_id: str, request: Re
         #else:
         #    logger.info(f"Valid digest for media {url}: {digest}")   
             
-        # Convert numeric channel ID to int if needed
-        channel_id: Union[str, int] = channel
-        if isinstance(channel, str) and channel.startswith('-100'):
-            channel_id = int(channel)
-            
+        # Canonical filesystem/DB/API key. Computed AFTER the digest check (which must run
+        # against the ORIGINAL url string) so 'Durov', 'durov' and '@durov' collapse to one
+        # on-disk tree, one _access_updates/media_key identity and one download identity. The
+        # canonical form is API-safe: usernames are case-insensitive on Telegram's side and
+        # numeric '-100...' ids are preserved verbatim (download_media_file re-ints them).
+        fs_channel = canonical_channel_key(channel)
+
         try: # Wrap the download and prepare call
             import time as _time
 
             # Pre-semaphore cache check: serve already-cached files without acquiring the semaphore
-            cache_path = media_cache_path(str(channel), post_id, file_unique_id)
+            cache_path = media_cache_path(fs_channel, post_id, file_unique_id)
             if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
                 # File is already in cache — skip semaphore and serve directly
-                logger.info(f"pre_semaphore_cache_hit: {channel}/{post_id}/{file_unique_id}")
+                logger.info(f"pre_semaphore_cache_hit: {fs_channel}/{post_id}/{file_unique_id}")
                 # Record the access time into the accumulator instead of firing a per-hit
-                # SQLite write. Key channel as str(channel) — see _access_updates.
-                _access_updates[(str(channel), post_id, file_unique_id)] = datetime.now().timestamp()
+                # SQLite write. Key channel as the canonical fs_channel — see _access_updates.
+                _access_updates[(fs_channel, post_id, file_unique_id)] = datetime.now().timestamp()
                 return await prepare_file_response(cache_path, request=request,
-                                                   media_key=(str(channel), post_id, file_unique_id))
+                                                   media_key=(fs_channel, post_id, file_unique_id))
 
             # A file that recently kept failing is in backoff: fast-reject instead of
             # occupying a scarce download slot (and a Pyrogram transmission permit) on a
             # request that will very likely hang again. Cached files already returned above,
             # so this only guards the live-download path.
-            backoff_remaining = _download_backoff_remaining((str(channel), post_id, file_unique_id))
+            backoff_remaining = _download_backoff_remaining((fs_channel, post_id, file_unique_id))
             if backoff_remaining > 0:
                 logger.info(f"media_backoff_skip: {channel}/{post_id}/{file_unique_id} in backoff {backoff_remaining:.0f}s")
                 return Response(status_code=503, content="Media temporarily unavailable, retry later",
@@ -1369,7 +1379,7 @@ async def get_media(channel: str, post_id: int, file_unique_id: str, request: Re
                 if _sem_wait > 0.5:
                     logger.warning(f"diag_semaphore_wait: {channel}/{post_id}/{file_unique_id} waited {_sem_wait:.3f}s for HTTP_DOWNLOAD_SEMAPHORE")
                 _dl_start = _time.monotonic()
-                file_path, delete_after = await _download_deduped(channel_id, post_id, file_unique_id)
+                file_path, delete_after = await _download_deduped(fs_channel, post_id, file_unique_id)
                 _dl_elapsed = _time.monotonic() - _dl_start
                 logger.info(f"diag_download_timing: {channel}/{post_id}/{file_unique_id} download_media_file took {_dl_elapsed:.3f}s (semaphore_wait={_sem_wait:.3f}s)")
             finally:
@@ -1378,7 +1388,7 @@ async def get_media(channel: str, post_id: int, file_unique_id: str, request: Re
                 raise HTTPException(status_code=404, detail="File not found")
             if file_path:
                 return await prepare_file_response(file_path, request=request, delete_after=delete_after,
-                                                   media_key=(str(channel), post_id, file_unique_id))
+                                                   media_key=(fs_channel, post_id, file_unique_id))
         except ZeroSizeFileError as e: # Catch zero-size file errors
             logger.warning(f"zero_size_file_encountered: {str(e)}. Instructing client to retry.")
             return Response(

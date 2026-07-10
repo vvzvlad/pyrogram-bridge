@@ -27,6 +27,7 @@ from message_snapshot import (
     snapshot_messages,
     restore_messages,
 )
+from channel_key import canonical_channel_key
 
 logger = logging.getLogger(__name__)
 
@@ -51,11 +52,15 @@ def _safe_key(key: Union[str, int]) -> str:
 
 
 def _cache_file_path(key: Union[str, int], suffix: str) -> str:
-    """Return the cache file path <safe_key>.<suffix> (e.g. 'history.json' / 'chatinfo.json')."""
+    """Return the cache file path <safe_key>.<suffix> (e.g. 'history.json' / 'chatinfo.json').
+
+    The key is first canonicalized so that 'Durov', 'durov' and '@durov' collapse to a
+    single cache file (Telegram usernames are case-insensitive).
+    """
     if not os.path.exists(CACHE_DIR):
         os.makedirs(CACHE_DIR, exist_ok=True)
         logger.info(f"cache_dir_created: path {CACHE_DIR}")
-    return os.path.join(CACHE_DIR, f"{_safe_key(key)}.{suffix}")
+    return os.path.join(CACHE_DIR, f"{_safe_key(canonical_channel_key(key))}.{suffix}")
 
 
 # --------------------------------------------------------------------------- #
