@@ -45,6 +45,7 @@ class TelegramClient:
         self._download_timeout_streak = 0
         self.media_timeout_restart_threshold = settings["media_timeout_restart_threshold"]
         self._media_recovery_task = None   # strong ref to a scheduled recovery restart task
+        self._on_restart_verified = None   # optional callback fired after a VERIFIED restart (see set_restart_callback)
         self._disconnect_times = []         # Monotonic timestamps of recent disconnects (sliding window)
         self.disconnect_window = settings["tg_disconnect_flap_window"]   # Seconds; window for flap detection
         self._watchdog_task = None
@@ -188,6 +189,17 @@ class TelegramClient:
         except Exception as e:
             logger.critical(f"watchdog: loop crashed unexpectedly ({type(e).__name__}: {e}); liveness protection is now DISABLED until next start")
 
+    def set_restart_callback(self, callback) -> None:
+        """Register a callback invoked after a VERIFIED in-process restart (verify_get_me OK).
+
+        Used by api_server to clear its download negative cache: a completed restart rebuilds
+        the whole client (all DCs, including the media DC), so any per-file download backoff is
+        stale and a previously-failing file may now download. Kept as a plain hook so
+        telegram_client never has to import api_server (which would be a circular import).
+        The callback is synchronous, best-effort, and never fires on a failed/aborted restart.
+        """
+        self._on_restart_verified = callback
+
     async def _restart_client(self, reason: str = "unspecified"):
         """Recover the client without killing the process when possible.
 
@@ -214,10 +226,14 @@ class TelegramClient:
                 await asyncio.wait_for(self.client.start(), timeout=self.watchdog_restart_timeout)
             duration = time.monotonic() - restart_started
             self._wd_restart_count += 1
-            # Verification probe to prove the network layer is actually back (diagnostic only).
+            # Verification probe to prove the network layer is actually back. It also gates the
+            # verified-restart callback below: we only treat the restart as a real recovery
+            # (and clear the download negative cache) when this probe actually succeeds.
+            verify_ok = False
             try:
                 me = await asyncio.wait_for(self.client.get_me(), timeout=self.watchdog_timeout)
                 self._wd_last_ok_monotonic = time.monotonic()
+                verify_ok = True
                 verify = f", verify_get_me ok (me_id={getattr(me, 'id', None)})"
             except Exception as ve:
                 verify = f", verify_get_me FAILED ({type(ve).__name__}: {ve})"
@@ -226,6 +242,16 @@ class TelegramClient:
                 f"(is_connected={self.client.is_connected}{verify}, total in-process restarts={self._wd_restart_count})"
             )
             self._disconnect_times.clear()
+            # On a VERIFIED restart the whole client (all DCs, incl. the media DC) is
+            # re-established, so any per-file download backoff is stale — fire the registered
+            # hook (api_server clears its negative cache) so recovered media load immediately
+            # instead of fast-503'ing until the backoff expires. Only on verify success, never
+            # on a failed/aborted restart. Best-effort: a callback error must not abort recovery.
+            if verify_ok and self._on_restart_verified is not None:
+                try:
+                    self._on_restart_verified()
+                except Exception as cbe:
+                    logger.warning(f"recovery: restart-verified callback raised {type(cbe).__name__}: {cbe}")
             # Re-arm the watchdog in case it had previously crashed (self-healing).
             self._start_watchdog()
         except asyncio.CancelledError:
@@ -347,6 +373,12 @@ class TelegramClient:
                 self.note_download_timeout()
                 raise
             except Exception as e:
+                # INTENTIONAL: the restart streak counts CONSECUTIVE TIMEOUTS only. Non-timeout
+                # download errors (RPCError, FILE_REFERENCE_EXPIRED, etc.) reach here and call
+                # neither note_download_ok nor note_download_timeout, so they are streak-neutral:
+                # they neither advance nor reset it. This is deliberate — a zombie media-DC
+                # manifests as timeouts, not RPC errors, so only timeouts should escalate to a
+                # connection-rebuilding restart; a burst of unrelated RPC errors must not.
                 if isinstance(e, KeyError) and attempt < max_retries - 1:
                     logger.warning(f"Download auth error on attempt {attempt + 1}, retrying...")
                     await asyncio.sleep(5)

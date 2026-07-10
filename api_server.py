@@ -17,6 +17,7 @@ import mimetypes
 from typing import List, Union, Any
 
 import json
+from collections import OrderedDict
 from datetime import datetime
 import time
 from contextlib import asynccontextmanager
@@ -133,9 +134,21 @@ _queued_media: set[tuple[str, int, str]] = set()
 # growing backoff elapses. Cleared on the first successful download. All access is
 # from the single event-loop thread, so a plain dict needs no lock.
 _DOWNLOAD_BACKOFF_BASE = 60.0     # seconds; backoff after the first failure
-_DOWNLOAD_BACKOFF_MAX = 3600.0    # seconds; cap on the backoff
-# key -> (consecutive_failures, retry_not_before_monotonic)
-_download_failures: dict[tuple[str, int, str], tuple[int, float]] = {}
+# Cap on the backoff. Kept deliberately short (10 min, not 1h): the media self-heal
+# restart recovers in minutes, and a verified restart clears this cache outright (see
+# _clear_all_download_failures), so a system that just healed must not hold a stale,
+# long backoff that keeps fast-503'ing a now-downloadable file.
+_DOWNLOAD_BACKOFF_MAX = 600.0     # seconds; cap on the backoff
+# LRU cap on the negative cache. Permanently-404 / deleted files would otherwise leave
+# eternal entries and slowly leak memory on a long-uptime process. We keep at most this
+# many most-recently-failed keys and evict the oldest. Eviction is harmless: a dropped
+# key is simply treated as "never failed" again — at worst one extra retry attempt, which
+# re-arms its backoff on failure. 10k keys is a tiny footprint yet far above any realistic
+# concurrent-failure working set.
+_DOWNLOAD_FAILURES_MAX = 10000
+# key -> (consecutive_failures, retry_not_before_monotonic). OrderedDict so we can evict
+# in least-recently-updated order once the LRU cap is exceeded.
+_download_failures: "OrderedDict[tuple[str, int, str], tuple[int, float]]" = OrderedDict()
 
 def _download_backoff_remaining(key: tuple[str, int, str]) -> float:
     """Seconds until `key` may be retried; 0.0 if allowed now (or never failed)."""
@@ -149,12 +162,31 @@ def _record_download_failure(key: tuple[str, int, str]) -> None:
     fails = _download_failures.get(key, (0, 0.0))[0] + 1
     backoff = min(_DOWNLOAD_BACKOFF_MAX, _DOWNLOAD_BACKOFF_BASE * (2 ** (fails - 1)))
     _download_failures[key] = (fails, time.monotonic() + backoff)
+    _download_failures.move_to_end(key)  # mark as most-recently-updated for LRU eviction
+    # Bound memory (see _DOWNLOAD_FAILURES_MAX): evict the oldest entries beyond the cap.
+    while len(_download_failures) > _DOWNLOAD_FAILURES_MAX:
+        _download_failures.popitem(last=False)
     logger.warning(f"download_backoff_armed: {key[0]}/{key[1]}/{key[2]} failed {fails}x, next retry in {backoff:.0f}s")
 
 def _clear_download_failure(key: tuple[str, int, str]) -> None:
     """Forget any recorded failure for `key` after a successful download."""
     if _download_failures.pop(key, None) is not None:
         logger.info(f"download_backoff_cleared: {key[0]}/{key[1]}/{key[2]} recovered")
+
+def _clear_all_download_failures() -> None:
+    """Drop the entire download negative cache. Registered with telegram_client and invoked
+    ONLY after a VERIFIED self-heal restart (verify_get_me OK). _restart_client() rebuilds
+    the WHOLE client — all DCs, including the media DC — so every per-file backoff is stale
+    and a previously-failing file may now download. Without this a file that reached the
+    backoff cap would keep fast-503'ing for up to _DOWNLOAD_BACKOFF_MAX after recovery, and
+    nothing would retry it (the sweeper skips backed-off keys, get_media fast-503s them), so
+    it could not self-heal until the backoff expired — defeating the self-heal's purpose.
+    The retry-storm risk if the restart did not actually help is bounded: each re-download is
+    timeout-bounded and simply re-arms its backoff."""
+    n = len(_download_failures)
+    _download_failures.clear()
+    if n:
+        logger.warning(f"download_backoff_cleared_all: dropped {n} entries after verified self-heal restart")
 # How stale a temp_* file's mtime must be before a serve refreshes it (keeps the 1h
 # sweeper from deleting an actively-viewed video). Well below 1h so the file stays alive,
 # but large enough that the mtime — and thus FileResponse's ETag — is stable within any
@@ -290,6 +322,12 @@ async def lifespan(_: FastAPI):
             logger.info(f"legacy_media_file_ids_removed: {legacy_media_ids}")
         except OSError as e:
             logger.warning(f"legacy_media_file_ids_remove_error: {e}")
+
+    # Wire the self-heal restart -> negative-cache clear hook. telegram_client owns the
+    # restart; the negative cache lives here. Registering a plain callback (rather than
+    # importing api_server from telegram_client) keeps the dependency one-way and avoids a
+    # circular import. The hook fires ONLY on a verified restart — see _restart_client.
+    client.set_restart_callback(_clear_all_download_failures)
 
     await client.start()
     # Supervise the background tasks: if either dies (not via cancellation) it is logged
