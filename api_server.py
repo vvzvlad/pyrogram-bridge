@@ -43,6 +43,7 @@ from file_io import (DB_PATH, init_db_sync, get_all_media_file_ids_sync,
                      update_media_file_access_sync, update_media_file_access_bulk_sync,
                      remove_media_file_ids_sync,
                      get_mime_type_sync, set_mime_type_sync)
+from tg_cache import cleanup_legacy_cache_files, sweep_tgcache
 
 # Global python-magic instance for MIME type detection
 magic_mime = magic.Magic(mime=True)
@@ -239,6 +240,19 @@ async def lifespan(_: FastAPI):
 
     # Initialize SQLite database (creates table if not present)
     await asyncio.to_thread(init_db_sync, DB_PATH)
+
+    # One-shot startup maintenance of the history/chatinfo cache: drop legacy pickle files
+    # (which are now always a miss), age-sweep stale tgcache entries, and remove the
+    # pre-SQLite data/media_file_ids.json legacy dump (no longer read by any code).
+    await asyncio.to_thread(cleanup_legacy_cache_files)
+    await asyncio.to_thread(sweep_tgcache)
+    legacy_media_ids = os.path.join("data", "media_file_ids.json")
+    if os.path.exists(legacy_media_ids):
+        try:
+            await asyncio.to_thread(os.remove, legacy_media_ids)
+            logger.info(f"legacy_media_file_ids_removed: {legacy_media_ids}")
+        except OSError as e:
+            logger.warning(f"legacy_media_file_ids_remove_error: {e}")
 
     await client.start()
     # Supervise the background tasks: if either dies (not via cancellation) it is logged
@@ -911,6 +925,11 @@ async def cache_media_files() -> None:
                     logger.error(f"Failed to remove old entries from SQLite: {str(e)}")
 
             await download_new_files(updated_media_files, cache_dir)
+
+            # Age-sweep the history/chatinfo cache once per pass (dead channels, orphaned
+            # uuid tmp files). MUST run off-loop via to_thread (blocking filesystem walk).
+            await asyncio.to_thread(sweep_tgcache)
+
             await asyncio.sleep(delay)  # Check every delay seconds
 
         except Exception as e:
