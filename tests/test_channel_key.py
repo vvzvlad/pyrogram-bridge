@@ -5,7 +5,9 @@
 """Tests for the canonical channel key: helper, the three wiring layers, and the
 one-shot migration (issue #24, tasks 8-11)."""
 
+import logging
 import os
+import shutil
 import sqlite3
 from types import SimpleNamespace
 
@@ -259,3 +261,90 @@ def test_migration_rerun_noop(tmp_path):
     assert first == second
     assert all(r['channel'] == r['channel'].lower() for r in second)
     assert (cache / "durov" / "5" / "fid").read_bytes() == b"data"
+
+
+# --------------------------------------------------------------------------- #
+# Data-loss guard — an FS-step failure must SKIP the SQL step (rows stay old-cased).
+# Has teeth: fails if the `continue` after the FS OSError is removed.
+# --------------------------------------------------------------------------- #
+def test_migration_fs_failure_skips_sql(tmp_path, monkeypatch, caplog):
+    db = str(tmp_path / "m.db")
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    _make_db(db)
+    conn = sqlite3.connect(db)
+    conn.execute("INSERT INTO media_file_ids VALUES (?,?,?,?,?)", ('Durov', 5, 'fid', 100.0, 'image/jpeg'))
+    conn.commit()
+    conn.close()
+    # Old-cased dir with no lowercase twin → the migration takes the os.rename path.
+    (cache / "Durov" / "5").mkdir(parents=True)
+    (cache / "Durov" / "5" / "fid").write_bytes(b"data")
+
+    def boom(*_a, **_k):
+        raise OSError("disk on fire")
+
+    monkeypatch.setattr(os, "rename", boom)
+
+    with caplog.at_level(logging.INFO):
+        migrate_channel_keys_sync(db, str(cache))  # (a) must NOT crash startup
+
+    # (b) SQL step skipped: the row is still OLD-cased.
+    rows = _rows(db)
+    assert len(rows) == 1
+    assert rows[0]['channel'] == 'Durov'
+    # (c) failures counter increased (surfaced in the summary log).
+    assert "failures 1" in caplog.text
+
+
+# --------------------------------------------------------------------------- #
+# Reverse-direction max(added): lowercase twin has the LARGER `added` → it wins.
+# Proves max() is not one-directional ("old always wins").
+# --------------------------------------------------------------------------- #
+def test_migration_sql_merge_reverse_max(tmp_path):
+    db = str(tmp_path / "m.db")
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    _make_db(db)
+    conn = sqlite3.connect(db)
+    # OLD-cased added=100 (SMALLER), lowercase twin added=300 (LARGER).
+    conn.execute("INSERT INTO media_file_ids VALUES (?,?,?,?,?)", ('Durov', 5, 'fid', 100.0, 'image/jpeg'))
+    conn.execute("INSERT INTO media_file_ids VALUES (?,?,?,?,?)", ('durov', 5, 'fid', 300.0, None))
+    conn.commit()
+    conn.close()
+
+    migrate_channel_keys_sync(db, str(cache))
+
+    rows = _rows(db)
+    assert len(rows) == 1
+    assert rows[0]['channel'] == 'durov'
+    assert rows[0]['added'] == 300.0          # max(added): the twin's LARGER value survives
+    assert rows[0]['mime_type'] == 'image/jpeg'  # non-NULL preferred (from the old row)
+
+
+# --------------------------------------------------------------------------- #
+# Traversal guard — a DB channel name with '/' or '..' is SKIPPED before any FS op.
+# Has teeth: fails if the _is_safe_channel_segment guard is removed.
+# --------------------------------------------------------------------------- #
+def test_migration_traversal_guard_skips_dirty_channel(tmp_path, monkeypatch):
+    db = str(tmp_path / "m.db")
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    _make_db(db)
+    conn = sqlite3.connect(db)
+    # Dirty mixed-case channel names → become migration candidates via the DB query.
+    conn.execute("INSERT INTO media_file_ids VALUES (?,?,?,?,?)", ('../Evil', 5, 'fid', 100.0, None))
+    conn.execute("INSERT INTO media_file_ids VALUES (?,?,?,?,?)", ('a/B', 6, 'fid', 100.0, None))
+    conn.commit()
+    conn.close()
+
+    # Spy: no destructive FS op may run (all dirty candidates rejected before the FS step).
+    called = []
+    monkeypatch.setattr(os, "rename", lambda *a, **k: called.append(('rename', a)))
+    monkeypatch.setattr(shutil, "rmtree", lambda *a, **k: called.append(('rmtree', a)))
+
+    migrate_channel_keys_sync(db, str(cache))  # must NOT crash
+
+    assert called == []  # nothing renamed/removed → no op escaped cache_dir
+    # Rejected channels are left un-migrated (rows keep their original dirty names).
+    channels = {r['channel'] for r in _rows(db)}
+    assert channels == {'../Evil', 'a/B'}

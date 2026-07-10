@@ -27,6 +27,26 @@ from channel_key import canonical_channel_key
 logger = logging.getLogger(__name__)
 
 
+def _is_safe_channel_segment(name: str) -> bool:
+    """True iff ``name`` is a plain single path segment safe to join under cache_dir.
+
+    Defends the destructive FS ops below (os.rename / _merge_dir_tree / shutil.rmtree)
+    against a dirty channel string that reached the DB or a crafted dir on disk,
+    regardless of any upstream route-traversal. A dirty name (containing '/', '\\' or a
+    '..' component, or that is not a bare basename, or empty/'.') would let a rename or
+    rmtree escape cache_dir, so it is rejected and the channel is left un-migrated.
+    """
+    if not name or name == '.':
+        return False
+    if '/' in name or '\\' in name:
+        return False
+    if '..' in name.replace('\\', '/').split('/'):
+        return False
+    if os.path.basename(name) != name:
+        return False
+    return True
+
+
 def _merge_dir_tree(src: str, dst: str) -> None:
     """Merge every file under ``src`` into ``dst`` where an existing ``dst`` file WINS.
 
@@ -88,6 +108,17 @@ def migrate_channel_keys_sync(db_path: str, cache_dir: str) -> None:
             logger.error(f"migrate_channel_keys: DB candidate query failed: {e}")
 
         for name in sorted(candidates):
+            # Traversal guard: reject any dirty channel name BEFORE it reaches the
+            # destructive FS ops (rename/merge/rmtree). Applies to both candidate sources
+            # (DB rows and the dir listing). A rejected channel is left as-is (its old-cased
+            # rows/dirs survive until the 20-day sweep, same as any un-migrated channel).
+            if not _is_safe_channel_segment(name):
+                logger.warning(
+                    f"migrate_channel_keys: unsafe channel name {name!r} rejected "
+                    f"(would escape cache_dir), skipping"
+                )
+                failures += 1
+                continue
             canonical = canonical_channel_key(name)
             if canonical == name:
                 # Nothing to change (already canonical) — defensive, candidates shouldn't hit this.
