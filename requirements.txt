@@ -6,13 +6,12 @@ uvicorn==0.34.0
 python-multipart==0.0.20
 Kurigram==2.2.23
 #git+https://github.com/KurimuzonAkuma/pyrogram.git@dev#egg=Kurigram
-TgCrypto
-uvloop
+TgCrypto==1.2.5
+uvloop==0.22.1
 pillow==11.1.0
 feedgen==1.0.0
 python-dateutil==2.9.0.post0
 python-magic==0.4.27
-bleach[css]==6.1.0
-types-bleach
+nh3==0.3.6
 pytest-asyncio==1.4.0
 httpx==0.28.1

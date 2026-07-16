@@ -1,0 +1,36 @@
+# Version control
+.git
+.gitignore
+
+# Python bytecode / caches
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.mypy_cache/
+.pytest_cache/
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Runtime data & secrets — must never be baked into the image
+data/
+.env
+
+# Tests & CI
+tests/
+.github/
+
+# Dev tooling / editor / agent state
+.cursor/
+.claude/
+plans/
+docs/
+pyrogram-bridge.code-workspace
+
+# Docs & binary assets (not needed at runtime; only bloat the context)
+*.md
+*.png
+.DS_Store

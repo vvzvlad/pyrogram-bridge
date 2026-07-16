@@ -12,6 +12,7 @@
 import logging
 import asyncio
 import re
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -27,6 +28,187 @@ from sanitizer import sanitize_html
 Config = get_settings()
 
 logger = logging.getLogger(__name__)
+
+# XML 1.0 forbids most C0 control chars (\x00-\x08, \x0B, \x0C, \x0E-\x1F) and lone
+# surrogate code points (\uD800-\uDFFF, which in a Python str only ever appear
+# unpaired — a real non-BMP char is a single code point > \uFFFF, never a surrogate).
+# lxml (via feedgen) raises ValueError "All strings must be XML compatible" on ANY of
+# these, even inside CDATA, which turns one bad post into an HTTP 500 on the whole feed.
+# TAB (\x09), LF (\x0A) and CR (\x0D) ARE XML-compatible and are deliberately kept.
+# \x09 (TAB), \x0A (LF), \x0D (CR) are the only C0 chars XML 1.0 allows — keep them.
+# lxml also rejects the two BMP noncharacters U+FFFE/U+FFFF and lone surrogates.
+# (re interprets \x.. / \u.... escapes inside the pattern even in a raw string.)
+_XML_INCOMPATIBLE_RE = re.compile(r'[\x00-\x08\x0B\x0C\x0E-\x1F\uD800-\uDFFF\uFFFE\uFFFF]')
+
+
+# --------------------------------------------------------------------------- #
+# Canonical treatment of a post with no date (issue #59)
+# --------------------------------------------------------------------------- #
+# A dateless post (service/deleted message, or a degraded #60 placeholder built from a
+# dateless message) used to be handled THREE inconsistent ways:
+#   1. _create_messages_groups group sort  -> float('inf')  => sorts NEWEST, survives [:limit]
+#   2. _render_messages_groups final sort   -> 0.0          => sorts to the TAIL of the feed
+#   3. generate_channel_rss pubDate         -> datetime.now(utc)
+# So the feed ORDER (place 2, tail) and the pubDate (place 3, "now") contradicted each
+# other, and place 3 was NON-DETERMINISTIC: the post's pubDate changed on EVERY poll.
+# Miniflux sorts by date, so such a post kept floating to the top of the reader; and
+# because the feed ETag is a content signature over the serialized body incl. <pubDate>
+# (issue #62), a floating pubDate meant the ETag NEVER stabilized for any feed containing
+# a dateless post \u2014 defeating conditional GET / 304 for that feed.
+#
+# Canonical rule: a dateless post gets ONE DETERMINISTIC fallback timestamp \u2014 the Unix
+# epoch (0.0, UTC) \u2014 used IDENTICALLY in every sort key AND in the RSS pubDate, never
+# now(). Same input -> same pubDate across every serialization, so the ETag is stable
+# (fixing #62's dateless-feed limitation). Epoch is the honest "unknown date = oldest"
+# interpretation: the post sorts to the tail consistently in both places, and can be
+# trimmed by [:limit] like any other oldest post instead of masquerading as the newest.
+# We deliberately do NOT synthesize a date from message_id: that would manufacture
+# arbitrary 1970-plus-id timestamps, and message_id already keys the (stable) guid so
+# multiple dateless posts never collide \u2014 determinism, not per-post ordering, is what #59
+# requires.
+MISSING_DATE_TS: float = 0.0
+
+
+def _sort_ts(date_ts: float | None) -> float:
+    """Timestamp sort key with the canonical dateless fallback (issue #59).
+
+    `date_ts` is an already-computed POSIX timestamp (post['date']) or None. None -> the
+    deterministic epoch fallback so a dateless post sorts to the tail (never as newest,
+    never with a per-poll-varying key).
+    """
+    return date_ts if date_ts is not None else MISSING_DATE_TS
+
+
+def _msg_sort_ts(message: Message) -> float:
+    """Timestamp sort key for a raw Message, applying the same dateless fallback (#59).
+
+    Naive-safe: a dated kurigram Message yields its (naive-local) timestamp; a dateless
+    one yields the epoch fallback instead of an aware now(), so no naive/aware mix and no
+    +inf 'newest' hack.
+    """
+    return message.date.timestamp() if message.date else MISSING_DATE_TS
+
+
+# Process-wide count of posts whose render raised and were emitted as a degraded
+# placeholder instead of being silently dropped (issue #60). Rendering runs inside a
+# worker thread (asyncio.to_thread) and feeds can render concurrently, so guard the
+# counter with a lock. Surfaced read-only via get_render_failed_count() (exposed on
+# /health) so a silent render regression becomes observable.
+_render_failed_lock = threading.Lock()
+_render_failed_count = 0
+
+
+def _record_render_failure():
+    global _render_failed_count
+    with _render_failed_lock:
+        _render_failed_count += 1
+
+
+def get_render_failed_count() -> int:
+    """Total posts that fell back to a degraded placeholder since process start (#60)."""
+    with _render_failed_lock:
+        return _render_failed_count
+
+
+# User-visible marker text for a post whose render raised. Kept as plain text (no markup
+# beyond the wrapping <p>) so it survives both sanitize_html and _strip_xml_incompatible
+# unchanged, and reads clearly in any RSS reader. English, matching create_error_feed.
+_RENDER_FAILED_TITLE = "⚠ Post failed to render"
+_RENDER_FAILED_NOTE = "This post could not be rendered. See the original on Telegram."
+
+
+def _degraded_post(group: list[Message], error: Exception) -> dict:
+    """Build a visible placeholder entry for a post group whose render raised (#60).
+
+    A render exception must NOT make the post vanish silently from the feed: instead we
+    emit a degraded entry carrying the SAME guid_basis the successful render would have
+    used (window-independent album/min-id basis, #58), so the feed guid stays stable —
+    once the render is fixed the reader updates that entry in place, not resurfaces it.
+
+    All attribute access here is defensive: the group already failed to render, so we
+    must not raise a second time while describing the failure.
+    """
+    # Pick the representative message with the SAME criterion the render path uses:
+    # first message carrying text/caption, else the first of the group.
+    try:
+        main_idx = next((i for i, m in enumerate(group) if (m.text or m.caption)), 0)
+    except Exception:
+        main_idx = 0
+    try:
+        main = group[main_idx]
+    except Exception:
+        main = group[0]
+
+    message_id = getattr(main, "id", None)
+    msg_date = getattr(main, "date", None)
+    try:
+        date_ts = msg_date.timestamp() if msg_date else None
+    except Exception:
+        date_ts = None
+
+    # Keep the SAME window-independent guid basis a successful render would use (#58),
+    # so a degraded album entry does not diverge from its rendered self and get shown
+    # twice. Defensive: the group already failed once, must not raise a second time.
+    try:
+        guid_basis = _stable_guid_basis(group)
+    except Exception:
+        guid_basis = ("msg", message_id)
+
+    return {
+        # sanitize_html (in _render_pipeline) keeps this plain <p> text as-is.
+        'html': f"<p>{_RENDER_FAILED_NOTE}</p>",
+        'date': date_ts,
+        'message_id': message_id,
+        'guid_basis': guid_basis,
+        'title': _RENDER_FAILED_TITLE,
+        'text': _RENDER_FAILED_NOTE,
+        'author': None,
+        'flags': ['render_failed'],
+    }
+
+
+def _strip_xml_incompatible(s):
+    """Remove XML-incompatible control chars and lone surrogates from a string.
+
+    Applied ONLY to the copy of post/channel text handed to the feedgen serializer,
+    immediately before serialization — the stored/returned post text is untouched.
+    Non-str input (e.g. an optional field that is None) is returned unchanged.
+    """
+    if not isinstance(s, str):
+        return s
+    return _XML_INCOMPATIBLE_RE.sub('', s)
+
+
+def _stable_guid_basis(group: list[Message]) -> tuple[str, object]:
+    """Return a window-independent identity for a rendered group's feed guid (issue #58).
+
+    A media group's guid must NOT depend on which subset of its messages happens to fall
+    inside the current fetch window: the reader dedups on the guid, so a guid that shifts
+    when the window boundary moves re-surfaces the same album as a brand-new (duplicate)
+    unread entry on every poll while the album is entering or leaving the window.
+
+    The old basis — the message_id of the "first message carrying text/caption" — moves
+    both when that message leaves the window AND, as an album enters the window newest
+    member first, while the group composition itself grows ({102} -> {101,102} ->
+    {100,101,102}). A minimum-message_id basis has the same growth sensitivity. Only the
+    Telegram-assigned media_group_id is identical for every album member and independent
+    of how many are currently in the window.
+
+    Returns a (kind, key) pair, consumed by the RSS formatter which owns channel_username:
+    - ('album', media_group_id): the group's messages all share one truthy, immutable
+      Telegram media_group_id (a native album — including the transient case where only
+      part of it is in the window). Fully window-independent.
+    - ('msg', min_message_id): a single non-album message, or a TIME_BASED synthetic
+      cluster of unrelated posts (mixed/absent media_group_id). message ids are immutable
+      and min() is independent of text-presence/index/order; a synthetic cluster has no
+      window-independent album id, so this is best-effort.
+    """
+    mgids = {getattr(m, "media_group_id", None) for m in group}
+    if len(mgids) == 1:
+        only = next(iter(mgids))
+        if only:
+            return ("album", only)
+    return ("msg", min(m.id for m in group))
 
 
 @dataclass
@@ -168,10 +350,11 @@ def _create_messages_groups(messages: list[Message], group_ids: dict[int, str | 
     # is naive-safe: kurigram dates are naive-local, and a None-date group used to fall
     # back to an AWARE datetime.now(timezone.utc) here, raising TypeError on the first
     # naive-vs-aware comparison — a 500 on ANY feed carrying a None-date post, in the
-    # DEFAULT path (registry §3.12). None-date groups now sort as newest (float('inf'))
-    # and deterministically survive the later [:limit] slice; the final post sort in
-    # _render_messages_groups (0.0 fallback) still places them at the tail of the feed.
-    processing_groups.sort(key=lambda group: group[0].date.timestamp() if group[0].date else float('inf'), reverse=True)
+    # DEFAULT path (registry §3.12). None-date groups now use the CANONICAL dateless
+    # fallback (epoch, MISSING_DATE_TS) here AND in the final _render_messages_groups sort
+    # AND in the RSS pubDate — one deterministic treatment across all three (issue #59):
+    # they sort to the tail and are trimmed like any other oldest post.
+    processing_groups.sort(key=lambda group: _msg_sort_ts(group[0]), reverse=True)
 
     return processing_groups
 
@@ -204,6 +387,7 @@ def _render_messages_groups(messages_groups: list[list[Message]],
                     'html': _wrap_post_html(message_data["html"]["body"], message_data["html"]["footer"]),
                     'date': message_data['date'],
                     'message_id': message_data['message_id'],
+                    'guid_basis': _stable_guid_basis(group),
                     'title': message_data['html']['title'],
                     'text': message_data['text'],
                     'author': message_data['author'],
@@ -244,6 +428,7 @@ def _render_messages_groups(messages_groups: list[list[Message]],
                     'html': _wrap_post_html(combined_html_body, footer_html),
                     'date': main_message['date'],
                     'message_id': main_message['message_id'],
+                    'guid_basis': _stable_guid_basis(group),
                     'title': main_message['html']['title'],
                     'text': combined_text,
                     'author': main_message['author'],
@@ -251,7 +436,15 @@ def _render_messages_groups(messages_groups: list[list[Message]],
                 })
                 
         except Exception as e:
-            logger.error(f"message_group_rendering_error: error {str(e)}")
+            # Issue #60: a post whose render raises must NOT disappear silently from the
+            # feed (indistinguishable from "nothing was posted"). Emit a degraded
+            # placeholder entry (stable guid) instead of dropping it, and count the
+            # failure so the regression is observable on /health. sanitize/serialize of
+            # this trivial placeholder happens on the same paths as any other post.
+            degraded = _degraded_post(group, e)
+            _record_render_failure()
+            logger.error(f"message_group_rendering_error: message_id {degraded['message_id']}, error {str(e)}, emitting degraded placeholder")
+            rendered_posts.append(degraded)
             continue
 
     # Filter posts by exclude_flags
@@ -278,8 +471,10 @@ def _render_messages_groups(messages_groups: list[list[Message]],
                 logger.debug(f"excluded_post: message_id {post['message_id']}, pattern {exclude_pattern.pattern}")
         rendered_posts = filtered_posts
     
-    # Sort by date; use 0.0 (epoch) as fallback for posts with None date to avoid TypeError
-    rendered_posts.sort(key=lambda x: x['date'] if x['date'] is not None else 0.0, reverse=True)
+    # Sort by date; a None-date post uses the canonical epoch fallback (MISSING_DATE_TS),
+    # identical to the group sort and the RSS pubDate, so feed order and pubDate agree and
+    # a dateless post no longer floats (issue #59).
+    rendered_posts.sort(key=lambda x: _sort_ts(x['date']), reverse=True)
     return rendered_posts
 
 
@@ -309,7 +504,7 @@ def _render_pipeline(messages: list[Message],
         # `messages_sorted` order — including ties — and does NOT mutate the input, so the
         # cache-protecting deepcopy is gone (spec Этап 4).
         group_ids = _compute_time_based_group_ids(messages, merge_seconds)
-        messages = sorted(messages, key=lambda m: m.date.timestamp() if m.date else float('inf'))
+        messages = sorted(messages, key=_msg_sort_ts)
         message_groups = _create_messages_groups(messages, group_ids)
     else:
         message_groups = _create_messages_groups(messages)
@@ -472,11 +667,12 @@ async def generate_channel_rss(channel: str | int,
         fg = FeedGenerator()
         fg.load_extension('dc')
 
-        # Set feed metadata
+        # Set feed metadata. channel_title comes from Telegram (channel_info.title), so
+        # sanitize the strings that carry it before they reach feedgen/lxml.
         main_name = f"{channel_title} (@{channel_username})"
-        fg.title(main_name)
+        fg.title(_strip_xml_incompatible(main_name))
         fg.link(href=f"https://t.me/{channel_username}", rel='alternate')
-        fg.description(f'Telegram channel {channel_username} RSS feed')
+        fg.description(_strip_xml_incompatible(f'Telegram channel {channel_username} RSS feed'))
         fg.language('ru')
         fg.id(f"{base_url}/rss/{channel_username}") # Use username for feed ID consistency
 
@@ -493,30 +689,52 @@ async def generate_channel_rss(channel: str | int,
         
         for post in final_posts:
             fe = fg.add_entry()
-            fe.title(post['title'])
-            
+            # Every post-derived string is stripped of XML-incompatible control chars /
+            # lone surrogates here, at the feedgen boundary, so a single bad byte in any
+            # field cannot 500 the whole feed (issue #54). CDATA does NOT protect against
+            # this — lxml raises in the CDATA branch too.
+            fe.title(_strip_xml_incompatible(post['title']))
+
+            # The human-facing <link> points at the group's representative message (may
+            # shift harmlessly as an album enters/leaves the window — cosmetic only).
             post_link = f"https://t.me/{channel_username}/{post['message_id']}"
             fe.link(href=post_link)
-            
-            fe.description(post['text'].replace('\n', ' '))
+
+            fe.description(_strip_xml_incompatible(post['text'].replace('\n', ' ')))
             # post['html'] is already sanitized per-post inside _render_pipeline
             # (single project-wide bleach config, fail-closed). No per-post thread
             # hop / CSSSanitizer here anymore.
-            fe.content(content=post['html'], type='CDATA')
-            
+            fe.content(content=_strip_xml_incompatible(post['html']), type='CDATA')
+
             if post['date'] is not None:
                 pub_date = datetime.fromtimestamp(post['date'], tz=timezone.utc)
                 logger.debug(f"rss_entry_date: channel {channel}, message_id {post['message_id']}, timestamp {post['date']}, pub_date {pub_date.isoformat()}")
                 fe.pubDate(pub_date)
             else:
-                # Date is None (e.g. service or deleted message) — fall back to current time
-                pub_date = datetime.now(tz=timezone.utc)
-                logger.warning(f"rss_entry_missing_date: channel {channel}, message_id {post['message_id']}, using current time as fallback")
+                # Date is None (e.g. service or deleted message). Use the CANONICAL
+                # deterministic fallback (epoch, MISSING_DATE_TS) — the SAME value the sort
+                # keys use — NOT datetime.now(). now() made this post's pubDate change on
+                # every poll: it floated to the top in Miniflux and kept busting the feed
+                # ETag (issue #62). A fixed epoch pubDate is stable across serializations,
+                # matches the tail position the sort gives it, and keeps the ETag steady
+                # for dateless feeds (issue #59).
+                pub_date = datetime.fromtimestamp(MISSING_DATE_TS, tz=timezone.utc)
+                logger.warning(f"rss_entry_missing_date: channel {channel}, message_id {post['message_id']}, using deterministic epoch fallback {pub_date.isoformat()}")
                 fe.pubDate(pub_date)
-            fe.guid(post_link, permalink=True)
+            # Derive the guid from the group's window-independent identity (issue #58) so a
+            # media group is not re-shown as a duplicate when the fetch window boundary
+            # shifts. A native album keys on its immutable Telegram media_group_id (not a
+            # real page, so isPermaLink="false"); everything else keys on the immutable
+            # message id, keeping the t.me permalink form. Falls back to message_id for any
+            # post dict lacking a basis (defensive).
+            guid_kind, guid_key = post.get('guid_basis', ('msg', post['message_id']))
+            if guid_kind == 'album':
+                fe.guid(f"https://t.me/{channel_username}?mediagroup={guid_key}", permalink=False)
+            else:
+                fe.guid(f"https://t.me/{channel_username}/{guid_key}", permalink=True)
             
             if post['author'] and post['author'] != main_name:
-                fe.author(name="", email=post['author'])
+                fe.author(name="", email=_strip_xml_incompatible(post['author']))
         
         feed_gen_elapsed = time.time() - feed_gen_start_time
         logger.debug(f"rss_feed_generation_timing: channel {channel}, feed generated in {feed_gen_elapsed:.3f} seconds")
@@ -652,20 +870,25 @@ def create_error_feed(channel: str | int, base_url: str) -> str:
         Empty RSS feed as string in XML format.
     """
     fg = FeedGenerator()
-    
-    fg.title(f"Error: Channel @{channel} not found")
+
+    # `channel` is a caller/URL-derived identifier that flows into text AND into URL
+    # attributes (link/id/guid), and lxml rejects XML-incompatible chars in attributes
+    # too — so sanitize it ONCE here and use the clean value everywhere below (issue #54).
+    channel = _strip_xml_incompatible(channel)
+
+    fg.title(_strip_xml_incompatible(f"Error: Channel @{channel} not found"))
     fg.link(href=f"https://t.me/{channel}", rel='alternate')
-    fg.description(f'Error: Telegram channel @{channel} does not exist')
+    fg.description(_strip_xml_incompatible(f'Error: Telegram channel @{channel} does not exist'))
     fg.language('en')
     fg.id(f"{base_url}/rss/{channel}")
-    
+
     fe = fg.add_entry()
     fe.title("Channel not found")
     # Use the original channel string identifier passed to the function for links/text
     fe.link(href=f"https://t.me/{channel}")
     error_html = f"<p>The Telegram channel @{channel} does not exist or is not accessible.</p>"
-    fe.description(f"{error_html}")
-    fe.content(content=error_html, type='CDATA')
+    fe.description(_strip_xml_incompatible(f"{error_html}"))
+    fe.content(content=_strip_xml_incompatible(error_html), type='CDATA')
     fe.pubDate(datetime.now(tz=timezone.utc))
     fe.guid(f"https://t.me/{channel}", permalink=True)
 

@@ -14,11 +14,14 @@ import os
 import re
 import uuid
 import mimetypes
+import hashlib
+import hmac
 from typing import List, Union, Any
 
 import json
 from collections import OrderedDict
-from datetime import datetime
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime, format_datetime
 import time
 from contextlib import asynccontextmanager
 import random
@@ -37,9 +40,9 @@ from fastapi import FastAPI, HTTPException, Response, Request
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from telegram_client import TelegramClient
 from config import get_settings, setup_logging
-from rss_generator import generate_channel_rss, generate_channel_html
+from rss_generator import generate_channel_rss, generate_channel_html, get_render_failed_count
 from post_parser import PostParser
-from url_signer import verify_media_digest, generate_media_digest
+from url_signer import verify_media_digest
 from file_io import (DB_PATH, init_db_sync, get_all_media_file_ids_sync,
                      update_media_file_access_sync, update_media_file_access_bulk_sync,
                      remove_media_file_ids_sync,
@@ -73,9 +76,47 @@ def media_cache_path(channel: str, post_id: int, file_unique_id: str | None = No
 _mime_types: dict[tuple[str, int, str], str] = {}
 _MIME_CACHE_MAX = 50_000  # crude bound; clear-all on overflow is fine at this size
 
+# Content types safe to serve INLINE from our own origin. The media URL carries the feed's
+# TOKEN, so serving active content (HTML/SVG/etc.) inline here would be stored XSS with
+# access to that capability URL. We therefore NEVER echo a sniffed content type into the
+# response: an allowlisted type is served inline; anything else is served as a neutralized
+# attachment (see prepare_file_response). This set is intentionally tight — only the
+# passive image/video/audio types this bridge actually produces from Telegram media
+# (photos -> jpeg/png, stickers -> webp, video stickers/animations/video -> webm/mp4,
+# voice/audio -> ogg/mpeg), plus the common container siblings a browser renders passively.
+#
+# DELIBERATELY EXCLUDED — do NOT add these to the inline set:
+#   - image/svg+xml : an SVG is an image but executes embedded <script>/onload -> XSS.
+#   - text/html, application/xhtml+xml, application/xml : active/script-capable documents.
+#   - application/* : never safe to render inline from this origin.
+#
+# LIBMAGIC NAMING: the response type is chosen by matching the string that
+# python-magic/libmagic ACTUALLY returns for each media file — which for several audio
+# formats is an `x-`/vendor name, NOT the canonical IANA one. Verified empirically with
+# file-5.46 on this box (`magic.Magic(mime=True).from_file(...)`):
+#   M4A (ftyp brand "M4A ") -> audio/x-m4a      (NOT audio/mp4)
+#   WAV (RIFF/WAVE)         -> audio/x-wav       (NOT audio/wav)
+#   AAC (ADTS stream)       -> audio/x-hx-aac-adts (NOT audio/aac)
+# We list BOTH the real libmagic outputs and the canonical siblings: different libmagic
+# builds may emit either, so keeping both is harmless belt-and-suspenders. Without the
+# x- names, legit voice/audio silently flips to attachment and won't play inline.
+_INLINE_SAFE_CONTENT_TYPES = frozenset({
+    "image/png", "image/jpeg", "image/gif", "image/webp", "image/avif",
+    "video/mp4", "video/webm", "video/quicktime", "video/mpeg",
+    "audio/mpeg", "audio/ogg", "audio/mp4", "audio/wav", "audio/aac", "audio/flac",
+    # Actual libmagic outputs (see LIBMAGIC NAMING above):
+    "audio/x-wav", "audio/x-m4a", "audio/x-hx-aac-adts", "audio/x-aac",
+})
+
 # Define custom exception for zero-size files
 class ZeroSizeFileError(Exception):
     """Custom exception for zero-size files found or downloaded."""
+
+# Raised when a live download can't get an HTTP_DOWNLOAD_SEMAPHORE permit within the
+# admission window. It signals a saturated server (map to 503 + Retry-After), NOT a
+# property of the file — so it must NOT arm the download backoff / negative cache.
+class DownloadAdmissionTimeout(Exception):
+    """Raised when acquiring a live-download permit times out (server saturated)."""
 
 class RequestLoggingMiddleware:
     """Pure-ASGI request logger (no BaseHTTPMiddleware).
@@ -126,19 +167,46 @@ download_queue = asyncio.Queue(maxsize=100)
 # set is race-free: download_new_files adds the key before put_nowait; the worker discards
 # it in its finally alongside task_done().
 _queued_media: set[tuple[str, int, str]] = set()
+def _env_int(name: str, default: int, minimum: int = 0) -> int:
+    """Parse an int env var for a module-level tunable; fall back to default on absence/garbage."""
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return max(minimum, int(raw))
+    except ValueError:
+        logger.warning(f"{name} must be an integer, got {raw!r}; using default {default}")
+        return default
+
 # --- Failing-download backoff (negative cache) --------------------------------
 # A media file whose download keeps failing (hang/timeout/not-found) must not be
-# retried on every 60s cache sweep, nor keep occupying a scarce Pyrogram
-# transmission slot. We remember recent failures per (channel, post_id,
-# file_unique_id) and skip / fast-reject re-attempts until an exponentially
-# growing backoff elapses. Cleared on the first successful download. All access is
-# from the single event-loop thread, so a plain dict needs no lock.
+# retried on every cache sweep (cache_sweep_interval, default 900s), nor keep
+# occupying a scarce Pyrogram transmission slot. We remember recent failures per
+# (channel, post_id, file_unique_id) and skip / fast-reject re-attempts until an
+# exponentially growing backoff elapses. Cleared on the first successful download.
+# All access is from the single event-loop thread, so a plain dict needs no lock.
 _DOWNLOAD_BACKOFF_BASE = 60.0     # seconds; backoff after the first failure
-# Cap on the backoff. Kept deliberately short (10 min, not 1h): the media self-heal
-# restart recovers in minutes, and a verified restart clears this cache outright (see
-# _clear_all_download_failures), so a system that just healed must not hold a stale,
-# long backoff that keeps fast-503'ing a now-downloadable file.
-_DOWNLOAD_BACKOFF_MAX = 600.0     # seconds; cap on the backoff
+# Cap on the backoff (seconds), env MEDIA_BACKOFF_MAX_S, default 6h. It MUST be >= the
+# cache sweep interval: with a shorter cap the backoff always expires before the next
+# sweep, so download_new_files re-queues the dead file every pass (the retry-storm this
+# fixes — a dead file was retried every ~15 min for up to 20 days). A long cap is safe
+# because a VERIFIED self-heal restart clears the whole negative cache outright (see
+# _clear_all_download_failures), so a healed system never holds a stale, long backoff
+# that keeps fast-503'ing a now-downloadable file.
+# Clamp STRICTLY above the sweep interval (+1), so a capped dead file's backoff still
+# has time remaining at the next sweep structurally — not by timing luck — even if
+# MEDIA_BACKOFF_MAX_S is mis-set at/below the sweep interval.
+_DOWNLOAD_BACKOFF_MAX = float(max(
+    _env_int("MEDIA_BACKOFF_MAX_S", 21600, minimum=1),
+    int(Config["cache_sweep_interval"]) + 1,
+))
+# After this many CONSECUTIVE failed downloads, drop the media row from SQLite so a
+# genuinely-dead file (deleted post, gone media) stops being re-queued forever. env
+# MEDIA_FAILURES_DROP_ROW, default 15. Best-effort / fire-and-forget: if the post is
+# still in a feed the renderer recreates the row, but the in-memory failure counter
+# survives until success/restart, so a recreated-then-refailing row is dropped again
+# quickly. See _drop_media_row.
+_DOWNLOAD_FAILURES_DROP_ROW = _env_int("MEDIA_FAILURES_DROP_ROW", 15, minimum=1)
 # LRU cap on the negative cache. Permanently-404 / deleted files would otherwise leave
 # eternal entries and slowly leak memory on a long-uptime process. We keep at most this
 # many most-recently-failed keys and evict the oldest. Eviction is harmless: a dropped
@@ -146,9 +214,11 @@ _DOWNLOAD_BACKOFF_MAX = 600.0     # seconds; cap on the backoff
 # re-arms its backoff on failure. 10k keys is a tiny footprint yet far above any realistic
 # concurrent-failure working set.
 _DOWNLOAD_FAILURES_MAX = 10000
-# key -> (consecutive_failures, retry_not_before_monotonic). OrderedDict so we can evict
-# in least-recently-updated order once the LRU cap is exceeded.
-_download_failures: "OrderedDict[tuple[str, int, str], tuple[int, float]]" = OrderedDict()
+# key -> (consecutive_failures, retry_not_before_monotonic, kind). kind is 'permanent'
+# (deleted post / genuinely-gone media -> get_media serves a clean 404 so readers stop
+# retrying) or 'transient' (throttle/timeout/DC issue -> 503 + Retry-After). OrderedDict so
+# we can evict in least-recently-updated order once the LRU cap is exceeded.
+_download_failures: "OrderedDict[tuple[str, int, str], tuple[int, float, str]]" = OrderedDict()
 
 def _download_backoff_remaining(key: tuple[str, int, str]) -> float:
     """Seconds until `key` may be retried; 0.0 if allowed now (or never failed)."""
@@ -157,16 +227,64 @@ def _download_backoff_remaining(key: tuple[str, int, str]) -> float:
         return 0.0
     return max(0.0, entry[1] - time.monotonic())
 
-def _record_download_failure(key: tuple[str, int, str]) -> None:
-    """Register a failed download and (re)arm an exponential backoff for `key`."""
-    fails = _download_failures.get(key, (0, 0.0))[0] + 1
+def _download_failure_kind(key: tuple[str, int, str]) -> Union[str, None]:
+    """Return the recorded failure kind ('permanent'|'transient') for `key`, or None if it
+    has no recorded failure. get_media uses this on a backoff hit to serve a clean 404 for a
+    permanent failure (stop retrying) vs a 503 + Retry-After for a transient one."""
+    entry = _download_failures.get(key)
+    return entry[2] if entry is not None else None
+
+def _record_download_failure(key: tuple[str, int, str], kind: str = "transient") -> None:
+    """Register a failed download and (re)arm an exponential backoff for `key`.
+
+    `kind` classifies the failure: 'permanent' for a genuinely-gone file (a 404 from
+    download_media_file), 'transient' for retryable faults (timeouts, RPC 5xx, zero-size).
+    A later attempt that fails differently overwrites the kind, so the freshest failure wins.
+    """
+    fails = _download_failures.get(key, (0, 0.0, kind))[0] + 1
     backoff = min(_DOWNLOAD_BACKOFF_MAX, _DOWNLOAD_BACKOFF_BASE * (2 ** (fails - 1)))
-    _download_failures[key] = (fails, time.monotonic() + backoff)
+    _download_failures[key] = (fails, time.monotonic() + backoff, kind)
     _download_failures.move_to_end(key)  # mark as most-recently-updated for LRU eviction
     # Bound memory (see _DOWNLOAD_FAILURES_MAX): evict the oldest entries beyond the cap.
     while len(_download_failures) > _DOWNLOAD_FAILURES_MAX:
         _download_failures.popitem(last=False)
     logger.warning(f"download_backoff_armed: {key[0]}/{key[1]}/{key[2]} failed {fails}x, next retry in {backoff:.0f}s")
+    # Drop a persistently-dead row from SQLite so the sweeper stops re-queueing it forever.
+    if fails >= _DOWNLOAD_FAILURES_DROP_ROW:
+        _drop_media_row(key)
+
+# Strong refs to fire-and-forget row-drop tasks so they are not GC'd mid-flight.
+_drop_row_tasks: set[asyncio.Task] = set()
+
+def _drop_media_row(key: tuple[str, int, str]) -> None:
+    """Fire-and-forget removal of a persistently-failing media row from SQLite.
+
+    _record_download_failure runs synchronously on the event loop; remove_media_file_ids_sync
+    is a blocking sqlite call, so we schedule it via to_thread and do NOT await it (strict
+    durability is unnecessary — the counter in _download_failures survives, so a re-added row
+    that keeps failing is dropped again). Skipped when no loop is running (a sync unit test),
+    where there is nothing to schedule onto."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    channel, post_id, file_unique_id = key
+
+    async def _do():
+        try:
+            await asyncio.to_thread(
+                remove_media_file_ids_sync, DB_PATH, [(channel, post_id, file_unique_id)]
+            )
+            logger.warning(
+                f"download_row_dropped: {channel}/{post_id}/{file_unique_id} removed from SQLite "
+                f"after >= {_DOWNLOAD_FAILURES_DROP_ROW} consecutive download failures"
+            )
+        except Exception as e:  # noqa: BLE001 — best-effort cleanup, never crash the caller
+            logger.error(f"download_row_drop_failed: {channel}/{post_id}/{file_unique_id}: {e}")
+
+    task = loop.create_task(_do())
+    _drop_row_tasks.add(task)
+    task.add_done_callback(_drop_row_tasks.discard)
 
 def _clear_download_failure(key: tuple[str, int, str]) -> None:
     """Forget any recorded failure for `key` after a successful download."""
@@ -407,9 +525,11 @@ async def find_file_id_in_message(message: Message, file_unique_id: str) -> Unio
     """Find file_id by checking all possible media types in message"""
     if message.media == MessageMediaType.POLL:
         # Kurigram 2.2.23: polls may carry media in description_media and
-        # explanation_media (MessageContent objects). The bridge renders only
-        # description_media, but explanation_media is searched too: if a signed URL
-        # for it ever exists, the download must still work. getattr-only access —
+        # explanation_media (MessageContent objects). This branch is now LIVE:
+        # download_media_file no longer short-circuits polls, so a signed /media URL for a
+        # poll's description_media resolves its fid here and downloads normally. The bridge
+        # renders only description_media, but explanation_media is searched too: if a signed
+        # URL for it ever exists, the download must still work. getattr-only access —
         # older Poll objects/mocks do not define these fields.
         poll = getattr(message, 'poll', None)
         for container_name in ('description_media', 'explanation_media'):
@@ -575,22 +695,50 @@ async def prepare_file_response(file_path: str, request: Request, delete_after: 
     # FileResponse runs this BackgroundTask after streaming the body.
     background = BackgroundTask(delayed_delete_file, file_path) if delete_after else None
 
+    # SECURITY: decide the RESPONSE content type from an allowlist, NOT from the sniffed
+    # `media_type` above (which stays as the value persisted to the MIME cache). If magic
+    # sniffed attacker-influenced bytes as text/html or image/svg+xml, echoing that type
+    # inline from our own origin — the origin whose URL carries the feed TOKEN — is stored
+    # XSS. So: an allowlisted passive type is served inline with that exact type; anything
+    # else (text/html, image/svg+xml, application/*, anything script-capable) is served as
+    # a neutralized download instead of being refused, since media must stay retrievable.
+    if media_type in _INLINE_SAFE_CONTENT_TYPES:
+        response_media_type = media_type
+        disposition = "inline"
+    else:
+        response_media_type = "application/octet-stream"
+        disposition = "attachment"
+
     # FileResponse handles Range/If-Range/206/416/multipart and sets
     # Accept-Ranges/ETag/Last-Modified itself (from the stat_result we pass). Do NOT
     # hand-build Content-Disposition: FileResponse forms it from filename= —
-    # `inline; filename="x"` for an ASCII name, adding `filename*=UTF-8''x` only for a
-    # non-ASCII name. It uses setdefault, so a manual header would OVERRIDE it, not double
+    # `<disposition>; filename="x"` for an ASCII name, adding `filename*=UTF-8''x` only for
+    # a non-ASCII name. It uses setdefault, so a manual header would OVERRIDE it, not double
     # it; letting FileResponse own it keeps the RFC 5987 encoding correct.
+    #
+    # The extra headers below apply to the 200 AND the 206 (single- and multi-range) paths:
+    # Starlette 0.45.3 FileResponse emits `self.raw_headers` (which includes everything from
+    # this headers= dict) on both the 200 start and every 206 start, only overriding
+    # content-range/content-length. (The 400 malformed-range and 416 unsatisfiable paths
+    # build a fresh PlainTextResponse WITHOUT these headers, but neither serves a body, so
+    # there is no sniffable content to protect there.)
+    #   - X-Content-Type-Options: nosniff makes our declared content type authoritative so
+    #     the browser won't re-sniff an octet-stream/image body as HTML.
+    #   - Content-Security-Policy sandboxes the response as defense-in-depth.
     #
     # Files are addressed by file_unique_id which is immutable in Telegram, so it is safe
     # to cache them aggressively on the client side.
     return FileResponse(
         file_path,
-        media_type=media_type,
+        media_type=response_media_type,
         filename=os.path.basename(file_path),
-        content_disposition_type="inline",
+        content_disposition_type=disposition,
         stat_result=stat_result,
-        headers={"Cache-Control": "public, max-age=86400, immutable"},
+        headers={
+            "Cache-Control": "public, max-age=86400, immutable",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "sandbox; default-src 'none'",
+        },
         background=background,
     )
 
@@ -621,6 +769,12 @@ async def _download_atomic(file_id: str, final_path: str, timeout: float) -> str
     Raises ZeroSizeFileError if the download produced a missing/zero-size file.
     """
     part_path = f"{final_path}.part.{uuid.uuid4().hex}"
+    # Create the cache dir here, immediately before writing the partial — NOT up-front in
+    # download_media_file / download_new_files. That way an item that never actually
+    # downloads (permanently-dead file) never leaves an empty dir behind for the sweeper's
+    # os.walk to trip over, and this self-heals a race with the sweeper's empty-dir rmdir
+    # (which could run between an earlier makedirs and this open).
+    os.makedirs(os.path.dirname(part_path), exist_ok=True)
     try:
         await client.safe_download_media(file_id, part_path, timeout=timeout)
         if not os.path.exists(part_path) or os.path.getsize(part_path) == 0:
@@ -642,7 +796,8 @@ async def _download_atomic(file_id: str, final_path: str, timeout: float) -> str
                 logger.warning(f"cleanup_error: Failed to remove partial file {part_path}: {e}")
 
 
-async def _download_deduped(channel: Union[str, int], post_id: int, file_unique_id: str) -> tuple[Union[str, None], bool]:
+async def _download_deduped(channel: Union[str, int], post_id: int, file_unique_id: str,
+                            semaphore: asyncio.Semaphore) -> tuple[Union[str, None], bool]:
     """Deduplicate concurrent downloads of the same media by (channel, post_id, fid).
 
     The first request for a key runs download_media_file in a DETACHED task and shares its
@@ -651,6 +806,13 @@ async def _download_deduped(channel: Union[str, int], post_id: int, file_unique_
     pops the key — so both happen before the task ends: a completed Future never leaves the
     key stuck, and a client disconnect (cancelling only the awaiting request coroutine) can
     neither cancel the download nor hang other waiters.
+
+    The live-download permit (`semaphore`) is acquired INSIDE the detached runner, so ONE
+    live download holds exactly ONE permit regardless of how many requests wait on the
+    shared Future — N concurrent requests for the same file no longer burn N permits. The
+    acquire is bounded (30s): on saturation the runner resolves the Future with a
+    DownloadAdmissionTimeout (server-busy, mapped to 503 by the caller) instead of hanging.
+    An admission timeout is NOT a download failure, so it must NOT arm the backoff.
     """
     key = (str(channel), post_id, file_unique_id)
     fut = _inflight.get(key)
@@ -661,14 +823,51 @@ async def _download_deduped(channel: Union[str, int], post_id: int, file_unique_
 
         async def _runner():
             try:
-                result = await download_media_file(channel, post_id, file_unique_id)
-                _clear_download_failure(key)
-                if not fut.done():
-                    fut.set_result(result)
+                # Acquire a live-download permit for the duration of this ONE download.
+                # Bounded so a saturated semaphore fast-rejects rather than hangs; a
+                # timed-out acquire never held a permit (nothing to release) and is a
+                # server-load signal, not a file failure, so backoff is NOT armed.
+                _sem_wait_start = time.monotonic()
+                try:
+                    await asyncio.wait_for(semaphore.acquire(), timeout=30)
+                except asyncio.TimeoutError:
+                    logger.warning(f"http_semaphore_timeout: {key[0]}/{key[1]}/{key[2]} waited >30s for a download permit")
+                    if not fut.done():
+                        fut.set_exception(DownloadAdmissionTimeout("download admission timed out"))
+                    return
+                _sem_wait = time.monotonic() - _sem_wait_start
+                if _sem_wait > 0.5:
+                    logger.warning(f"diag_semaphore_wait: {key[0]}/{key[1]}/{key[2]} waited {_sem_wait:.3f}s for a download permit")
+                # Release the permit around the ACTUAL download only (success or failure).
+                try:
+                    _dl_start = time.monotonic()
+                    result = await download_media_file(channel, post_id, file_unique_id)
+                    _dl_elapsed = time.monotonic() - _dl_start
+                    logger.info(f"diag_download_timing: {key[0]}/{key[1]}/{key[2]} download_media_file took {_dl_elapsed:.3f}s (semaphore_wait={_sem_wait:.3f}s)")
+                    _clear_download_failure(key)
+                    if not fut.done():
+                        fut.set_result(result)
+                finally:
+                    semaphore.release()
             except BaseException as e:  # noqa: BLE001 — must forward ANY failure to waiters
-                # Arm backoff for real failures only, never for a shutdown-time cancel.
-                if isinstance(e, Exception):
-                    _record_download_failure(key)
+                # Arm backoff for real download failures only, never for a shutdown-time
+                # cancel (BaseException that is not an Exception).
+                # (DownloadAdmissionTimeout returns early above and never reaches here.)
+                # A FloodWait is a GLOBAL Telegram throttle, not a per-file fault (parity
+                # with background_download_worker), so it must NOT poison this file's negative
+                # cache — waiters still receive it and get_media maps it to a retryable 429.
+                # Classify the rest: 'permanent' (genuinely gone -> get_media serves a clean 404
+                # and readers stop retrying) for an HTTPException(404) OR a raw RPCError with
+                # CODE==400 (MsgIdInvalid/ChannelInvalid/PeerIdInvalid — the resource is gone;
+                # get_media ALSO maps RPC-400 to 404, so caching it transient would flap 404<->503).
+                # Everything else (504 timeout, zero-size, RPC 5xx, other Exception) is
+                # 'transient' -> 503 + Retry-After. FloodWait is excluded above (never armed).
+                if isinstance(e, Exception) and not isinstance(e, errors.FloodWait):
+                    permanent = (isinstance(e, HTTPException) and e.status_code == 404) or (
+                        isinstance(e, errors.RPCError) and getattr(e, "CODE", None) == 400
+                    )
+                    kind = "permanent" if permanent else "transient"
+                    _record_download_failure(key, kind)
                 if not fut.done():
                     fut.set_exception(e)
             finally:
@@ -696,10 +895,11 @@ async def download_media_file(channel: Union[str, int], post_id: int, file_uniqu
     """
     import time as _time
     _fn_start = _time.monotonic()
-    # Create nested cache structure
+    # Nested cache path for this post. The directory is created lazily inside _download_atomic
+    # (only when a partial is actually written), so a file that never downloads leaves no
+    # empty dir behind. Bare os.path.exists checks below are safe on a not-yet-created dir.
     post_dir = media_cache_path(str(channel), post_id)
-    os.makedirs(post_dir, exist_ok=True)
-    
+
     # Convert numeric channel ID to int if needed
     channel_id: Union[str, int] = channel
     if isinstance(channel, str) and channel.startswith('-100'):
@@ -714,11 +914,26 @@ async def download_media_file(channel: Union[str, int], post_id: int, file_uniqu
     # Guard: message may be None (deleted) or an empty stub returned by Pyrogram
     if not message or getattr(message, 'empty', False):
         logger.warning(f"Message {post_id} not found or empty in channel {channel}")
+        # The post is gone: drop its media row so the cache sweep stops re-fetching a
+        # deleted post forever (mirrors the fid-not-found branch below). Canonical key form
+        # (str(channel), post_id, file_unique_id).
+        try:
+            await asyncio.to_thread(
+                remove_media_file_ids_sync,
+                DB_PATH, [(str(channel), post_id, file_unique_id)]
+            )
+            logger.info(f"Removed entry for deleted/empty post {channel}/{post_id}/{file_unique_id} from SQLite")
+        except Exception as e:
+            logger.error(f"Failed to remove entry for {channel}/{post_id}/{file_unique_id} from SQLite: {str(e)}")
         raise HTTPException(status_code=404, detail="Post not found or deleted")
 
-    if message.media == MessageMediaType.POLL:
-        return None, False
-    
+    # NOTE: POLL messages are NOT short-circuited here. A poll may carry media in its
+    # description_media/explanation_media; find_file_id_in_message resolves that fid below
+    # and the file downloads through the normal cache path. A poll whose requested media is
+    # absent falls into the standard "fid not found" branch (404 + SQLite row removal), so a
+    # stale/rendered-but-missing poll media entry stops being re-queued every cache sweep.
+    # is_large_video only inspects message.video (None for a poll), so it stays False here.
+
     # Check if it is a video and if its size exceeds 100 MB
     is_large_video = False
     if message.video:
@@ -896,6 +1111,23 @@ def remove_old_cached_files_sync(media_files: list, cache_dir: str) -> tuple[lis
             except Exception as e:
                 logger.error(f"Failed to remove temporary file {file_path}: {str(e)}")
 
+    # Remove empty post-/channel- directories. A permanently-dead file that never downloads
+    # (backoff-skipped forever) can leave an empty dir behind now that makedirs is lazy, and
+    # empty dirs pile up and slow the sweeper's os.walk and calculate_cache_stats. Walk
+    # bottom-up so an emptied post dir lets its (now-empty) channel dir go in the same pass;
+    # rmdir only ever removes an EMPTY dir, so a dir holding a live file is left untouched.
+    # OSError is swallowed: a non-empty dir is legitimate, and a race with a concurrent fresh
+    # mkdir/download (rmdir vs mkdir) must never crash the sweep — _download_atomic recreates
+    # the dir on demand.
+    for root, _dirs, _files in os.walk(cache_dir, topdown=False):
+        if os.path.abspath(root) == os.path.abspath(cache_dir):
+            continue  # never remove the cache root itself
+        try:
+            if not os.listdir(root):
+                os.rmdir(root)
+        except OSError:
+            pass
+
     return updated_media_files, files_removed
 
 
@@ -918,16 +1150,20 @@ async def download_new_files(media_files: list, cache_dir: str) -> None:
                 logger.error(f"Invalid file data: {file_data}")
                 continue
 
-            # Skip files that recently kept failing — do not re-queue them on every 60s
+            # Skip files that recently kept failing — do not re-queue them on every cache
             # sweep (that retry-storm is what kept the download slots jammed). The backoff
-            # expires on its own; a successful download elsewhere clears it.
+            # cap is >= the sweep interval, so a dead file is skipped for whole sweeps rather
+            # than re-queued every pass. The backoff expires on its own; a successful download
+            # elsewhere clears it.
             if _download_backoff_remaining((str(channel), int(post_id), file_unique_id)) > 0:
                 continue
 
             channel_dir = os.path.join(cache_dir, str(channel))
             post_dir = os.path.join(channel_dir, str(post_id))
-            os.makedirs(post_dir, exist_ok=True)
-            
+            # No makedirs here: the dir is created lazily by _download_atomic only when a
+            # partial is actually written, so a queued-but-never-downloaded file leaves no
+            # empty dir behind. os.path.exists on a not-yet-created dir is False, as intended.
+
             # Skip if temp file exists (large videos)
             temp_path = os.path.join(post_dir, f"temp_{file_unique_id}")
             if os.path.exists(temp_path):
@@ -972,18 +1208,28 @@ async def background_download_worker():
         bg_key = (str(channel), int(post_id), file_unique_id)
         logger.info(f"Background download: {channel}/{post_id}/{file_unique_id}")
         try:
-            async with BACKGROUND_DOWNLOAD_SEMAPHORE:  # limit concurrent background downloads
-                await download_media_file(channel, post_id, file_unique_id)
-            _clear_download_failure(bg_key)
+            # Route through _download_deduped so a live request already downloading THIS file
+            # and the background worker share ONE actual download (one Pyrogram slot) instead
+            # of both fetching it in parallel. The permit is acquired INSIDE the runner, so we
+            # pass the background semaphore rather than wrapping the call in `async with`.
+            # Failure accounting (negative cache + permanent/transient classification) and the
+            # success clear are owned by _download_deduped's runner — the worker must NOT
+            # record/clear here, or a real failure would double-increment the counter.
+            await _download_deduped(channel, post_id, file_unique_id, BACKGROUND_DOWNLOAD_SEMAPHORE)
             await asyncio.sleep(2)
         except errors.FloodWait as e:
             # Must be caught BEFORE the generic Exception (FloodWait subclasses RPCError),
             # otherwise the worker would hammer Telegram while under a flood wait. A flood
-            # wait is a global throttle, not a per-file fault, so it does NOT arm backoff.
+            # wait is a global throttle, not a per-file fault, so it does NOT arm backoff
+            # (the runner excludes it too); the worker sleeps the WHOLE queue to stop hammering.
             logger.warning(f"bg_download_floodwait: {channel}/{post_id}/{file_unique_id} sleeping {e.value}s")
             await asyncio.sleep(min(int(e.value) + 5, 900))
+        except DownloadAdmissionTimeout:
+            # The background semaphore was saturated — a server-load signal, not a file fault
+            # (the runner did NOT arm backoff). Leave the item for a later sweep to re-queue.
+            logger.warning(f"bg_download_admission_timeout: {channel}/{post_id}/{file_unique_id} left for a later sweep")
         except Exception as e:
-            _record_download_failure(bg_key)
+            # The runner already classified and negative-cached this failure; only log here.
             logger.error(f"Background download error for {channel}/{post_id}/{file_unique_id}: {e}")
         finally:
             # Free the dedup slot so this file can be re-enqueued by a later sweep if it is
@@ -1139,7 +1385,32 @@ def is_local_request(request: Request) -> bool:
         # Direct connection (no trusted proxy): use TCP connection address.
         client_ip = connection_ip
 
+    # Security invariant: a forwarded client IP (X-Real-IP / X-Forwarded-For) is honored
+    # ONLY when the real socket peer is itself in the TRUSTED_PROXIES allowlist; otherwise
+    # the socket peer is used verbatim, so an external client cannot spoof "local" to skip auth.
     return client_ip in local_hosts
+
+
+def _enforce_token(request: Request, token: str | None, endpoint: str) -> None:
+    """Authorize a request against the shared-secret token unless it is local.
+
+    Security invariants (issue #56): never log the presented token or the expected
+    secret at any level. On failure we log only a short SHA-256 prefix of the
+    *presented* token so an attack can be correlated in the logs without disclosing
+    either secret. The comparison is constant-time (hmac.compare_digest over the
+    UTF-8 bytes, which also tolerates a non-ASCII presented token without raising)
+    to deny a timing side-channel on the token value.
+    """
+    if not Config["token"]:
+        return
+    if is_local_request(request):
+        logger.info("Local request, skipping token check for %s.", endpoint)
+        return
+    if not hmac.compare_digest((token or "").encode("utf-8"), str(Config["token"]).encode("utf-8")):
+        presented_hash = hashlib.sha256((token or "").encode("utf-8")).hexdigest()[:8]
+        logger.error("invalid_token for %s (presented token sha256:%s)", endpoint, presented_hash)
+        raise HTTPException(status_code=403, detail="Invalid token")
+    logger.info("Valid token for %s", endpoint)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -1180,14 +1451,7 @@ async def index() -> HTMLResponse:
 @app.get("/html/{channel}/{post_id}/{token}", response_class=HTMLResponse)  
 @app.get("/post/html/{channel}/{post_id}/{token}", response_class=HTMLResponse)
 async def get_post_html(channel: str, post_id: int, request: Request, token: str | None = None, debug: bool = False) -> HTMLResponse:
-    if Config["token"] and not is_local_request(request):
-        if token != Config["token"]:
-            logger.error(f"Invalid token for HTML post: {token}, expected: {Config['token']}")
-            raise HTTPException(status_code=403, detail="Invalid token")
-        else:
-            logger.info(f"Valid token for HTML post: {token}")
-    elif Config["token"] and is_local_request(request):
-        logger.info(f"Local request, skipping token check for HTML post.")
+    _enforce_token(request, token, "HTML post")
         
     try:
         parser = PostParser(client.client)
@@ -1206,14 +1470,7 @@ async def get_post_html(channel: str, post_id: int, request: Request, token: str
 @app.get("/json/{channel}/{post_id}/{token}")
 @app.get("/post/json/{channel}/{post_id}/{token}")
 async def get_post(channel: str, post_id: int, request: Request, token: str | None = None, debug: bool = False) -> Response:
-    if Config["token"] and not is_local_request(request):
-        if token != Config["token"]:
-            logger.error(f"Invalid token for JSON post: {token}, expected: {Config['token']}")
-            raise HTTPException(status_code=403, detail="Invalid token")
-        else:
-            logger.info(f"Valid token for JSON post: {token}")
-    elif Config["token"] and is_local_request(request):
-        logger.info(f"Local request, skipping token check for JSON post.")
+    _enforce_token(request, token, "JSON post")
             
     try:
         parser = PostParser(client.client)
@@ -1230,14 +1487,7 @@ async def get_post(channel: str, post_id: int, request: Request, token: str | No
 @app.get("/raw_json/{channel}/{post_id}")
 @app.get("/raw_json/{channel}/{post_id}/{token}")
 async def get_raw_post_json(channel: str, post_id: int, request: Request, token: str | None = None) -> Response:
-    if Config["token"] and not is_local_request(request):
-        if token != Config["token"]:
-            logger.error(f"Invalid token for raw JSON post: {token}, expected: {Config['token']}")
-            raise HTTPException(status_code=403, detail="Invalid token")
-        else:
-            logger.info(f"Valid token for raw JSON post: {token}")
-    elif Config["token"] and is_local_request(request):
-        logger.info(f"Local request, skipping token check for raw JSON post.")
+    _enforce_token(request, token, "raw JSON post")
             
     try:
         # Convert numeric channel ID to int if needed
@@ -1305,14 +1555,7 @@ async def ping() -> JSONResponse:
 @app.get("/health")
 @app.get("/health/{token}")
 async def health_check(request: Request, token: str | None = None) -> Response:
-    if Config["token"] and not is_local_request(request):
-        if token != Config["token"]:
-            logger.error(f"Invalid token for health check: {token}, expected: {Config['token']}")
-            raise HTTPException(status_code=403, detail="Invalid token")
-        else:
-            logger.info(f"Valid token for health check: {token}")
-    elif Config["token"] and is_local_request(request):
-        logger.info(f"Local request, skipping token check for health check.")
+    _enforce_token(request, token, "health check")
             
     try:
         # Bound the Telegram RPC so a hung get_me cannot hang the healthcheck.
@@ -1336,6 +1579,10 @@ async def health_check(request: Request, token: str | None = None) -> Response:
             "tg_phone": me.phone_number,
             "tg_first_name": me.first_name,
             "tg_last_name": me.last_name,
+            # Posts that failed to render and were surfaced as a degraded placeholder
+            # instead of being silently dropped (issue #60). A non-zero, growing value
+            # flags a render regression that would otherwise be invisible.
+            "render_failed": get_render_failed_count(),
             "config": config_info,
             **cache_stats
         }
@@ -1347,15 +1594,18 @@ async def health_check(request: Request, token: str | None = None) -> Response:
 
 @app.get("/media/{channel}/{post_id}/{file_unique_id}/{digest}", response_model=None)
 @app.get("/media/{channel}/{post_id}/{file_unique_id}", response_model=None)
-async def get_media(channel: str, post_id: int, file_unique_id: str, request: Request, digest: str | None = None) -> Response:
+async def get_media(channel: str, post_id: int, file_unique_id: str, request: Request, digest: str | None = None, exp: int | None = None) -> Response:
     try:
         url = f"{channel}/{post_id}/{file_unique_id}"
-        if not verify_media_digest(url, digest):
-            expected_digest = generate_media_digest(url)
-            logger.error(f"Invalid digest for media {url}: {digest}, expected: {expected_digest}")
+        # exp is present only on optional TTL-signed URLs (MEDIA_URL_TTL_DAYS); default URLs
+        # carry no exp query param, so this stays behaviour-identical when TTL is unset.
+        verified = verify_media_digest(url, digest) if exp is None else verify_media_digest(url, digest, exp)
+        if not verified:
+            # Never log the expected digest: it is a signature over a secret key and would
+            # leak signing-oracle output for a chosen url (#56). The presented digest is
+            # attacker-supplied, so it is safe to log for correlation.
+            logger.warning(f"Invalid media digest for {url} (presented digest {digest} rejected)")
             raise HTTPException(status_code=403, detail="Invalid URL signature")
-        #else:
-        #    logger.info(f"Valid digest for media {url}: {digest}")   
             
         # Canonical filesystem/DB/API key. Computed AFTER the digest check (which must run
         # against the ORIGINAL url string) so 'Durov', 'durov' and '@durov' collapse to one
@@ -1365,17 +1615,28 @@ async def get_media(channel: str, post_id: int, file_unique_id: str, request: Re
         fs_channel = canonical_channel_key(channel)
 
         try: # Wrap the download and prepare call
-            import time as _time
-
-            # Pre-semaphore cache check: serve already-cached files without acquiring the semaphore
+            # Pre-download cache check: serve already-cached files without acquiring a
+            # download permit or touching Telegram. The permit now lives inside
+            # _download_deduped's runner, so this handler never holds one.
             cache_path = media_cache_path(fs_channel, post_id, file_unique_id)
             if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
-                # File is already in cache — skip semaphore and serve directly
+                # File is already in cache — serve directly.
                 logger.info(f"pre_semaphore_cache_hit: {fs_channel}/{post_id}/{file_unique_id}")
                 # Record the access time into the accumulator instead of firing a per-hit
                 # SQLite write. Key channel as the canonical fs_channel — see _access_updates.
                 _access_updates[(fs_channel, post_id, file_unique_id)] = datetime.now().timestamp()
                 return await prepare_file_response(cache_path, request=request,
+                                                   media_key=(fs_channel, post_id, file_unique_id))
+
+            # Large videos (>100MB) are cached as temp_<fid>, NOT <fid>. Serve an existing
+            # temp file directly too — before any permit or safe_get_messages RPC — since
+            # links to such videos legitimately appear in feeds (post_parser.py:984-995).
+            # No _access_updates: large videos aren't tracked in SQLite. The temp_* mtime
+            # keepalive touch happens inside prepare_file_response.
+            temp_cache_path = media_cache_path(fs_channel, post_id, f"temp_{file_unique_id}")
+            if os.path.exists(temp_cache_path) and os.path.getsize(temp_cache_path) > 0:
+                logger.info(f"pre_semaphore_temp_cache_hit: {fs_channel}/{post_id}/{file_unique_id}")
+                return await prepare_file_response(temp_cache_path, request=request,
                                                    media_key=(fs_channel, post_id, file_unique_id))
 
             # A file that recently kept failing is in backoff: fast-reject instead of
@@ -1384,44 +1645,23 @@ async def get_media(channel: str, post_id: int, file_unique_id: str, request: Re
             # so this only guards the live-download path.
             backoff_remaining = _download_backoff_remaining((fs_channel, post_id, file_unique_id))
             if backoff_remaining > 0:
+                # A permanent failure (deleted post / genuinely-gone media) serves a clean 404
+                # with NO Retry-After so the reader stops retrying, instead of looping 404->503
+                # forever. A transient failure (throttle/timeout/DC issue) still gets a
+                # 503 + Retry-After so the reader keeps retrying.
+                if _download_failure_kind((fs_channel, post_id, file_unique_id)) == "permanent":
+                    logger.info(f"media_backoff_permanent: {channel}/{post_id}/{file_unique_id} permanently unavailable")
+                    raise HTTPException(status_code=404, detail="File not found")
                 logger.info(f"media_backoff_skip: {channel}/{post_id}/{file_unique_id} in backoff {backoff_remaining:.0f}s")
                 return Response(status_code=503, content="Media temporarily unavailable, retry later",
                                 headers={"Retry-After": str(int(backoff_remaining) + 1)})
 
-            _sem_wait_start = _time.monotonic()
-            # Bound the wait for a live-download permit: a saturated semaphore must not
-            # hang the request indefinitely. wait_for wraps ONLY the acquire; the permit
-            # is released in the finally below only if the acquire actually succeeded (a
-            # timed-out acquire never holds a permit, so it must not release one).
-            #
-            # CONSCIOUS TRADE-OFF (stage-2 review): the permit is held by the REQUEST, not
-            # the detached download task. So this bounds concurrent *requests* (admission
-            # control with a fast 503 on saturation), not strictly concurrent *downloads*:
-            # if a client disconnects, its request coroutine releases the permit while the
-            # detached download keeps running, so a burst of disconnects across DIFFERENT
-            # files can transiently exceed the limit of live Telegram downloads. This is
-            # deliberate — the download surviving a disconnect is the whole point of the
-            # in-flight registry, and moving the permit into the runner would forfeit the
-            # fast 503 (a saturated request would instead hang on the future for up to the
-            # waiter timeout). Each download is itself timeout-bounded, so the overrun is
-            # transient. If prod observation (stage 7) shows real download-count overrun
-            # under disconnect churn, strengthen with a separate download-side limiter.
-            try:
-                await asyncio.wait_for(HTTP_DOWNLOAD_SEMAPHORE.acquire(), timeout=30)
-            except asyncio.TimeoutError:
-                logger.warning(f"http_semaphore_timeout: {channel}/{post_id}/{file_unique_id} waited >30s for HTTP_DOWNLOAD_SEMAPHORE")
-                return Response(status_code=503, content="Server busy, please retry",
-                                headers={"Retry-After": "30"})
-            try:
-                _sem_wait = _time.monotonic() - _sem_wait_start
-                if _sem_wait > 0.5:
-                    logger.warning(f"diag_semaphore_wait: {channel}/{post_id}/{file_unique_id} waited {_sem_wait:.3f}s for HTTP_DOWNLOAD_SEMAPHORE")
-                _dl_start = _time.monotonic()
-                file_path, delete_after = await _download_deduped(fs_channel, post_id, file_unique_id)
-                _dl_elapsed = _time.monotonic() - _dl_start
-                logger.info(f"diag_download_timing: {channel}/{post_id}/{file_unique_id} download_media_file took {_dl_elapsed:.3f}s (semaphore_wait={_sem_wait:.3f}s)")
-            finally:
-                HTTP_DOWNLOAD_SEMAPHORE.release()
+            # The live-download permit is acquired INSIDE _download_deduped's runner, so ONE
+            # live download holds ONE permit no matter how many requests await the shared
+            # Future. A saturated semaphore surfaces as DownloadAdmissionTimeout (-> 503
+            # below); the waiter safety-net timeout surfaces as asyncio.TimeoutError (-> 504).
+            file_path, delete_after = await _download_deduped(fs_channel, post_id, file_unique_id,
+                                                              HTTP_DOWNLOAD_SEMAPHORE)
             if not file_path:
                 raise HTTPException(status_code=404, detail="File not found")
             if file_path:
@@ -1434,6 +1674,18 @@ async def get_media(channel: str, post_id: int, file_unique_id: str, request: Re
                 content="File processing resulted in zero size, please try again in 10 seconds.",
                 headers={"Retry-After": "10"}
             )
+        except DownloadAdmissionTimeout:
+            # Server saturated: no permit within the admission window. Retryable and NOT a
+            # file failure, so no backoff was armed — tell the client to retry shortly.
+            logger.warning(f"download_admission_timeout: {channel}/{post_id}/{file_unique_id} waited >30s for a download permit")
+            return Response(status_code=503, content="Server busy, please retry",
+                            headers={"Retry-After": "30"})
+        except asyncio.TimeoutError:
+            # Waiter safety-net timeout in _download_deduped (the shared Future outlived the
+            # generous per-download bound). Report a retryable 504, not a generic 500.
+            logger.warning(f"media_waiter_timeout: {channel}/{post_id}/{file_unique_id} exceeded the download wait budget")
+            return Response(status_code=504, content="Download timeout",
+                            headers={"Retry-After": "10"})
             
     except HTTPException:
         raise
@@ -1445,8 +1697,18 @@ async def get_media(channel: str, post_id: int, file_unique_id: str, request: Re
         return Response(status_code=429, content="Telegram flood wait",
                         headers={"Retry-After": str(retry_after)})
     except errors.RPCError as e:
-        logger.error(f"Media request RPC error for {channel}/{post_id}/{file_unique_id}: {type(e).__name__} - {str(e)}")
-        raise HTTPException(status_code=404, detail="File not found in Telegram") from e
+        # Distinguish permanent from transient RPC errors. A 4xx-class error (CODE==400:
+        # MsgIdInvalid, ChannelInvalid, PeerIdInvalid, ...) means the request can never
+        # succeed -> 404. Anything else (5xx: InternalServerError, RpcCallFail, Timeout, ...)
+        # is Telegram-side and retryable -> 503 + Retry-After, so a transient RPC blip does
+        # not blacken a live file into a permanent 404. FloodWait is caught above (it
+        # subclasses RPCError) and never reaches here.
+        code = getattr(e, "CODE", None)
+        logger.error(f"Media request RPC error for {channel}/{post_id}/{file_unique_id}: {type(e).__name__} - CODE={code} - {str(e)}")
+        if code == 400:
+            raise HTTPException(status_code=404, detail="File not found in Telegram") from e
+        return Response(status_code=503, content="Telegram temporarily unavailable, retry later",
+                        headers={"Retry-After": "60"})
     except ZeroSizeFileError as e: # Catch zero-size file errors FROM DOWNLOAD
         error_message = f"Failed to obtain valid media file for {channel}/{post_id}/{file_unique_id} after download attempt: {str(e)}"
         logger.error(error_message)
@@ -1461,9 +1723,114 @@ async def get_media(channel: str, post_id: int, file_unique_id: str, request: Re
     logger.error(f"get_media reached unexpected state for {channel}/{post_id}/{file_unique_id}")
     raise HTTPException(status_code=500, detail="Internal server error: Unexpected state reached in media handling.")
 
+# --------------------------------------------------------------------------- #
+# Conditional GET for feeds (issue #62)
+#
+# Miniflux (and any conformant reader) sends If-None-Match / If-Modified-Since on
+# every poll. Honoring them lets us answer an unchanged feed with 304 + no body,
+# saving the response bandwidth and the reader-side parse. The server still renders
+# the feed to derive the ETag — the issue mandates the ETag be a sha256 of the
+# ACTUAL serialized body (a content signature), so it stays in lock-step with what
+# we would have sent; the win is on the wire and in the reader, not on the render.
+# --------------------------------------------------------------------------- #
+
+# Cache-Control uses `private` on purpose: the feed URL carries an auth token and must
+# not be cached by shared/intermediary proxies.
+RSS_CACHE_MAX_AGE = 300  # seconds
+
+# feedgen stamps <lastBuildDate> with datetime.now() on every serialize, so the raw
+# body differs on each request even when the posts are identical. That field is
+# build-time metadata, not content — strip it before hashing so the ETag reflects the
+# feed content and stays stable across polls (otherwise 304 would never fire).
+_LAST_BUILD_DATE_RE = re.compile(r"<lastBuildDate>.*?</lastBuildDate>", re.DOTALL)
+_PUBDATE_RE = re.compile(r"<pubDate>(.*?)</pubDate>", re.DOTALL)
+
+
+def _feed_etag(body: str) -> str:
+    """Strong ETag = sha256 of the content-canonical body (volatile lastBuildDate removed)."""
+    canonical = _LAST_BUILD_DATE_RE.sub("", body)
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return f'"{digest}"'
+
+
+def _feed_last_modified(body: str) -> str | None:
+    """Last-Modified = the freshest entry's pubDate, as an RFC 1123 (GMT) header value.
+
+    Returns None when the body carries no parseable pubDate (e.g. the HTML feed, which
+    has no per-entry dates) — the ETag alone still drives conditional GET in that case.
+    """
+    latest: datetime | None = None
+    for raw in _PUBDATE_RE.findall(body):
+        try:
+            dt = parsedate_to_datetime(raw.strip())
+        except (TypeError, ValueError):
+            continue
+        if dt is None:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        if latest is None or dt > latest:
+            latest = dt
+    if latest is None:
+        return None
+    return format_datetime(latest.astimezone(timezone.utc), usegmt=True)
+
+
+def _feed_not_modified(request: Request, etag: str, last_modified: str | None) -> bool:
+    """Decide 304 from the request validators (RFC 7232).
+
+    If-None-Match takes precedence over If-Modified-Since when both are present.
+    """
+    inm = request.headers.get("if-none-match")
+    if inm is not None:
+        for tok in inm.split(","):
+            tok = tok.strip()
+            if tok == "*":
+                return True
+            if tok.startswith("W/"):  # weak comparison: drop the weak indicator
+                tok = tok[2:].strip()
+            if tok == etag:
+                return True
+        return False
+
+    ims = request.headers.get("if-modified-since")
+    if ims is not None and last_modified is not None:
+        try:
+            ims_dt = parsedate_to_datetime(ims)
+            lm_dt = parsedate_to_datetime(last_modified)
+        except (TypeError, ValueError):
+            return False
+        if ims_dt is None or lm_dt is None:
+            return False
+        if ims_dt.tzinfo is None:
+            ims_dt = ims_dt.replace(tzinfo=timezone.utc)
+        if lm_dt.tzinfo is None:
+            lm_dt = lm_dt.replace(tzinfo=timezone.utc)
+        # Not modified if the freshest entry is no newer than the client's copy.
+        return lm_dt <= ims_dt
+
+    return False
+
+
+def _build_feed_response(request: Request, body: str, media_type: str) -> Response:
+    """Attach ETag/Last-Modified/Cache-Control and short-circuit to 304 when unchanged."""
+    etag = _feed_etag(body)
+    last_modified = _feed_last_modified(body)
+    headers = {
+        "ETag": etag,
+        "Cache-Control": f"private, max-age={RSS_CACHE_MAX_AGE}",
+    }
+    if last_modified is not None:
+        headers["Last-Modified"] = last_modified
+    if _feed_not_modified(request, etag, last_modified):
+        # 304 carries the validators + Cache-Control but no body (RFC 7232 §4.1).
+        return Response(status_code=304, headers=headers)
+    return Response(content=body, media_type=media_type, headers=headers)
+
+
 @app.get("/rss/{channel}", response_class=Response)
 @app.get("/rss/{channel}/{token}", response_class=Response)
-async def get_rss_feed(channel: str, 
+async def get_rss_feed(channel: str,
                         request: Request,
                         token: str | None = None, 
                         limit: int = 50, 
@@ -1472,14 +1839,7 @@ async def get_rss_feed(channel: str,
                         exclude_text: str | None = None,
                         merge_seconds: int = 5,
                         ) -> Response:
-    if Config["token"] and not is_local_request(request):
-        if token != Config["token"]:
-            logger.error(f"invalid_token_error: token {token}, expected {Config['token']}")
-            raise HTTPException(status_code=403, detail="Invalid token")
-        else:
-            logger.info(f"Valid token for RSS endpoint: {token}")
-    elif Config["token"] and is_local_request(request):
-        logger.info(f"Local request, skipping token check for RSS endpoint.")
+    _enforce_token(request, token, "RSS endpoint")
         
     try:
         start_time = time.time()
@@ -1493,7 +1853,7 @@ async def get_rss_feed(channel: str,
                                                     merge_seconds=merge_seconds)
             elapsed_time = time.time() - start_time
             logger.info(f"rss_generation_timing: channel {channel}, generated in {elapsed_time:.3f} seconds")
-            return Response(content=rss_content, media_type="application/xml")
+            return _build_feed_response(request, rss_content, "application/xml")
         elif output_type == 'html':
             rss_content = await generate_channel_html(channel,
                                                     client=client.client, 
@@ -1503,7 +1863,7 @@ async def get_rss_feed(channel: str,
                                                     merge_seconds=merge_seconds)
             elapsed_time = time.time() - start_time
             logger.info(f"html_generation_timing: channel {channel}, generated in {elapsed_time:.3f} seconds")
-            return Response(content=rss_content, media_type="text/html")
+            return _build_feed_response(request, rss_content, "text/html")
         else:
             raise HTTPException(status_code=400, detail=f"invalid_output_type: {output_type}")
     except ValueError as e:
@@ -1531,14 +1891,7 @@ async def get_rss_feed(channel: str,
 @app.get("/flags/{token}", response_model=List[str])
 async def get_available_flags(request: Request, token: str | None = None) -> Response:
     """Returns a list of all possible flags that can be assigned to posts."""
-    if Config["token"] and not is_local_request(request):
-        if token != Config["token"]:
-            logger.error(f"Invalid token for flags endpoint: {token}, expected: {Config['token']}")
-            raise HTTPException(status_code=403, detail="Invalid token")
-        else:
-            logger.info(f"Valid token for flags endpoint: {token}")
-    elif Config["token"] and is_local_request(request):
-        logger.info(f"Local request, skipping token check for flags endpoint.")
+    _enforce_token(request, token, "flags endpoint")
 
     try:
         flags = PostParser.get_all_possible_flags()

@@ -290,6 +290,52 @@ async def test_get_media_request_cancel_does_not_stick_registry_or_hang_sibling(
 
 
 # --------------------------------------------------------------------------- #
+# temp_<fid> pre-download fast-path (issue #49): a cached LARGE video lives on disk as
+# temp_<fid> (not <fid>). get_media must serve it directly — WITHOUT acquiring a download
+# permit and WITHOUT the safe_get_messages RPC that download_media_file would otherwise do
+# before its own temp-cache check. Links to >100MB videos legitimately appear in feeds.
+# Regression caught: dropping the temp_ fast-path re-couples every large-video re-serve to a
+# Telegram RPC + a scarce download permit.
+# --------------------------------------------------------------------------- #
+async def test_get_media_temp_cached_large_video_served_without_rpc_or_permit(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(api_server, "MEDIA_CACHE_DIR", str(tmp_path / "data" / "cache"))
+    api_server._inflight.clear()
+    monkeypatch.setattr(api_server, "verify_media_digest", lambda url, digest: True)
+    # Keep the MIME path DB-free; the fast-path (no RPC/permit) is what we exercise.
+    monkeypatch.setattr(api_server, "get_mime_type_sync", lambda *a, **k: None)
+    monkeypatch.setattr(api_server, "set_mime_type_sync", lambda *a, **k: None)
+
+    channel, post_id, fid = "chan", 11, "bigvid"
+    # Seed ONLY the temp_<fid> file; the plain <fid> is absent (as for a large video).
+    _seed_cache(tmp_path, channel, post_id, f"temp_{fid}")
+
+    # Any Telegram RPC or a live download during a temp cache hit is the bug.
+    async def no_rpc(*a, **k):
+        raise AssertionError("temp cache hit must not call safe_get_messages")
+
+    async def no_dl(*a, **k):
+        raise AssertionError("temp cache hit must not start a download")
+
+    monkeypatch.setattr(api_server.client, "safe_get_messages", no_rpc)
+    monkeypatch.setattr(api_server, "download_media_file", no_dl)
+
+    permits_before = api_server.HTTP_DOWNLOAD_SEMAPHORE._value
+
+    app = _media_app()
+    with TestClient(app) as client:
+        resp = client.get(f"/media/{channel}/{post_id}/{fid}/x")
+
+    assert resp.status_code == 200
+    assert resp.content == BODY                                    # the temp file body
+    assert api_server.HTTP_DOWNLOAD_SEMAPHORE._value == permits_before  # no permit taken
+    assert not api_server._inflight                                # no download registered
+    # Not tracked in SQLite: temp large videos record no _access_updates entry.
+    fs = api_server.canonical_channel_key(channel)
+    assert (fs, post_id, fid) not in api_server._access_updates
+
+
+# --------------------------------------------------------------------------- #
 # str(channel) access-time key consistency (stage 5) END-TO-END: hit -> flush -> DB.
 # Plan gotcha #9: "Ключи SQLite: channel всегда str(...)"; if the key the hot path RECORDS
 # and the key the flush UPDATEs by ever diverge, the timestamp silently stops updating and

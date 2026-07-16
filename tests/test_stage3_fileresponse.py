@@ -86,9 +86,13 @@ def test_no_range_returns_full_200(sample_file):
     assert r.headers["content-length"] == str(SIZE)
     assert r.headers["accept-ranges"] == "bytes"
     assert r.headers["cache-control"] == "public, max-age=86400, immutable"
-    # Content-Disposition: inline, filename set by FileResponse itself (no manual double-set).
-    assert r.headers["content-disposition"].startswith("inline")
+    # Content-Disposition filename set by FileResponse itself (no manual double-set).
+    # BODY sniffs to image/x-tga, which is NOT in the inline allowlist (issue #55), so the
+    # response is served as a neutralized attachment. The filename encoding is still owned
+    # by FileResponse. (Inline serving is covered by the allowlisted-PNG test below.)
+    assert r.headers["content-disposition"].startswith("attachment")
     assert 'filename="myfile.bin"' in r.headers["content-disposition"]
+    assert r.headers["content-type"] == "application/octet-stream"
     # NEW vs old: FileResponse adds validators. Old streaming had neither.
     assert r.headers.get("etag")
     assert r.headers.get("last-modified")
