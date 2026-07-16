@@ -30,11 +30,14 @@ logger = logging.getLogger(__name__)
 
 # XML 1.0 forbids most C0 control chars (\x00-\x08, \x0B, \x0C, \x0E-\x1F) and lone
 # surrogate code points (\uD800-\uDFFF, which in a Python str only ever appear
-# unpaired — a real non-BMP char is a single code point > ￿, never a surrogate).
+# unpaired — a real non-BMP char is a single code point > \uFFFF, never a surrogate).
 # lxml (via feedgen) raises ValueError "All strings must be XML compatible" on ANY of
 # these, even inside CDATA, which turns one bad post into an HTTP 500 on the whole feed.
 # TAB (\x09), LF (\x0A) and CR (\x0D) ARE XML-compatible and are deliberately kept.
-_XML_INCOMPATIBLE_RE = re.compile(r'[\x00-\x08\x0B\x0C\x0E-\x1F\uD800-\uDFFF]')
+# \x09 (TAB), \x0A (LF), \x0D (CR) are the only C0 chars XML 1.0 allows — keep them.
+# lxml also rejects the two BMP noncharacters U+FFFE/U+FFFF and lone surrogates.
+# (re interprets \x.. / \u.... escapes inside the pattern even in a raw string.)
+_XML_INCOMPATIBLE_RE = re.compile(r'[\x00-\x08\x0B\x0C\x0E-\x1F\uD800-\uDFFF\uFFFE\uFFFF]')
 
 
 def _strip_xml_incompatible(s):
@@ -678,8 +681,11 @@ def create_error_feed(channel: str | int, base_url: str) -> str:
     """
     fg = FeedGenerator()
 
-    # `channel` is a caller/URL-derived identifier — strip XML-incompatible chars from
-    # every string that carries it before it reaches feedgen/lxml (issue #54).
+    # `channel` is a caller/URL-derived identifier that flows into text AND into URL
+    # attributes (link/id/guid), and lxml rejects XML-incompatible chars in attributes
+    # too — so sanitize it ONCE here and use the clean value everywhere below (issue #54).
+    channel = _strip_xml_incompatible(channel)
+
     fg.title(_strip_xml_incompatible(f"Error: Channel @{channel} not found"))
     fg.link(href=f"https://t.me/{channel}", rel='alternate')
     fg.description(_strip_xml_incompatible(f'Error: Telegram channel @{channel} does not exist'))

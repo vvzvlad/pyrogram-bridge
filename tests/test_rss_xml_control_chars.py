@@ -115,3 +115,43 @@ async def test_rss_feed_survives_control_chars_in_post_text(monkeypatch):
     assert "SIBLING_CLEAN_MARKER" in rss
     assert "beforemidtail" in rss          # bad chars removed, surrounding text intact
     assert "KEEPTAB" in rss and "KEEPNL" in rss
+
+
+# --------------------------------------------------------------------------- #
+# Regression (review round): U+FFFE / U+FFFF are XML-forbidden too (lxml rejects
+# them), and they are NOT C0 control chars — the first regex missed them, so a post
+# carrying one still 500'd the whole feed.
+# --------------------------------------------------------------------------- #
+def test_strip_removes_bmp_noncharacters_fffe_ffff():
+    dirty = "a" + chr(0xFFFE) + "b" + chr(0xFFFF) + "c"
+    assert _strip_xml_incompatible(dirty) == "abc"
+
+
+@pytest.mark.asyncio
+async def test_rss_feed_survives_bmp_noncharacters(monkeypatch):
+    bad_text = "keep" + chr(0xFFFF) + "mid" + chr(0xFFFE) + "tail"
+    bad_msg = make_message(303, bad_text, datetime(2024, 1, 1, 13, 0, 0, tzinfo=timezone.utc))
+    clean_msg = make_message(404, "NONCHAR_SIBLING", datetime(2024, 1, 1, 13, 30, 0, tzinfo=timezone.utc))
+    _patch_feed_source(monkeypatch, [clean_msg, bad_msg])
+
+    rss = await generate_channel_rss("testchan", client=SimpleNamespace(), limit=20)
+    root = ET.fromstring(rss)
+    assert len(root.findall(".//item")) == 2
+    assert chr(0xFFFE) not in rss and chr(0xFFFF) not in rss
+    assert "NONCHAR_SIBLING" in rss and "keepmidtail" in rss
+
+
+# --------------------------------------------------------------------------- #
+# Regression (review round): create_error_feed put the raw, URL-derived `channel`
+# into link/id/guid ATTRIBUTES (which lxml also rejects for control chars) — a
+# not-found request with a control char in the channel id crashed the error feed.
+# --------------------------------------------------------------------------- #
+def test_error_feed_survives_control_char_in_channel():
+    from rss_generator import create_error_feed
+    # A control char AND a noncharacter in the channel identifier — flows into
+    # title/description text AND into the t.me/... link/id/guid URL attributes.
+    bad_channel = "foo\x08bar" + chr(0xFFFF)
+    xml = create_error_feed(bad_channel, base_url="https://example.com")
+    root = ET.fromstring(xml)                    # must parse (today: ValueError)
+    assert chr(0x08) not in xml and chr(0xFFFF) not in xml
+    assert "foobar" in xml                        # sanitized identifier still shown
