@@ -111,6 +111,12 @@ _INLINE_SAFE_CONTENT_TYPES = frozenset({
 class ZeroSizeFileError(Exception):
     """Custom exception for zero-size files found or downloaded."""
 
+# Raised when a live download can't get an HTTP_DOWNLOAD_SEMAPHORE permit within the
+# admission window. It signals a saturated server (map to 503 + Retry-After), NOT a
+# property of the file — so it must NOT arm the download backoff / negative cache.
+class DownloadAdmissionTimeout(Exception):
+    """Raised when acquiring a live-download permit times out (server saturated)."""
+
 class RequestLoggingMiddleware:
     """Pure-ASGI request logger (no BaseHTTPMiddleware).
 
@@ -704,7 +710,8 @@ async def _download_atomic(file_id: str, final_path: str, timeout: float) -> str
                 logger.warning(f"cleanup_error: Failed to remove partial file {part_path}: {e}")
 
 
-async def _download_deduped(channel: Union[str, int], post_id: int, file_unique_id: str) -> tuple[Union[str, None], bool]:
+async def _download_deduped(channel: Union[str, int], post_id: int, file_unique_id: str,
+                            semaphore: asyncio.Semaphore) -> tuple[Union[str, None], bool]:
     """Deduplicate concurrent downloads of the same media by (channel, post_id, fid).
 
     The first request for a key runs download_media_file in a DETACHED task and shares its
@@ -713,6 +720,13 @@ async def _download_deduped(channel: Union[str, int], post_id: int, file_unique_
     pops the key — so both happen before the task ends: a completed Future never leaves the
     key stuck, and a client disconnect (cancelling only the awaiting request coroutine) can
     neither cancel the download nor hang other waiters.
+
+    The live-download permit (`semaphore`) is acquired INSIDE the detached runner, so ONE
+    live download holds exactly ONE permit regardless of how many requests wait on the
+    shared Future — N concurrent requests for the same file no longer burn N permits. The
+    acquire is bounded (30s): on saturation the runner resolves the Future with a
+    DownloadAdmissionTimeout (server-busy, mapped to 503 by the caller) instead of hanging.
+    An admission timeout is NOT a download failure, so it must NOT arm the backoff.
     """
     key = (str(channel), post_id, file_unique_id)
     fut = _inflight.get(key)
@@ -723,12 +737,35 @@ async def _download_deduped(channel: Union[str, int], post_id: int, file_unique_
 
         async def _runner():
             try:
-                result = await download_media_file(channel, post_id, file_unique_id)
-                _clear_download_failure(key)
-                if not fut.done():
-                    fut.set_result(result)
+                # Acquire a live-download permit for the duration of this ONE download.
+                # Bounded so a saturated semaphore fast-rejects rather than hangs; a
+                # timed-out acquire never held a permit (nothing to release) and is a
+                # server-load signal, not a file failure, so backoff is NOT armed.
+                _sem_wait_start = time.monotonic()
+                try:
+                    await asyncio.wait_for(semaphore.acquire(), timeout=30)
+                except asyncio.TimeoutError:
+                    logger.warning(f"http_semaphore_timeout: {key[0]}/{key[1]}/{key[2]} waited >30s for a download permit")
+                    if not fut.done():
+                        fut.set_exception(DownloadAdmissionTimeout("download admission timed out"))
+                    return
+                _sem_wait = time.monotonic() - _sem_wait_start
+                if _sem_wait > 0.5:
+                    logger.warning(f"diag_semaphore_wait: {key[0]}/{key[1]}/{key[2]} waited {_sem_wait:.3f}s for a download permit")
+                # Release the permit around the ACTUAL download only (success or failure).
+                try:
+                    _dl_start = time.monotonic()
+                    result = await download_media_file(channel, post_id, file_unique_id)
+                    _dl_elapsed = time.monotonic() - _dl_start
+                    logger.info(f"diag_download_timing: {key[0]}/{key[1]}/{key[2]} download_media_file took {_dl_elapsed:.3f}s (semaphore_wait={_sem_wait:.3f}s)")
+                    _clear_download_failure(key)
+                    if not fut.done():
+                        fut.set_result(result)
+                finally:
+                    semaphore.release()
             except BaseException as e:  # noqa: BLE001 — must forward ANY failure to waiters
                 # Arm backoff for real failures only, never for a shutdown-time cancel.
+                # (DownloadAdmissionTimeout returns early above and never reaches here.)
                 if isinstance(e, Exception):
                     _record_download_failure(key)
                 if not fut.done():
@@ -1427,17 +1464,28 @@ async def get_media(channel: str, post_id: int, file_unique_id: str, request: Re
         fs_channel = canonical_channel_key(channel)
 
         try: # Wrap the download and prepare call
-            import time as _time
-
-            # Pre-semaphore cache check: serve already-cached files without acquiring the semaphore
+            # Pre-download cache check: serve already-cached files without acquiring a
+            # download permit or touching Telegram. The permit now lives inside
+            # _download_deduped's runner, so this handler never holds one.
             cache_path = media_cache_path(fs_channel, post_id, file_unique_id)
             if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
-                # File is already in cache — skip semaphore and serve directly
+                # File is already in cache — serve directly.
                 logger.info(f"pre_semaphore_cache_hit: {fs_channel}/{post_id}/{file_unique_id}")
                 # Record the access time into the accumulator instead of firing a per-hit
                 # SQLite write. Key channel as the canonical fs_channel — see _access_updates.
                 _access_updates[(fs_channel, post_id, file_unique_id)] = datetime.now().timestamp()
                 return await prepare_file_response(cache_path, request=request,
+                                                   media_key=(fs_channel, post_id, file_unique_id))
+
+            # Large videos (>100MB) are cached as temp_<fid>, NOT <fid>. Serve an existing
+            # temp file directly too — before any permit or safe_get_messages RPC — since
+            # links to such videos legitimately appear in feeds (post_parser.py:984-995).
+            # No _access_updates: large videos aren't tracked in SQLite. The temp_* mtime
+            # keepalive touch happens inside prepare_file_response.
+            temp_cache_path = media_cache_path(fs_channel, post_id, f"temp_{file_unique_id}")
+            if os.path.exists(temp_cache_path) and os.path.getsize(temp_cache_path) > 0:
+                logger.info(f"pre_semaphore_temp_cache_hit: {fs_channel}/{post_id}/{file_unique_id}")
+                return await prepare_file_response(temp_cache_path, request=request,
                                                    media_key=(fs_channel, post_id, file_unique_id))
 
             # A file that recently kept failing is in backoff: fast-reject instead of
@@ -1450,40 +1498,12 @@ async def get_media(channel: str, post_id: int, file_unique_id: str, request: Re
                 return Response(status_code=503, content="Media temporarily unavailable, retry later",
                                 headers={"Retry-After": str(int(backoff_remaining) + 1)})
 
-            _sem_wait_start = _time.monotonic()
-            # Bound the wait for a live-download permit: a saturated semaphore must not
-            # hang the request indefinitely. wait_for wraps ONLY the acquire; the permit
-            # is released in the finally below only if the acquire actually succeeded (a
-            # timed-out acquire never holds a permit, so it must not release one).
-            #
-            # CONSCIOUS TRADE-OFF (stage-2 review): the permit is held by the REQUEST, not
-            # the detached download task. So this bounds concurrent *requests* (admission
-            # control with a fast 503 on saturation), not strictly concurrent *downloads*:
-            # if a client disconnects, its request coroutine releases the permit while the
-            # detached download keeps running, so a burst of disconnects across DIFFERENT
-            # files can transiently exceed the limit of live Telegram downloads. This is
-            # deliberate — the download surviving a disconnect is the whole point of the
-            # in-flight registry, and moving the permit into the runner would forfeit the
-            # fast 503 (a saturated request would instead hang on the future for up to the
-            # waiter timeout). Each download is itself timeout-bounded, so the overrun is
-            # transient. If prod observation (stage 7) shows real download-count overrun
-            # under disconnect churn, strengthen with a separate download-side limiter.
-            try:
-                await asyncio.wait_for(HTTP_DOWNLOAD_SEMAPHORE.acquire(), timeout=30)
-            except asyncio.TimeoutError:
-                logger.warning(f"http_semaphore_timeout: {channel}/{post_id}/{file_unique_id} waited >30s for HTTP_DOWNLOAD_SEMAPHORE")
-                return Response(status_code=503, content="Server busy, please retry",
-                                headers={"Retry-After": "30"})
-            try:
-                _sem_wait = _time.monotonic() - _sem_wait_start
-                if _sem_wait > 0.5:
-                    logger.warning(f"diag_semaphore_wait: {channel}/{post_id}/{file_unique_id} waited {_sem_wait:.3f}s for HTTP_DOWNLOAD_SEMAPHORE")
-                _dl_start = _time.monotonic()
-                file_path, delete_after = await _download_deduped(fs_channel, post_id, file_unique_id)
-                _dl_elapsed = _time.monotonic() - _dl_start
-                logger.info(f"diag_download_timing: {channel}/{post_id}/{file_unique_id} download_media_file took {_dl_elapsed:.3f}s (semaphore_wait={_sem_wait:.3f}s)")
-            finally:
-                HTTP_DOWNLOAD_SEMAPHORE.release()
+            # The live-download permit is acquired INSIDE _download_deduped's runner, so ONE
+            # live download holds ONE permit no matter how many requests await the shared
+            # Future. A saturated semaphore surfaces as DownloadAdmissionTimeout (-> 503
+            # below); the waiter safety-net timeout surfaces as asyncio.TimeoutError (-> 504).
+            file_path, delete_after = await _download_deduped(fs_channel, post_id, file_unique_id,
+                                                              HTTP_DOWNLOAD_SEMAPHORE)
             if not file_path:
                 raise HTTPException(status_code=404, detail="File not found")
             if file_path:
@@ -1496,6 +1516,18 @@ async def get_media(channel: str, post_id: int, file_unique_id: str, request: Re
                 content="File processing resulted in zero size, please try again in 10 seconds.",
                 headers={"Retry-After": "10"}
             )
+        except DownloadAdmissionTimeout:
+            # Server saturated: no permit within the admission window. Retryable and NOT a
+            # file failure, so no backoff was armed — tell the client to retry shortly.
+            logger.warning(f"download_admission_timeout: {channel}/{post_id}/{file_unique_id} waited >30s for a download permit")
+            return Response(status_code=503, content="Server busy, please retry",
+                            headers={"Retry-After": "30"})
+        except asyncio.TimeoutError:
+            # Waiter safety-net timeout in _download_deduped (the shared Future outlived the
+            # generous per-download bound). Report a retryable 504, not a generic 500.
+            logger.warning(f"media_waiter_timeout: {channel}/{post_id}/{file_unique_id} exceeded the download wait budget")
+            return Response(status_code=504, content="Download timeout",
+                            headers={"Retry-After": "10"})
             
     except HTTPException:
         raise
