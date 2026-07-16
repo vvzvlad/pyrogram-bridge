@@ -11,8 +11,12 @@ mapping instead of a mutated attribute. All tests use NAIVE dates (as kurigram e
 prod), not aware-UTC mocks.
 
 Behavior registry items exercised here: §3.11 (None-date excluded from clustering, no
-mapping entry; own media_group_id still applies) and §3.12 (naive-safe sort keys; None-date
-groups survive [:limit] as newest and land at the tail of the feed via the 0.0 final sort).
+mapping entry; own media_group_id still applies) and §3.12 (naive-safe sort keys).
+
+Issue #59 unified the treatment of a None-date post: it now uses ONE deterministic epoch
+fallback (rss_generator.MISSING_DATE_TS) in EVERY sort key and in the RSS pubDate, so it
+sorts to the tail everywhere and is trimmed by [:limit] like any other oldest post — it no
+longer masquerades as the newest to survive the slice (the old, self-contradictory hack).
 """
 import os
 import time as _time
@@ -180,8 +184,10 @@ def test_create_messages_groups_none_date_does_not_crash_default_path():
     dated = Msg(1, at(0))
     nodate = Msg(2, None)
     groups = _create_messages_groups([dated, nodate])  # must not raise
-    # None-date group sorts as newest (float('inf')) -> first here (reverse=True).
-    assert groups[0][0].id == 2
+    # Canonical #59 rule: None-date group uses the epoch fallback -> sorts to the TAIL
+    # (oldest), so the real-dated group is first and the None-date group is last.
+    assert groups[0][0].id == 1
+    assert groups[-1][0].id == 2
 
 
 def _make_message(mid, text, date, media_group_id=None):
@@ -242,14 +248,15 @@ async def test_none_date_post_renders_and_lands_at_feed_end(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_none_date_group_survives_limit_slice(monkeypatch):
-    # §3.12 retention: the group sort key gives None-date groups float('inf') so they sort
-    # as NEWEST and deterministically survive the [:limit] slice in _render_pipeline.
-    # This test applies REAL limit pressure (limit < number of groups) so the slice actually
-    # drops groups — otherwise reverting 'inf' to 0.0 (or any small key) would go unnoticed.
-    # With 5 dated posts + 1 None-date post and limit=3, the surviving 3 groups must be the
-    # None-date group + the 2 newest dated; the 3 oldest dated are dropped. If 'inf' becomes
-    # 0.0 the None-date group sorts OLDEST and is dropped instead -> this assertion fails.
+async def test_none_date_group_sorts_oldest_and_is_dropped_under_limit(monkeypatch):
+    # Canonical #59 rule: a None-date group uses the epoch fallback in the group sort key,
+    # so it sorts as the OLDEST and is trimmed by [:limit] like any other oldest post —
+    # NOT kept alive as the newest (the old, self-contradictory float('inf') hack that
+    # contradicted its tail pubDate). This test applies REAL limit pressure (limit < number
+    # of groups) so the slice actually drops groups: with 5 dated posts + 1 None-date post
+    # and limit=3, the surviving 3 groups are the 3 NEWEST dated; the None-date group and
+    # the 2 oldest dated are dropped. If the fallback regressed back to 'inf' the None-date
+    # group would sort newest and survive -> this assertion fails.
     posts = [_make_message(mid, f"DATED_{mid}", at(0, minute=mid)) for mid in range(1, 6)]
     posts.append(_make_message(99, "NONE_DATE_POST", None))
 
@@ -264,9 +271,9 @@ async def test_none_date_group_survives_limit_slice(monkeypatch):
 
     html = await generate_channel_html("testchan", client=SimpleNamespace(), limit=3)
 
-    # Exactly 3 posts survive the slice; the None-date group is one of them.
+    # Exactly 3 posts survive the slice: the 3 NEWEST dated posts.
     assert html.count('class="message-body"') == 3
-    assert "NONE_DATE_POST" in html, "None-date group must survive [:limit] via the inf key"
-    # The 2 newest dated posts survive; the 3 oldest are dropped by the slice.
-    assert "DATED_5" in html and "DATED_4" in html
-    assert "DATED_1" not in html and "DATED_2" not in html and "DATED_3" not in html
+    # The None-date group sorts oldest (epoch fallback) and is dropped by the slice.
+    assert "NONE_DATE_POST" not in html, "None-date group must sort oldest and be trimmed by [:limit] (#59)"
+    assert "DATED_5" in html and "DATED_4" in html and "DATED_3" in html
+    assert "DATED_1" not in html and "DATED_2" not in html

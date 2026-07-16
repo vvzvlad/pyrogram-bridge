@@ -41,6 +41,54 @@ logger = logging.getLogger(__name__)
 _XML_INCOMPATIBLE_RE = re.compile(r'[\x00-\x08\x0B\x0C\x0E-\x1F\uD800-\uDFFF\uFFFE\uFFFF]')
 
 
+# --------------------------------------------------------------------------- #
+# Canonical treatment of a post with no date (issue #59)
+# --------------------------------------------------------------------------- #
+# A dateless post (service/deleted message, or a degraded #60 placeholder built from a
+# dateless message) used to be handled THREE inconsistent ways:
+#   1. _create_messages_groups group sort  -> float('inf')  => sorts NEWEST, survives [:limit]
+#   2. _render_messages_groups final sort   -> 0.0          => sorts to the TAIL of the feed
+#   3. generate_channel_rss pubDate         -> datetime.now(utc)
+# So the feed ORDER (place 2, tail) and the pubDate (place 3, "now") contradicted each
+# other, and place 3 was NON-DETERMINISTIC: the post's pubDate changed on EVERY poll.
+# Miniflux sorts by date, so such a post kept floating to the top of the reader; and
+# because the feed ETag is a content signature over the serialized body incl. <pubDate>
+# (issue #62), a floating pubDate meant the ETag NEVER stabilized for any feed containing
+# a dateless post \u2014 defeating conditional GET / 304 for that feed.
+#
+# Canonical rule: a dateless post gets ONE DETERMINISTIC fallback timestamp \u2014 the Unix
+# epoch (0.0, UTC) \u2014 used IDENTICALLY in every sort key AND in the RSS pubDate, never
+# now(). Same input -> same pubDate across every serialization, so the ETag is stable
+# (fixing #62's dateless-feed limitation). Epoch is the honest "unknown date = oldest"
+# interpretation: the post sorts to the tail consistently in both places, and can be
+# trimmed by [:limit] like any other oldest post instead of masquerading as the newest.
+# We deliberately do NOT synthesize a date from message_id: that would manufacture
+# arbitrary 1970-plus-id timestamps, and message_id already keys the (stable) guid so
+# multiple dateless posts never collide \u2014 determinism, not per-post ordering, is what #59
+# requires.
+MISSING_DATE_TS: float = 0.0
+
+
+def _sort_ts(date_ts: float | None) -> float:
+    """Timestamp sort key with the canonical dateless fallback (issue #59).
+
+    `date_ts` is an already-computed POSIX timestamp (post['date']) or None. None -> the
+    deterministic epoch fallback so a dateless post sorts to the tail (never as newest,
+    never with a per-poll-varying key).
+    """
+    return date_ts if date_ts is not None else MISSING_DATE_TS
+
+
+def _msg_sort_ts(message: Message) -> float:
+    """Timestamp sort key for a raw Message, applying the same dateless fallback (#59).
+
+    Naive-safe: a dated kurigram Message yields its (naive-local) timestamp; a dateless
+    one yields the epoch fallback instead of an aware now(), so no naive/aware mix and no
+    +inf 'newest' hack.
+    """
+    return message.date.timestamp() if message.date else MISSING_DATE_TS
+
+
 # Process-wide count of posts whose render raised and were emitted as a degraded
 # placeholder instead of being silently dropped (issue #60). Rendering runs inside a
 # worker thread (asyncio.to_thread) and feeds can render concurrently, so guard the
@@ -302,10 +350,11 @@ def _create_messages_groups(messages: list[Message], group_ids: dict[int, str | 
     # is naive-safe: kurigram dates are naive-local, and a None-date group used to fall
     # back to an AWARE datetime.now(timezone.utc) here, raising TypeError on the first
     # naive-vs-aware comparison — a 500 on ANY feed carrying a None-date post, in the
-    # DEFAULT path (registry §3.12). None-date groups now sort as newest (float('inf'))
-    # and deterministically survive the later [:limit] slice; the final post sort in
-    # _render_messages_groups (0.0 fallback) still places them at the tail of the feed.
-    processing_groups.sort(key=lambda group: group[0].date.timestamp() if group[0].date else float('inf'), reverse=True)
+    # DEFAULT path (registry §3.12). None-date groups now use the CANONICAL dateless
+    # fallback (epoch, MISSING_DATE_TS) here AND in the final _render_messages_groups sort
+    # AND in the RSS pubDate — one deterministic treatment across all three (issue #59):
+    # they sort to the tail and are trimmed like any other oldest post.
+    processing_groups.sort(key=lambda group: _msg_sort_ts(group[0]), reverse=True)
 
     return processing_groups
 
@@ -422,8 +471,10 @@ def _render_messages_groups(messages_groups: list[list[Message]],
                 logger.debug(f"excluded_post: message_id {post['message_id']}, pattern {exclude_pattern.pattern}")
         rendered_posts = filtered_posts
     
-    # Sort by date; use 0.0 (epoch) as fallback for posts with None date to avoid TypeError
-    rendered_posts.sort(key=lambda x: x['date'] if x['date'] is not None else 0.0, reverse=True)
+    # Sort by date; a None-date post uses the canonical epoch fallback (MISSING_DATE_TS),
+    # identical to the group sort and the RSS pubDate, so feed order and pubDate agree and
+    # a dateless post no longer floats (issue #59).
+    rendered_posts.sort(key=lambda x: _sort_ts(x['date']), reverse=True)
     return rendered_posts
 
 
@@ -453,7 +504,7 @@ def _render_pipeline(messages: list[Message],
         # `messages_sorted` order — including ties — and does NOT mutate the input, so the
         # cache-protecting deepcopy is gone (spec Этап 4).
         group_ids = _compute_time_based_group_ids(messages, merge_seconds)
-        messages = sorted(messages, key=lambda m: m.date.timestamp() if m.date else float('inf'))
+        messages = sorted(messages, key=_msg_sort_ts)
         message_groups = _create_messages_groups(messages, group_ids)
     else:
         message_groups = _create_messages_groups(messages)
@@ -660,9 +711,15 @@ async def generate_channel_rss(channel: str | int,
                 logger.debug(f"rss_entry_date: channel {channel}, message_id {post['message_id']}, timestamp {post['date']}, pub_date {pub_date.isoformat()}")
                 fe.pubDate(pub_date)
             else:
-                # Date is None (e.g. service or deleted message) — fall back to current time
-                pub_date = datetime.now(tz=timezone.utc)
-                logger.warning(f"rss_entry_missing_date: channel {channel}, message_id {post['message_id']}, using current time as fallback")
+                # Date is None (e.g. service or deleted message). Use the CANONICAL
+                # deterministic fallback (epoch, MISSING_DATE_TS) — the SAME value the sort
+                # keys use — NOT datetime.now(). now() made this post's pubDate change on
+                # every poll: it floated to the top in Miniflux and kept busting the feed
+                # ETag (issue #62). A fixed epoch pubDate is stable across serializations,
+                # matches the tail position the sort gives it, and keeps the ETag steady
+                # for dateless feeds (issue #59).
+                pub_date = datetime.fromtimestamp(MISSING_DATE_TS, tz=timezone.utc)
+                logger.warning(f"rss_entry_missing_date: channel {channel}, message_id {post['message_id']}, using deterministic epoch fallback {pub_date.isoformat()}")
                 fe.pubDate(pub_date)
             # Derive the guid from the group's window-independent identity (issue #58) so a
             # media group is not re-shown as a duplicate when the fetch window boundary
