@@ -39,7 +39,7 @@ from fastapi import FastAPI, HTTPException, Response, Request
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from telegram_client import TelegramClient
 from config import get_settings, setup_logging
-from rss_generator import generate_channel_rss, generate_channel_html
+from rss_generator import generate_channel_rss, generate_channel_html, get_render_failed_count
 from post_parser import PostParser
 from url_signer import verify_media_digest
 from file_io import (DB_PATH, init_db_sync, get_all_media_file_ids_sync,
@@ -1432,6 +1432,10 @@ async def health_check(request: Request, token: str | None = None) -> Response:
             "tg_phone": me.phone_number,
             "tg_first_name": me.first_name,
             "tg_last_name": me.last_name,
+            # Posts that failed to render and were surfaced as a degraded placeholder
+            # instead of being silently dropped (issue #60). A non-zero, growing value
+            # flags a render regression that would otherwise be invisible.
+            "render_failed": get_render_failed_count(),
             "config": config_info,
             **cache_stats
         }

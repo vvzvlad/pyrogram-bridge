@@ -12,6 +12,7 @@
 import logging
 import asyncio
 import re
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -38,6 +39,75 @@ logger = logging.getLogger(__name__)
 # lxml also rejects the two BMP noncharacters U+FFFE/U+FFFF and lone surrogates.
 # (re interprets \x.. / \u.... escapes inside the pattern even in a raw string.)
 _XML_INCOMPATIBLE_RE = re.compile(r'[\x00-\x08\x0B\x0C\x0E-\x1F\uD800-\uDFFF\uFFFE\uFFFF]')
+
+
+# Process-wide count of posts whose render raised and were emitted as a degraded
+# placeholder instead of being silently dropped (issue #60). Rendering runs inside a
+# worker thread (asyncio.to_thread) and feeds can render concurrently, so guard the
+# counter with a lock. Surfaced read-only via get_render_failed_count() (exposed on
+# /health) so a silent render regression becomes observable.
+_render_failed_lock = threading.Lock()
+_render_failed_count = 0
+
+
+def _record_render_failure():
+    global _render_failed_count
+    with _render_failed_lock:
+        _render_failed_count += 1
+
+
+def get_render_failed_count() -> int:
+    """Total posts that fell back to a degraded placeholder since process start (#60)."""
+    with _render_failed_lock:
+        return _render_failed_count
+
+
+# User-visible marker text for a post whose render raised. Kept as plain text (no markup
+# beyond the wrapping <p>) so it survives both sanitize_html and _strip_xml_incompatible
+# unchanged, and reads clearly in any RSS reader. English, matching create_error_feed.
+_RENDER_FAILED_TITLE = "⚠ Post failed to render"
+_RENDER_FAILED_NOTE = "This post could not be rendered. See the original on Telegram."
+
+
+def _degraded_post(group: list[Message], error: Exception) -> dict:
+    """Build a visible placeholder entry for a post group whose render raised (#60).
+
+    A render exception must NOT make the post vanish silently from the feed: instead we
+    emit a degraded entry carrying the SAME message_id the successful render would have
+    used, so the feed guid (built from message_id) stays stable — once the render is
+    fixed the reader updates that entry in place rather than resurfacing it as new.
+
+    All attribute access here is defensive: the group already failed to render, so we
+    must not raise a second time while describing the failure.
+    """
+    # Pick the representative message with the SAME criterion the render path uses:
+    # first message carrying text/caption, else the first of the group.
+    try:
+        main_idx = next((i for i, m in enumerate(group) if (m.text or m.caption)), 0)
+    except Exception:
+        main_idx = 0
+    try:
+        main = group[main_idx]
+    except Exception:
+        main = group[0]
+
+    message_id = getattr(main, "id", None)
+    msg_date = getattr(main, "date", None)
+    try:
+        date_ts = msg_date.timestamp() if msg_date else None
+    except Exception:
+        date_ts = None
+
+    return {
+        # sanitize_html (in _render_pipeline) keeps this plain <p> text as-is.
+        'html': f"<p>{_RENDER_FAILED_NOTE}</p>",
+        'date': date_ts,
+        'message_id': message_id,
+        'title': _RENDER_FAILED_TITLE,
+        'text': _RENDER_FAILED_NOTE,
+        'author': None,
+        'flags': ['render_failed'],
+    }
 
 
 def _strip_xml_incompatible(s):
@@ -274,7 +344,15 @@ def _render_messages_groups(messages_groups: list[list[Message]],
                 })
                 
         except Exception as e:
-            logger.error(f"message_group_rendering_error: error {str(e)}")
+            # Issue #60: a post whose render raises must NOT disappear silently from the
+            # feed (indistinguishable from "nothing was posted"). Emit a degraded
+            # placeholder entry (stable guid) instead of dropping it, and count the
+            # failure so the regression is observable on /health. sanitize/serialize of
+            # this trivial placeholder happens on the same paths as any other post.
+            degraded = _degraded_post(group, e)
+            _record_render_failure()
+            logger.error(f"message_group_rendering_error: message_id {degraded['message_id']}, error {str(e)}, emitting degraded placeholder")
+            rendered_posts.append(degraded)
             continue
 
     # Filter posts by exclude_flags
