@@ -187,9 +187,11 @@ _DOWNLOAD_BACKOFF_MAX = 600.0     # seconds; cap on the backoff
 # re-arms its backoff on failure. 10k keys is a tiny footprint yet far above any realistic
 # concurrent-failure working set.
 _DOWNLOAD_FAILURES_MAX = 10000
-# key -> (consecutive_failures, retry_not_before_monotonic). OrderedDict so we can evict
-# in least-recently-updated order once the LRU cap is exceeded.
-_download_failures: "OrderedDict[tuple[str, int, str], tuple[int, float]]" = OrderedDict()
+# key -> (consecutive_failures, retry_not_before_monotonic, kind). kind is 'permanent'
+# (deleted post / genuinely-gone media -> get_media serves a clean 404 so readers stop
+# retrying) or 'transient' (throttle/timeout/DC issue -> 503 + Retry-After). OrderedDict so
+# we can evict in least-recently-updated order once the LRU cap is exceeded.
+_download_failures: "OrderedDict[tuple[str, int, str], tuple[int, float, str]]" = OrderedDict()
 
 def _download_backoff_remaining(key: tuple[str, int, str]) -> float:
     """Seconds until `key` may be retried; 0.0 if allowed now (or never failed)."""
@@ -198,11 +200,23 @@ def _download_backoff_remaining(key: tuple[str, int, str]) -> float:
         return 0.0
     return max(0.0, entry[1] - time.monotonic())
 
-def _record_download_failure(key: tuple[str, int, str]) -> None:
-    """Register a failed download and (re)arm an exponential backoff for `key`."""
-    fails = _download_failures.get(key, (0, 0.0))[0] + 1
+def _download_failure_kind(key: tuple[str, int, str]) -> Union[str, None]:
+    """Return the recorded failure kind ('permanent'|'transient') for `key`, or None if it
+    has no recorded failure. get_media uses this on a backoff hit to serve a clean 404 for a
+    permanent failure (stop retrying) vs a 503 + Retry-After for a transient one."""
+    entry = _download_failures.get(key)
+    return entry[2] if entry is not None else None
+
+def _record_download_failure(key: tuple[str, int, str], kind: str = "transient") -> None:
+    """Register a failed download and (re)arm an exponential backoff for `key`.
+
+    `kind` classifies the failure: 'permanent' for a genuinely-gone file (a 404 from
+    download_media_file), 'transient' for retryable faults (timeouts, RPC 5xx, zero-size).
+    A later attempt that fails differently overwrites the kind, so the freshest failure wins.
+    """
+    fails = _download_failures.get(key, (0, 0.0, kind))[0] + 1
     backoff = min(_DOWNLOAD_BACKOFF_MAX, _DOWNLOAD_BACKOFF_BASE * (2 ** (fails - 1)))
-    _download_failures[key] = (fails, time.monotonic() + backoff)
+    _download_failures[key] = (fails, time.monotonic() + backoff, kind)
     _download_failures.move_to_end(key)  # mark as most-recently-updated for LRU eviction
     # Bound memory (see _DOWNLOAD_FAILURES_MAX): evict the oldest entries beyond the cap.
     while len(_download_failures) > _DOWNLOAD_FAILURES_MAX:
@@ -765,10 +779,24 @@ async def _download_deduped(channel: Union[str, int], post_id: int, file_unique_
                 finally:
                     semaphore.release()
             except BaseException as e:  # noqa: BLE001 — must forward ANY failure to waiters
-                # Arm backoff for real failures only, never for a shutdown-time cancel.
+                # Arm backoff for real download failures only, never for a shutdown-time
+                # cancel (BaseException that is not an Exception).
                 # (DownloadAdmissionTimeout returns early above and never reaches here.)
-                if isinstance(e, Exception):
-                    _record_download_failure(key)
+                # A FloodWait is a GLOBAL Telegram throttle, not a per-file fault (parity
+                # with background_download_worker), so it must NOT poison this file's negative
+                # cache — waiters still receive it and get_media maps it to a retryable 429.
+                # Classify the rest: 'permanent' (genuinely gone -> get_media serves a clean 404
+                # and readers stop retrying) for an HTTPException(404) OR a raw RPCError with
+                # CODE==400 (MsgIdInvalid/ChannelInvalid/PeerIdInvalid — the resource is gone;
+                # get_media ALSO maps RPC-400 to 404, so caching it transient would flap 404<->503).
+                # Everything else (504 timeout, zero-size, RPC 5xx, other Exception) is
+                # 'transient' -> 503 + Retry-After. FloodWait is excluded above (never armed).
+                if isinstance(e, Exception) and not isinstance(e, errors.FloodWait):
+                    permanent = (isinstance(e, HTTPException) and e.status_code == 404) or (
+                        isinstance(e, errors.RPCError) and getattr(e, "CODE", None) == 400
+                    )
+                    kind = "permanent" if permanent else "transient"
+                    _record_download_failure(key, kind)
                 if not fut.done():
                     fut.set_exception(e)
             finally:
@@ -814,6 +842,17 @@ async def download_media_file(channel: Union[str, int], post_id: int, file_uniqu
     # Guard: message may be None (deleted) or an empty stub returned by Pyrogram
     if not message or getattr(message, 'empty', False):
         logger.warning(f"Message {post_id} not found or empty in channel {channel}")
+        # The post is gone: drop its media row so the 60s cache sweep stops re-fetching a
+        # deleted post forever (mirrors the fid-not-found branch below). Canonical key form
+        # (str(channel), post_id, file_unique_id).
+        try:
+            await asyncio.to_thread(
+                remove_media_file_ids_sync,
+                DB_PATH, [(str(channel), post_id, file_unique_id)]
+            )
+            logger.info(f"Removed entry for deleted/empty post {channel}/{post_id}/{file_unique_id} from SQLite")
+        except Exception as e:
+            logger.error(f"Failed to remove entry for {channel}/{post_id}/{file_unique_id} from SQLite: {str(e)}")
         raise HTTPException(status_code=404, detail="Post not found or deleted")
 
     if message.media == MessageMediaType.POLL:
@@ -1495,6 +1534,13 @@ async def get_media(channel: str, post_id: int, file_unique_id: str, request: Re
             # so this only guards the live-download path.
             backoff_remaining = _download_backoff_remaining((fs_channel, post_id, file_unique_id))
             if backoff_remaining > 0:
+                # A permanent failure (deleted post / genuinely-gone media) serves a clean 404
+                # with NO Retry-After so the reader stops retrying, instead of looping 404->503
+                # forever. A transient failure (throttle/timeout/DC issue) still gets a
+                # 503 + Retry-After so the reader keeps retrying.
+                if _download_failure_kind((fs_channel, post_id, file_unique_id)) == "permanent":
+                    logger.info(f"media_backoff_permanent: {channel}/{post_id}/{file_unique_id} permanently unavailable")
+                    raise HTTPException(status_code=404, detail="File not found")
                 logger.info(f"media_backoff_skip: {channel}/{post_id}/{file_unique_id} in backoff {backoff_remaining:.0f}s")
                 return Response(status_code=503, content="Media temporarily unavailable, retry later",
                                 headers={"Retry-After": str(int(backoff_remaining) + 1)})
@@ -1540,8 +1586,18 @@ async def get_media(channel: str, post_id: int, file_unique_id: str, request: Re
         return Response(status_code=429, content="Telegram flood wait",
                         headers={"Retry-After": str(retry_after)})
     except errors.RPCError as e:
-        logger.error(f"Media request RPC error for {channel}/{post_id}/{file_unique_id}: {type(e).__name__} - {str(e)}")
-        raise HTTPException(status_code=404, detail="File not found in Telegram") from e
+        # Distinguish permanent from transient RPC errors. A 4xx-class error (CODE==400:
+        # MsgIdInvalid, ChannelInvalid, PeerIdInvalid, ...) means the request can never
+        # succeed -> 404. Anything else (5xx: InternalServerError, RpcCallFail, Timeout, ...)
+        # is Telegram-side and retryable -> 503 + Retry-After, so a transient RPC blip does
+        # not blacken a live file into a permanent 404. FloodWait is caught above (it
+        # subclasses RPCError) and never reaches here.
+        code = getattr(e, "CODE", None)
+        logger.error(f"Media request RPC error for {channel}/{post_id}/{file_unique_id}: {type(e).__name__} - CODE={code} - {str(e)}")
+        if code == 400:
+            raise HTTPException(status_code=404, detail="File not found in Telegram") from e
+        return Response(status_code=503, content="Telegram temporarily unavailable, retry later",
+                        headers={"Retry-After": "60"})
     except ZeroSizeFileError as e: # Catch zero-size file errors FROM DOWNLOAD
         error_message = f"Failed to obtain valid media file for {channel}/{post_id}/{file_unique_id} after download attempt: {str(e)}"
         logger.error(error_message)
