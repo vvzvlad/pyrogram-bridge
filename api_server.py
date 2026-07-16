@@ -75,6 +75,38 @@ def media_cache_path(channel: str, post_id: int, file_unique_id: str | None = No
 _mime_types: dict[tuple[str, int, str], str] = {}
 _MIME_CACHE_MAX = 50_000  # crude bound; clear-all on overflow is fine at this size
 
+# Content types safe to serve INLINE from our own origin. The media URL carries the feed's
+# TOKEN, so serving active content (HTML/SVG/etc.) inline here would be stored XSS with
+# access to that capability URL. We therefore NEVER echo a sniffed content type into the
+# response: an allowlisted type is served inline; anything else is served as a neutralized
+# attachment (see prepare_file_response). This set is intentionally tight — only the
+# passive image/video/audio types this bridge actually produces from Telegram media
+# (photos -> jpeg/png, stickers -> webp, video stickers/animations/video -> webm/mp4,
+# voice/audio -> ogg/mpeg), plus the common container siblings a browser renders passively.
+#
+# DELIBERATELY EXCLUDED — do NOT add these to the inline set:
+#   - image/svg+xml : an SVG is an image but executes embedded <script>/onload -> XSS.
+#   - text/html, application/xhtml+xml, application/xml : active/script-capable documents.
+#   - application/* : never safe to render inline from this origin.
+#
+# LIBMAGIC NAMING: the response type is chosen by matching the string that
+# python-magic/libmagic ACTUALLY returns for each media file — which for several audio
+# formats is an `x-`/vendor name, NOT the canonical IANA one. Verified empirically with
+# file-5.46 on this box (`magic.Magic(mime=True).from_file(...)`):
+#   M4A (ftyp brand "M4A ") -> audio/x-m4a      (NOT audio/mp4)
+#   WAV (RIFF/WAVE)         -> audio/x-wav       (NOT audio/wav)
+#   AAC (ADTS stream)       -> audio/x-hx-aac-adts (NOT audio/aac)
+# We list BOTH the real libmagic outputs and the canonical siblings: different libmagic
+# builds may emit either, so keeping both is harmless belt-and-suspenders. Without the
+# x- names, legit voice/audio silently flips to attachment and won't play inline.
+_INLINE_SAFE_CONTENT_TYPES = frozenset({
+    "image/png", "image/jpeg", "image/gif", "image/webp", "image/avif",
+    "video/mp4", "video/webm", "video/quicktime", "video/mpeg",
+    "audio/mpeg", "audio/ogg", "audio/mp4", "audio/wav", "audio/aac", "audio/flac",
+    # Actual libmagic outputs (see LIBMAGIC NAMING above):
+    "audio/x-wav", "audio/x-m4a", "audio/x-hx-aac-adts", "audio/x-aac",
+})
+
 # Define custom exception for zero-size files
 class ZeroSizeFileError(Exception):
     """Custom exception for zero-size files found or downloaded."""
@@ -577,22 +609,50 @@ async def prepare_file_response(file_path: str, request: Request, delete_after: 
     # FileResponse runs this BackgroundTask after streaming the body.
     background = BackgroundTask(delayed_delete_file, file_path) if delete_after else None
 
+    # SECURITY: decide the RESPONSE content type from an allowlist, NOT from the sniffed
+    # `media_type` above (which stays as the value persisted to the MIME cache). If magic
+    # sniffed attacker-influenced bytes as text/html or image/svg+xml, echoing that type
+    # inline from our own origin — the origin whose URL carries the feed TOKEN — is stored
+    # XSS. So: an allowlisted passive type is served inline with that exact type; anything
+    # else (text/html, image/svg+xml, application/*, anything script-capable) is served as
+    # a neutralized download instead of being refused, since media must stay retrievable.
+    if media_type in _INLINE_SAFE_CONTENT_TYPES:
+        response_media_type = media_type
+        disposition = "inline"
+    else:
+        response_media_type = "application/octet-stream"
+        disposition = "attachment"
+
     # FileResponse handles Range/If-Range/206/416/multipart and sets
     # Accept-Ranges/ETag/Last-Modified itself (from the stat_result we pass). Do NOT
     # hand-build Content-Disposition: FileResponse forms it from filename= —
-    # `inline; filename="x"` for an ASCII name, adding `filename*=UTF-8''x` only for a
-    # non-ASCII name. It uses setdefault, so a manual header would OVERRIDE it, not double
+    # `<disposition>; filename="x"` for an ASCII name, adding `filename*=UTF-8''x` only for
+    # a non-ASCII name. It uses setdefault, so a manual header would OVERRIDE it, not double
     # it; letting FileResponse own it keeps the RFC 5987 encoding correct.
+    #
+    # The extra headers below apply to the 200 AND the 206 (single- and multi-range) paths:
+    # Starlette 0.45.3 FileResponse emits `self.raw_headers` (which includes everything from
+    # this headers= dict) on both the 200 start and every 206 start, only overriding
+    # content-range/content-length. (The 400 malformed-range and 416 unsatisfiable paths
+    # build a fresh PlainTextResponse WITHOUT these headers, but neither serves a body, so
+    # there is no sniffable content to protect there.)
+    #   - X-Content-Type-Options: nosniff makes our declared content type authoritative so
+    #     the browser won't re-sniff an octet-stream/image body as HTML.
+    #   - Content-Security-Policy sandboxes the response as defense-in-depth.
     #
     # Files are addressed by file_unique_id which is immutable in Telegram, so it is safe
     # to cache them aggressively on the client side.
     return FileResponse(
         file_path,
-        media_type=media_type,
+        media_type=response_media_type,
         filename=os.path.basename(file_path),
-        content_disposition_type="inline",
+        content_disposition_type=disposition,
         stat_result=stat_result,
-        headers={"Cache-Control": "public, max-age=86400, immutable"},
+        headers={
+            "Cache-Control": "public, max-age=86400, immutable",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "sandbox; default-src 'none'",
+        },
         background=background,
     )
 
