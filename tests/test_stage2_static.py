@@ -170,12 +170,14 @@ async def test_dedup_single_download_for_concurrent_requests(monkeypatch):
 
     monkeypatch.setattr(api_server, "download_media_file", fake_dl)
 
-    tasks = [asyncio.create_task(api_server._download_deduped("c", 1, "f")) for _ in range(5)]
+    sem = asyncio.Semaphore(3)
+    tasks = [asyncio.create_task(api_server._download_deduped("c", 1, "f", sem)) for _ in range(5)]
     results = await asyncio.gather(*tasks)
 
     assert all(r == ("/final/f", False) for r in results)
     assert calls == ["f"]              # exactly one real download, shared by all 5
     assert not api_server._inflight    # key popped after completion
+    assert sem._value == 3             # the single download released its single permit
 
 
 # --------------------------------------------------------------------------- #
@@ -194,9 +196,10 @@ async def test_dedup_waiter_cancel_does_not_hang_others(monkeypatch):
 
     monkeypatch.setattr(api_server, "download_media_file", fake_dl)
 
-    t1 = asyncio.create_task(api_server._download_deduped("c", 1, "fidX"))
+    sem = asyncio.Semaphore(3)
+    t1 = asyncio.create_task(api_server._download_deduped("c", 1, "fidX", sem))
     await asyncio.sleep(0.05)  # let t1 register the future + start the detached task
-    t2 = asyncio.create_task(api_server._download_deduped("c", 1, "fidX"))
+    t2 = asyncio.create_task(api_server._download_deduped("c", 1, "fidX", sem))
     await asyncio.sleep(0.05)
 
     # First client disconnects -> its request coroutine is cancelled.
@@ -226,15 +229,17 @@ async def test_dedup_exception_propagates_and_frees_key(monkeypatch):
 
     monkeypatch.setattr(api_server, "download_media_file", fake_dl)
 
-    t1 = asyncio.create_task(api_server._download_deduped("c", 1, "f"))
-    t2 = asyncio.create_task(api_server._download_deduped("c", 1, "f"))
+    sem = asyncio.Semaphore(3)
+    t1 = asyncio.create_task(api_server._download_deduped("c", 1, "f", sem))
+    t2 = asyncio.create_task(api_server._download_deduped("c", 1, "f", sem))
     results = await asyncio.gather(t1, t2, return_exceptions=True)
     assert all(isinstance(r, RuntimeError) for r in results), results
     assert not api_server._inflight  # failed future did NOT leave the key stuck
+    assert sem._value == 3           # the permit was released even though the download raised
 
     # A subsequent request with a working download succeeds (proves the key was freed).
     state["mode"] = "ok"
-    res = await api_server._download_deduped("c", 1, "f")
+    res = await api_server._download_deduped("c", 1, "f", sem)
     assert res == ("/ok", False)
 
 
@@ -261,64 +266,120 @@ async def test_media_floodwait_returns_429_not_404(monkeypatch, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# 2.5 — HTTP_DOWNLOAD_SEMAPHORE balance: released exactly once on success/error,
-# never released when the acquire itself timed out (503). It is a plain
-# asyncio.Semaphore, so an over-release would SILENTLY inflate the permit count
-# and disable the limiter — assert the count, mirroring the stage-1 gate test.
+# 2.5 — Permit lifetime moved INTO _download_deduped's runner (issue #49): ONE
+# live download holds ONE permit regardless of how many requests wait on the
+# shared Future, and a saturated semaphore fast-rejects with a
+# DownloadAdmissionTimeout (mapped to 503) WITHOUT arming the download backoff.
+# The semaphore is a plain asyncio.Semaphore, so an over-release would SILENTLY
+# inflate the count and disable the limiter — assert the count.
 # --------------------------------------------------------------------------- #
-async def test_media_semaphore_released_on_download_error(monkeypatch, tmp_path):
+async def test_dedup_concurrent_requests_consume_one_permit(monkeypatch):
+    # N concurrent requests for the SAME uncached file must burn exactly ONE permit:
+    # the first request's runner holds it; the others wait on the shared Future, not
+    # on the semaphore. With only 1 permit, all N still complete via that one download.
     api_server._inflight.clear()
-    monkeypatch.chdir(tmp_path)  # pre-semaphore cache miss -> the acquire path runs
-    monkeypatch.setattr(api_server, "verify_media_digest", lambda url, digest: True)
+    sem = asyncio.Semaphore(1)
+    started = asyncio.Event()
+    gate = asyncio.Event()
+    calls = []
 
-    permits_before = api_server.HTTP_DOWNLOAD_SEMAPHORE._value
+    async def fake_dl(channel, post_id, fid):
+        calls.append(fid)
+        started.set()
+        await gate.wait()  # hold the single permit while all waiters pile onto the Future
+        return (f"/final/{fid}", False)
 
-    async def boom(channel_id, post_id, fid):
-        raise RuntimeError("download blew up")
+    monkeypatch.setattr(api_server, "download_media_file", fake_dl)
 
-    monkeypatch.setattr(api_server, "_download_deduped", boom)
+    tasks = [asyncio.create_task(api_server._download_deduped("c", 1, "f", sem)) for _ in range(4)]
+    await asyncio.wait_for(started.wait(), timeout=2)  # the one download has the permit
+    assert sem._value == 0                              # exactly one permit taken by one download
+    gate.set()
+    results = await asyncio.wait_for(asyncio.gather(*tasks), timeout=2)
 
-    req = SimpleNamespace(headers={})
-    # get_media swallows the error into a 4xx/5xx response; the point is the permit.
-    try:
-        await api_server.get_media("chan", 5, "errfid", request=req, digest="x")
-    except Exception:
-        pass
-
-    # Permit released exactly once (back to baseline) — not leaked, not double-released.
-    assert api_server.HTTP_DOWNLOAD_SEMAPHORE._value == permits_before
+    assert all(r == ("/final/f", False) for r in results)
+    assert calls == ["f"]        # a single real download served all 4 requests
+    assert sem._value == 1       # the one permit was released
+    assert not api_server._inflight
 
 
-async def test_media_semaphore_not_released_on_acquire_timeout(monkeypatch, tmp_path):
+async def test_dedup_admission_timeout_503_no_backoff(monkeypatch):
+    # A saturated semaphore (all permits held by OTHER long downloads) → the runner's
+    # bounded acquire times out → DownloadAdmissionTimeout. It is server-load, NOT a
+    # file failure, so the backoff/negative cache must NOT be armed.
     api_server._inflight.clear()
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(api_server, "verify_media_digest", lambda url, digest: True)
+    key = ("c", 7, "busyfid")
+    api_server._download_failures.pop(key, None)
 
-    permits_before = api_server.HTTP_DOWNLOAD_SEMAPHORE._value
+    sem = asyncio.Semaphore(1)
+    await sem.acquire()  # saturate: the sole permit is held by a foreign download
 
-    # Make the bounded acquire time out: the first wait_for (wrapping the acquire)
-    # raises TimeoutError; we close the passed coroutine to avoid a "never awaited"
-    # warning. The 503 short-circuits before _download_deduped, so only this one
-    # wait_for is hit.
+    dl_called = []
+
+    async def fake_dl(channel, post_id, fid):
+        dl_called.append(fid)
+        return ("/never", False)
+
+    monkeypatch.setattr(api_server, "download_media_file", fake_dl)
+    # Shrink the 30s admission window so the test is fast.
     real_wait_for = asyncio.wait_for
 
-    async def fake_wait_for(coro, timeout=None):
-        if hasattr(coro, "close"):
-            coro.close()
-        raise asyncio.TimeoutError()
+    async def fast_wait_for(aw, timeout=None):
+        if timeout == 30:
+            timeout = 0.2
+        return await real_wait_for(aw, timeout=timeout)
 
-    monkeypatch.setattr(api_server.asyncio, "wait_for", fake_wait_for)
+    monkeypatch.setattr(api_server.asyncio, "wait_for", fast_wait_for)
+
+    with pytest.raises(api_server.DownloadAdmissionTimeout):
+        await api_server._download_deduped("c", 7, "busyfid", sem)
+
+    assert dl_called == []                                   # download never started
+    assert sem._value == 0                                   # the foreign permit was NOT touched
+    assert api_server._download_backoff_remaining(key) == 0  # NO backoff armed
+    assert key not in api_server._download_failures
+    assert not api_server._inflight                          # Future resolved, key cleaned up
+
+
+async def test_media_admission_timeout_maps_to_503(monkeypatch, tmp_path):
+    # End-to-end: DownloadAdmissionTimeout out of _download_deduped → 503 + Retry-After: 30
+    # at the get_media layer, with no backoff armed for the file.
+    api_server._inflight.clear()
+    monkeypatch.chdir(tmp_path)  # cache miss -> live-download path
+    monkeypatch.setattr(api_server, "verify_media_digest", lambda url, digest: True)
+    fs = api_server.canonical_channel_key("chan")
+    key = (fs, 5, "busyfid")
+    api_server._download_failures.pop(key, None)
+
+    async def fake_deduped(channel, post_id, fid, semaphore):
+        raise api_server.DownloadAdmissionTimeout("busy")
+
+    monkeypatch.setattr(api_server, "_download_deduped", fake_deduped)
 
     req = SimpleNamespace(headers={})
     resp = await api_server.get_media("chan", 5, "busyfid", request=req, digest="x")
 
     assert resp.status_code == 503
     assert resp.headers.get("retry-after") == "30"
-    # A timed-out acquire never held a permit, so nothing must have been released:
-    # the count is UNCHANGED (an erroneous release would inflate it above baseline).
-    assert api_server.HTTP_DOWNLOAD_SEMAPHORE._value == permits_before
+    assert api_server._download_backoff_remaining(key) == 0  # admission timeout arms no backoff
 
-    monkeypatch.setattr(api_server.asyncio, "wait_for", real_wait_for)
+
+async def test_media_waiter_timeout_maps_to_504(monkeypatch, tmp_path):
+    # A bare asyncio.TimeoutError from _download_deduped's waiter safety-net must map to
+    # a retryable 504, not fall through to the generic 500 handler.
+    api_server._inflight.clear()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(api_server, "verify_media_digest", lambda url, digest: True)
+
+    async def fake_deduped(channel, post_id, fid, semaphore):
+        raise asyncio.TimeoutError()
+
+    monkeypatch.setattr(api_server, "_download_deduped", fake_deduped)
+
+    req = SimpleNamespace(headers={})
+    resp = await api_server.get_media("chan", 5, "slowfid", request=req, digest="x")
+
+    assert resp.status_code == 504
 
 
 async def test_download_atomic_reraises_floodwait_and_cleans_part(monkeypatch, tmp_path):
