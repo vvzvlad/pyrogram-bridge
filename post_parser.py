@@ -22,7 +22,7 @@ from pyrogram.enums import MessageMediaType
 from sanitizer import sanitize_html
 from config import get_settings
 from file_io import upsert_media_file_ids_bulk_sync, DB_PATH
-from url_signer import generate_media_digest
+from url_signer import generate_media_digest, media_url_expiry
 
 Config = get_settings()
 
@@ -991,8 +991,11 @@ class PostParser:
                     logger.warning(f"Could not generate media URL for message {message.id}: channel username is missing.")
                 else:
                     file = f"{channel_username}/{message.id}/{file_unique_id}"
-                    digest = generate_media_digest(file)
+                    exp = media_url_expiry()
+                    digest = generate_media_digest(file, exp)
                     url = f"{base_url}/media/{file}/{digest}"
+                    if exp is not None:
+                        url = f"{url}?exp={exp}"
 
                     logger.debug(f"Collected media file: {channel_username}/{message.id}/{file_unique_id}")
 
@@ -1087,8 +1090,11 @@ class PostParser:
                     # Guard: skip photo if channel_username is unavailable to avoid broken URLs
                     if channel_username:
                         file = f"{channel_username}/{message.id}/{file_unique_id}"
-                        digest = generate_media_digest(file)
+                        exp = media_url_expiry()
+                        digest = generate_media_digest(file, exp)
                         url = f"{base_url}/media/{file}/{digest}"
+                        if exp is not None:
+                            url = f"{url}?exp={exp}"
                         html_parts.append(f'<div class="webpage-photo" style="margin-top:10px;">')
                         html_parts.append(f'<a href="{webpage.url}" target="_blank">')
                         html_parts.append(f'<img src="{url}" style="max-width:100%; width:auto;'

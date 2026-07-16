@@ -1346,12 +1346,15 @@ async def health_check(request: Request, token: str | None = None) -> Response:
 
 @app.get("/media/{channel}/{post_id}/{file_unique_id}/{digest}", response_model=None)
 @app.get("/media/{channel}/{post_id}/{file_unique_id}", response_model=None)
-async def get_media(channel: str, post_id: int, file_unique_id: str, request: Request, digest: str | None = None) -> Response:
+async def get_media(channel: str, post_id: int, file_unique_id: str, request: Request, digest: str | None = None, exp: int | None = None) -> Response:
     try:
         url = f"{channel}/{post_id}/{file_unique_id}"
-        if not verify_media_digest(url, digest):
+        # exp is present only on optional TTL-signed URLs (MEDIA_URL_TTL_DAYS); default URLs
+        # carry no exp query param, so this stays behaviour-identical when TTL is unset.
+        verified = verify_media_digest(url, digest) if exp is None else verify_media_digest(url, digest, exp)
+        if not verified:
             # Never log the expected digest: it is a signature over a secret key and would
-            # leak signing-oracle output for a chosen url. The presented digest is
+            # leak signing-oracle output for a chosen url (#56). The presented digest is
             # attacker-supplied, so it is safe to log for correlation.
             logger.warning(f"Invalid media digest for {url} (presented digest {digest} rejected)")
             raise HTTPException(status_code=403, detail="Invalid URL signature")
