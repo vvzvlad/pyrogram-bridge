@@ -59,6 +59,29 @@ def test_javascript_protocol_href_dropped():
     assert "javascript:" not in out
 
 
+def test_svg_onload_is_stripped():
+    # <svg> is not whitelisted -> removed; the onload handler must not survive anywhere.
+    out = sanitize_html('<p>hi</p><svg onload=alert(1)></svg>')
+    assert "svg" not in out.lower()
+    assert "onload" not in out
+    assert "alert" not in out
+
+
+def test_data_uri_href_dropped():
+    out = sanitize_html('<a href="data:text/html,<script>alert(1)</script>">x</a>')
+    assert "data:" not in out
+    assert "<script" not in out
+
+
+def test_disallowed_tag_removed_not_escaped():
+    # nh3 strips (like bleach strip=True): the tag vanishes, it is NOT escaped into
+    # visible &lt;iframe&gt; text.
+    out = sanitize_html('<iframe src="http://e"></iframe><p>ok</p>')
+    assert out == "<p>ok</p>"
+    assert "&lt;iframe" not in out
+    assert "<iframe" not in out
+
+
 # --------------------------------------------------------------------------- #
 # protocols — non-default 'tg' keeps tg:// links (channel footers use them).
 # --------------------------------------------------------------------------- #
@@ -88,6 +111,42 @@ def test_css_disallowed_property_dropped():
     out = sanitize_html('<div style="position: fixed; max-height: 50px">x</div>')
     assert "position" not in out
     assert "max-height" in out
+
+
+def test_all_five_css_props_survive_a_sixth_is_dropped():
+    out = sanitize_html(
+        '<img src="http://e/x" style="max-width: 100%; max-height: 50px; '
+        'object-fit: cover; width: 10px; height: 20px; color: red">'
+    )
+    for prop in ("max-width", "max-height", "object-fit", "width", "height"):
+        assert prop in out, prop
+    # A 6th, non-whitelisted property is dropped.
+    assert "color" not in out
+
+
+def test_css_url_token_drops_declaration():
+    # url(...) is the primary active-content vector in a style value; the whole
+    # declaration is dropped (not merely the function), and no url( survives.
+    out = sanitize_html('<div style="width: url(javascript:alert(1)); max-width: 5px">x</div>')
+    assert "url(" not in out
+    assert "javascript" not in out
+    assert "max-width" in out  # the safe sibling declaration is kept
+
+
+def test_css_expression_token_drops_declaration():
+    # nh3's own style pass leaks a mangled `expression(` — our prefilter must kill it.
+    out = sanitize_html('<div style="width: expression(alert(1))">x</div>')
+    assert "expression" not in out
+    assert "alert" not in out
+
+
+def test_css_import_and_breakout_chars_dropped():
+    out = sanitize_html('<div style="max-width: 5px; @import url(evil.css)">x</div>')
+    assert "@import" not in out and "url(" not in out
+    assert "max-width" in out
+    # A value carrying a quote/angle-bracket breakout attempt is dropped whole.
+    out2 = sanitize_html('<div style="width: 10px&quot;onmouseover=alert(1)">x</div>')
+    assert "onmouseover" not in out2
 
 
 # --------------------------------------------------------------------------- #
@@ -139,3 +198,29 @@ def test_single_bleach_config_no_reimport_in_render_modules():
             f"{mod.__name__} appears to re-declare a bleach tag list instead of using sanitizer.py"
         assert "from bleach" not in src and "import bleach" not in src, \
             f"{mod.__name__} still imports bleach directly; the only config lives in sanitizer.py"
+
+
+def test_generic_lang_title_stripped_but_title_kept_on_a():
+    # bleach did NOT allow lang/title globally; nh3/ammonia defaults them on every
+    # tag. The '*': set() entry restores parity: stripped on a generic tag...
+    out = sanitize_html('<p lang="en" title="t">x</p>')
+    assert 'lang' not in out and 'title' not in out
+    out_div = sanitize_html('<div title="t" style="width:1px">y</div>')
+    assert 'title' not in out_div
+    # ...but title survives on <a> via its per-tag entry (bleach kept it there).
+    out_a = sanitize_html('<a href="https://x.test" title="t">z</a>')
+    assert 'title="t"' in out_a
+
+
+def test_style_filter_exception_fails_closed_drops_attribute(monkeypatch):
+    # nh3/PyO3 SWALLOWS an exception raised inside attribute_filter and would then
+    # insert the RAW style. The try/except in _attribute_filter must FAIL-CLOSED:
+    # drop the style attribute rather than let an unsanitised value through.
+    def boom(_value):
+        raise RuntimeError("style filter blew up")
+    monkeypatch.setattr(sanitizer, "_sanitize_style", boom)
+    out = sanitize_html('<div style="width:10px; background:url(javascript:alert(1))">x</div>')
+    # The style attribute is gone entirely; no raw url(/javascript: leaked through.
+    assert 'style=' not in out
+    assert 'javascript:' not in out and 'url(' not in out
+    assert '>x</div>' in out or 'x' in out  # content preserved

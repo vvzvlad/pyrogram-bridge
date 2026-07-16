@@ -12,7 +12,6 @@ pillow==11.1.0
 feedgen==1.0.0
 python-dateutil==2.9.0.post0
 python-magic==0.4.27
-bleach[css]==6.1.0
-types-bleach==6.1.0.20240331
+nh3==0.3.6
 pytest-asyncio==1.4.0
 httpx==0.28.1
