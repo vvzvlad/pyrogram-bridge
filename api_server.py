@@ -20,7 +20,8 @@ from typing import List, Union, Any
 
 import json
 from collections import OrderedDict
-from datetime import datetime
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime, format_datetime
 import time
 from contextlib import asynccontextmanager
 import random
@@ -1555,9 +1556,114 @@ async def get_media(channel: str, post_id: int, file_unique_id: str, request: Re
     logger.error(f"get_media reached unexpected state for {channel}/{post_id}/{file_unique_id}")
     raise HTTPException(status_code=500, detail="Internal server error: Unexpected state reached in media handling.")
 
+# --------------------------------------------------------------------------- #
+# Conditional GET for feeds (issue #62)
+#
+# Miniflux (and any conformant reader) sends If-None-Match / If-Modified-Since on
+# every poll. Honoring them lets us answer an unchanged feed with 304 + no body,
+# saving the response bandwidth and the reader-side parse. The server still renders
+# the feed to derive the ETag — the issue mandates the ETag be a sha256 of the
+# ACTUAL serialized body (a content signature), so it stays in lock-step with what
+# we would have sent; the win is on the wire and in the reader, not on the render.
+# --------------------------------------------------------------------------- #
+
+# Cache-Control uses `private` on purpose: the feed URL carries an auth token and must
+# not be cached by shared/intermediary proxies.
+RSS_CACHE_MAX_AGE = 300  # seconds
+
+# feedgen stamps <lastBuildDate> with datetime.now() on every serialize, so the raw
+# body differs on each request even when the posts are identical. That field is
+# build-time metadata, not content — strip it before hashing so the ETag reflects the
+# feed content and stays stable across polls (otherwise 304 would never fire).
+_LAST_BUILD_DATE_RE = re.compile(r"<lastBuildDate>.*?</lastBuildDate>", re.DOTALL)
+_PUBDATE_RE = re.compile(r"<pubDate>(.*?)</pubDate>", re.DOTALL)
+
+
+def _feed_etag(body: str) -> str:
+    """Strong ETag = sha256 of the content-canonical body (volatile lastBuildDate removed)."""
+    canonical = _LAST_BUILD_DATE_RE.sub("", body)
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return f'"{digest}"'
+
+
+def _feed_last_modified(body: str) -> str | None:
+    """Last-Modified = the freshest entry's pubDate, as an RFC 1123 (GMT) header value.
+
+    Returns None when the body carries no parseable pubDate (e.g. the HTML feed, which
+    has no per-entry dates) — the ETag alone still drives conditional GET in that case.
+    """
+    latest: datetime | None = None
+    for raw in _PUBDATE_RE.findall(body):
+        try:
+            dt = parsedate_to_datetime(raw.strip())
+        except (TypeError, ValueError):
+            continue
+        if dt is None:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        if latest is None or dt > latest:
+            latest = dt
+    if latest is None:
+        return None
+    return format_datetime(latest.astimezone(timezone.utc), usegmt=True)
+
+
+def _feed_not_modified(request: Request, etag: str, last_modified: str | None) -> bool:
+    """Decide 304 from the request validators (RFC 7232).
+
+    If-None-Match takes precedence over If-Modified-Since when both are present.
+    """
+    inm = request.headers.get("if-none-match")
+    if inm is not None:
+        for tok in inm.split(","):
+            tok = tok.strip()
+            if tok == "*":
+                return True
+            if tok.startswith("W/"):  # weak comparison: drop the weak indicator
+                tok = tok[2:].strip()
+            if tok == etag:
+                return True
+        return False
+
+    ims = request.headers.get("if-modified-since")
+    if ims is not None and last_modified is not None:
+        try:
+            ims_dt = parsedate_to_datetime(ims)
+            lm_dt = parsedate_to_datetime(last_modified)
+        except (TypeError, ValueError):
+            return False
+        if ims_dt is None or lm_dt is None:
+            return False
+        if ims_dt.tzinfo is None:
+            ims_dt = ims_dt.replace(tzinfo=timezone.utc)
+        if lm_dt.tzinfo is None:
+            lm_dt = lm_dt.replace(tzinfo=timezone.utc)
+        # Not modified if the freshest entry is no newer than the client's copy.
+        return lm_dt <= ims_dt
+
+    return False
+
+
+def _build_feed_response(request: Request, body: str, media_type: str) -> Response:
+    """Attach ETag/Last-Modified/Cache-Control and short-circuit to 304 when unchanged."""
+    etag = _feed_etag(body)
+    last_modified = _feed_last_modified(body)
+    headers = {
+        "ETag": etag,
+        "Cache-Control": f"private, max-age={RSS_CACHE_MAX_AGE}",
+    }
+    if last_modified is not None:
+        headers["Last-Modified"] = last_modified
+    if _feed_not_modified(request, etag, last_modified):
+        # 304 carries the validators + Cache-Control but no body (RFC 7232 §4.1).
+        return Response(status_code=304, headers=headers)
+    return Response(content=body, media_type=media_type, headers=headers)
+
+
 @app.get("/rss/{channel}", response_class=Response)
 @app.get("/rss/{channel}/{token}", response_class=Response)
-async def get_rss_feed(channel: str, 
+async def get_rss_feed(channel: str,
                         request: Request,
                         token: str | None = None, 
                         limit: int = 50, 
@@ -1580,7 +1686,7 @@ async def get_rss_feed(channel: str,
                                                     merge_seconds=merge_seconds)
             elapsed_time = time.time() - start_time
             logger.info(f"rss_generation_timing: channel {channel}, generated in {elapsed_time:.3f} seconds")
-            return Response(content=rss_content, media_type="application/xml")
+            return _build_feed_response(request, rss_content, "application/xml")
         elif output_type == 'html':
             rss_content = await generate_channel_html(channel,
                                                     client=client.client, 
@@ -1590,7 +1696,7 @@ async def get_rss_feed(channel: str,
                                                     merge_seconds=merge_seconds)
             elapsed_time = time.time() - start_time
             logger.info(f"html_generation_timing: channel {channel}, generated in {elapsed_time:.3f} seconds")
-            return Response(content=rss_content, media_type="text/html")
+            return _build_feed_response(request, rss_content, "text/html")
         else:
             raise HTTPException(status_code=400, detail=f"invalid_output_type: {output_type}")
     except ValueError as e:
