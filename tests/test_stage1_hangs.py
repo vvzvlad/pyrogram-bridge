@@ -111,7 +111,10 @@ async def test_worker_survives_errors_and_balances_task_done(monkeypatch):
             raise RuntimeError("simulated download failure")
         if file_unique_id == "flood":
             raise errors.FloodWait(value=1)
-        # "ok" succeeds
+        # "ok" succeeds — mirror the real download_media_file contract, which returns
+        # (file_path, delete_after); the worker unpacks it and clears backoff only on a
+        # concrete file_path.
+        return ("cache/ok", False)
 
     monkeypatch.setattr(api_server, "download_media_file", fake_download)
 

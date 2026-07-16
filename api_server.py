@@ -525,9 +525,11 @@ async def find_file_id_in_message(message: Message, file_unique_id: str) -> Unio
     """Find file_id by checking all possible media types in message"""
     if message.media == MessageMediaType.POLL:
         # Kurigram 2.2.23: polls may carry media in description_media and
-        # explanation_media (MessageContent objects). The bridge renders only
-        # description_media, but explanation_media is searched too: if a signed URL
-        # for it ever exists, the download must still work. getattr-only access —
+        # explanation_media (MessageContent objects). This branch is now LIVE:
+        # download_media_file no longer short-circuits polls, so a signed /media URL for a
+        # poll's description_media resolves its fid here and downloads normally. The bridge
+        # renders only description_media, but explanation_media is searched too: if a signed
+        # URL for it ever exists, the download must still work. getattr-only access —
         # older Poll objects/mocks do not define these fields.
         poll = getattr(message, 'poll', None)
         for container_name in ('description_media', 'explanation_media'):
@@ -925,9 +927,13 @@ async def download_media_file(channel: Union[str, int], post_id: int, file_uniqu
             logger.error(f"Failed to remove entry for {channel}/{post_id}/{file_unique_id} from SQLite: {str(e)}")
         raise HTTPException(status_code=404, detail="Post not found or deleted")
 
-    if message.media == MessageMediaType.POLL:
-        return None, False
-    
+    # NOTE: POLL messages are NOT short-circuited here. A poll may carry media in its
+    # description_media/explanation_media; find_file_id_in_message resolves that fid below
+    # and the file downloads through the normal cache path. A poll whose requested media is
+    # absent falls into the standard "fid not found" branch (404 + SQLite row removal), so a
+    # stale/rendered-but-missing poll media entry stops being re-queued every cache sweep.
+    # is_large_video only inspects message.video (None for a poll), so it stays False here.
+
     # Check if it is a video and if its size exceeds 100 MB
     is_large_video = False
     if message.video:
