@@ -167,19 +167,46 @@ download_queue = asyncio.Queue(maxsize=100)
 # set is race-free: download_new_files adds the key before put_nowait; the worker discards
 # it in its finally alongside task_done().
 _queued_media: set[tuple[str, int, str]] = set()
+def _env_int(name: str, default: int, minimum: int = 0) -> int:
+    """Parse an int env var for a module-level tunable; fall back to default on absence/garbage."""
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return max(minimum, int(raw))
+    except ValueError:
+        logger.warning(f"{name} must be an integer, got {raw!r}; using default {default}")
+        return default
+
 # --- Failing-download backoff (negative cache) --------------------------------
 # A media file whose download keeps failing (hang/timeout/not-found) must not be
-# retried on every 60s cache sweep, nor keep occupying a scarce Pyrogram
-# transmission slot. We remember recent failures per (channel, post_id,
-# file_unique_id) and skip / fast-reject re-attempts until an exponentially
-# growing backoff elapses. Cleared on the first successful download. All access is
-# from the single event-loop thread, so a plain dict needs no lock.
+# retried on every cache sweep (cache_sweep_interval, default 900s), nor keep
+# occupying a scarce Pyrogram transmission slot. We remember recent failures per
+# (channel, post_id, file_unique_id) and skip / fast-reject re-attempts until an
+# exponentially growing backoff elapses. Cleared on the first successful download.
+# All access is from the single event-loop thread, so a plain dict needs no lock.
 _DOWNLOAD_BACKOFF_BASE = 60.0     # seconds; backoff after the first failure
-# Cap on the backoff. Kept deliberately short (10 min, not 1h): the media self-heal
-# restart recovers in minutes, and a verified restart clears this cache outright (see
-# _clear_all_download_failures), so a system that just healed must not hold a stale,
-# long backoff that keeps fast-503'ing a now-downloadable file.
-_DOWNLOAD_BACKOFF_MAX = 600.0     # seconds; cap on the backoff
+# Cap on the backoff (seconds), env MEDIA_BACKOFF_MAX_S, default 6h. It MUST be >= the
+# cache sweep interval: with a shorter cap the backoff always expires before the next
+# sweep, so download_new_files re-queues the dead file every pass (the retry-storm this
+# fixes — a dead file was retried every ~15 min for up to 20 days). A long cap is safe
+# because a VERIFIED self-heal restart clears the whole negative cache outright (see
+# _clear_all_download_failures), so a healed system never holds a stale, long backoff
+# that keeps fast-503'ing a now-downloadable file.
+# Clamp STRICTLY above the sweep interval (+1), so a capped dead file's backoff still
+# has time remaining at the next sweep structurally — not by timing luck — even if
+# MEDIA_BACKOFF_MAX_S is mis-set at/below the sweep interval.
+_DOWNLOAD_BACKOFF_MAX = float(max(
+    _env_int("MEDIA_BACKOFF_MAX_S", 21600, minimum=1),
+    int(Config["cache_sweep_interval"]) + 1,
+))
+# After this many CONSECUTIVE failed downloads, drop the media row from SQLite so a
+# genuinely-dead file (deleted post, gone media) stops being re-queued forever. env
+# MEDIA_FAILURES_DROP_ROW, default 15. Best-effort / fire-and-forget: if the post is
+# still in a feed the renderer recreates the row, but the in-memory failure counter
+# survives until success/restart, so a recreated-then-refailing row is dropped again
+# quickly. See _drop_media_row.
+_DOWNLOAD_FAILURES_DROP_ROW = _env_int("MEDIA_FAILURES_DROP_ROW", 15, minimum=1)
 # LRU cap on the negative cache. Permanently-404 / deleted files would otherwise leave
 # eternal entries and slowly leak memory on a long-uptime process. We keep at most this
 # many most-recently-failed keys and evict the oldest. Eviction is harmless: a dropped
@@ -222,6 +249,42 @@ def _record_download_failure(key: tuple[str, int, str], kind: str = "transient")
     while len(_download_failures) > _DOWNLOAD_FAILURES_MAX:
         _download_failures.popitem(last=False)
     logger.warning(f"download_backoff_armed: {key[0]}/{key[1]}/{key[2]} failed {fails}x, next retry in {backoff:.0f}s")
+    # Drop a persistently-dead row from SQLite so the sweeper stops re-queueing it forever.
+    if fails >= _DOWNLOAD_FAILURES_DROP_ROW:
+        _drop_media_row(key)
+
+# Strong refs to fire-and-forget row-drop tasks so they are not GC'd mid-flight.
+_drop_row_tasks: set[asyncio.Task] = set()
+
+def _drop_media_row(key: tuple[str, int, str]) -> None:
+    """Fire-and-forget removal of a persistently-failing media row from SQLite.
+
+    _record_download_failure runs synchronously on the event loop; remove_media_file_ids_sync
+    is a blocking sqlite call, so we schedule it via to_thread and do NOT await it (strict
+    durability is unnecessary — the counter in _download_failures survives, so a re-added row
+    that keeps failing is dropped again). Skipped when no loop is running (a sync unit test),
+    where there is nothing to schedule onto."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    channel, post_id, file_unique_id = key
+
+    async def _do():
+        try:
+            await asyncio.to_thread(
+                remove_media_file_ids_sync, DB_PATH, [(channel, post_id, file_unique_id)]
+            )
+            logger.warning(
+                f"download_row_dropped: {channel}/{post_id}/{file_unique_id} removed from SQLite "
+                f"after >= {_DOWNLOAD_FAILURES_DROP_ROW} consecutive download failures"
+            )
+        except Exception as e:  # noqa: BLE001 — best-effort cleanup, never crash the caller
+            logger.error(f"download_row_drop_failed: {channel}/{post_id}/{file_unique_id}: {e}")
+
+    task = loop.create_task(_do())
+    _drop_row_tasks.add(task)
+    task.add_done_callback(_drop_row_tasks.discard)
 
 def _clear_download_failure(key: tuple[str, int, str]) -> None:
     """Forget any recorded failure for `key` after a successful download."""
@@ -704,6 +767,12 @@ async def _download_atomic(file_id: str, final_path: str, timeout: float) -> str
     Raises ZeroSizeFileError if the download produced a missing/zero-size file.
     """
     part_path = f"{final_path}.part.{uuid.uuid4().hex}"
+    # Create the cache dir here, immediately before writing the partial — NOT up-front in
+    # download_media_file / download_new_files. That way an item that never actually
+    # downloads (permanently-dead file) never leaves an empty dir behind for the sweeper's
+    # os.walk to trip over, and this self-heals a race with the sweeper's empty-dir rmdir
+    # (which could run between an earlier makedirs and this open).
+    os.makedirs(os.path.dirname(part_path), exist_ok=True)
     try:
         await client.safe_download_media(file_id, part_path, timeout=timeout)
         if not os.path.exists(part_path) or os.path.getsize(part_path) == 0:
@@ -824,10 +893,11 @@ async def download_media_file(channel: Union[str, int], post_id: int, file_uniqu
     """
     import time as _time
     _fn_start = _time.monotonic()
-    # Create nested cache structure
+    # Nested cache path for this post. The directory is created lazily inside _download_atomic
+    # (only when a partial is actually written), so a file that never downloads leaves no
+    # empty dir behind. Bare os.path.exists checks below are safe on a not-yet-created dir.
     post_dir = media_cache_path(str(channel), post_id)
-    os.makedirs(post_dir, exist_ok=True)
-    
+
     # Convert numeric channel ID to int if needed
     channel_id: Union[str, int] = channel
     if isinstance(channel, str) and channel.startswith('-100'):
@@ -842,7 +912,7 @@ async def download_media_file(channel: Union[str, int], post_id: int, file_uniqu
     # Guard: message may be None (deleted) or an empty stub returned by Pyrogram
     if not message or getattr(message, 'empty', False):
         logger.warning(f"Message {post_id} not found or empty in channel {channel}")
-        # The post is gone: drop its media row so the 60s cache sweep stops re-fetching a
+        # The post is gone: drop its media row so the cache sweep stops re-fetching a
         # deleted post forever (mirrors the fid-not-found branch below). Canonical key form
         # (str(channel), post_id, file_unique_id).
         try:
@@ -1035,6 +1105,23 @@ def remove_old_cached_files_sync(media_files: list, cache_dir: str) -> tuple[lis
             except Exception as e:
                 logger.error(f"Failed to remove temporary file {file_path}: {str(e)}")
 
+    # Remove empty post-/channel- directories. A permanently-dead file that never downloads
+    # (backoff-skipped forever) can leave an empty dir behind now that makedirs is lazy, and
+    # empty dirs pile up and slow the sweeper's os.walk and calculate_cache_stats. Walk
+    # bottom-up so an emptied post dir lets its (now-empty) channel dir go in the same pass;
+    # rmdir only ever removes an EMPTY dir, so a dir holding a live file is left untouched.
+    # OSError is swallowed: a non-empty dir is legitimate, and a race with a concurrent fresh
+    # mkdir/download (rmdir vs mkdir) must never crash the sweep — _download_atomic recreates
+    # the dir on demand.
+    for root, _dirs, _files in os.walk(cache_dir, topdown=False):
+        if os.path.abspath(root) == os.path.abspath(cache_dir):
+            continue  # never remove the cache root itself
+        try:
+            if not os.listdir(root):
+                os.rmdir(root)
+        except OSError:
+            pass
+
     return updated_media_files, files_removed
 
 
@@ -1057,16 +1144,20 @@ async def download_new_files(media_files: list, cache_dir: str) -> None:
                 logger.error(f"Invalid file data: {file_data}")
                 continue
 
-            # Skip files that recently kept failing — do not re-queue them on every 60s
+            # Skip files that recently kept failing — do not re-queue them on every cache
             # sweep (that retry-storm is what kept the download slots jammed). The backoff
-            # expires on its own; a successful download elsewhere clears it.
+            # cap is >= the sweep interval, so a dead file is skipped for whole sweeps rather
+            # than re-queued every pass. The backoff expires on its own; a successful download
+            # elsewhere clears it.
             if _download_backoff_remaining((str(channel), int(post_id), file_unique_id)) > 0:
                 continue
 
             channel_dir = os.path.join(cache_dir, str(channel))
             post_dir = os.path.join(channel_dir, str(post_id))
-            os.makedirs(post_dir, exist_ok=True)
-            
+            # No makedirs here: the dir is created lazily by _download_atomic only when a
+            # partial is actually written, so a queued-but-never-downloaded file leaves no
+            # empty dir behind. os.path.exists on a not-yet-created dir is False, as intended.
+
             # Skip if temp file exists (large videos)
             temp_path = os.path.join(post_dir, f"temp_{file_unique_id}")
             if os.path.exists(temp_path):
@@ -1111,18 +1202,28 @@ async def background_download_worker():
         bg_key = (str(channel), int(post_id), file_unique_id)
         logger.info(f"Background download: {channel}/{post_id}/{file_unique_id}")
         try:
-            async with BACKGROUND_DOWNLOAD_SEMAPHORE:  # limit concurrent background downloads
-                await download_media_file(channel, post_id, file_unique_id)
-            _clear_download_failure(bg_key)
+            # Route through _download_deduped so a live request already downloading THIS file
+            # and the background worker share ONE actual download (one Pyrogram slot) instead
+            # of both fetching it in parallel. The permit is acquired INSIDE the runner, so we
+            # pass the background semaphore rather than wrapping the call in `async with`.
+            # Failure accounting (negative cache + permanent/transient classification) and the
+            # success clear are owned by _download_deduped's runner — the worker must NOT
+            # record/clear here, or a real failure would double-increment the counter.
+            await _download_deduped(channel, post_id, file_unique_id, BACKGROUND_DOWNLOAD_SEMAPHORE)
             await asyncio.sleep(2)
         except errors.FloodWait as e:
             # Must be caught BEFORE the generic Exception (FloodWait subclasses RPCError),
             # otherwise the worker would hammer Telegram while under a flood wait. A flood
-            # wait is a global throttle, not a per-file fault, so it does NOT arm backoff.
+            # wait is a global throttle, not a per-file fault, so it does NOT arm backoff
+            # (the runner excludes it too); the worker sleeps the WHOLE queue to stop hammering.
             logger.warning(f"bg_download_floodwait: {channel}/{post_id}/{file_unique_id} sleeping {e.value}s")
             await asyncio.sleep(min(int(e.value) + 5, 900))
+        except DownloadAdmissionTimeout:
+            # The background semaphore was saturated — a server-load signal, not a file fault
+            # (the runner did NOT arm backoff). Leave the item for a later sweep to re-queue.
+            logger.warning(f"bg_download_admission_timeout: {channel}/{post_id}/{file_unique_id} left for a later sweep")
         except Exception as e:
-            _record_download_failure(bg_key)
+            # The runner already classified and negative-cached this failure; only log here.
             logger.error(f"Background download error for {channel}/{post_id}/{file_unique_id}: {e}")
         finally:
             # Free the dedup slot so this file can be re-enqueued by a later sweep if it is

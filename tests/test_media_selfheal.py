@@ -265,19 +265,23 @@ def test_download_failures_lru_bounded(monkeypatch):
 # --------------------------------------------------------------------------- #
 def test_backoff_capped_at_max():
     """The exponential backoff grows as BASE * 2**(fails-1), but must never exceed
-    _DOWNLOAD_BACKOFF_MAX. With BASE=60s and MAX=600s the raw exponential overtakes the cap
-    at the 5th failure (60*2**4 = 960s > 600s), so after that many consecutive failures the
-    effective backoff must stay pinned at the cap. This test FAILS if the min(MAX, ...) cap
-    is removed (the raw exponential would then blow past 600s)."""
+    _DOWNLOAD_BACKOFF_MAX. After enough consecutive failures for the raw exponential to
+    overtake the cap, the effective backoff must stay pinned at the cap. This test FAILS if
+    the min(MAX, ...) cap is removed (the raw exponential would then blow past MAX). The
+    failure count is derived from the configured cap so it holds regardless of MEDIA_BACKOFF_MAX_S
+    (issue #51 raised the cap from 600s to 6h and made it env-tunable)."""
     key = ("selfheal_chan", 99, "fid_cap")
     api_server._download_failures.pop(key, None)
 
-    # Record well past the point where the raw exponential exceeds the cap: 8 failures ->
-    # raw 60*2**7 = 7680s, an order of magnitude above the 600s cap.
-    for _ in range(8):
+    # Record well past the point where the raw exponential exceeds the cap so the effective
+    # backoff is pinned: pick fails such that BASE*2**(fails-1) is an order of magnitude above
+    # MAX. math.log2(MAX/BASE) is where the raw exponential first crosses the cap.
+    import math
+    n_fail = int(math.log2(api_server._DOWNLOAD_BACKOFF_MAX / api_server._DOWNLOAD_BACKOFF_BASE)) + 4
+    for _ in range(n_fail):
         api_server._record_download_failure(key)
 
-    assert api_server._download_failures[key][0] == 8  # counter really climbed that high
+    assert api_server._download_failures[key][0] == n_fail  # counter really climbed that high
     remaining = api_server._download_backoff_remaining(key)
     # The cap holds: remaining is bounded by MAX (with a tiny slack for monotonic drift since
     # retry_not_before was stamped). Without the min() cap this would be ~7680s.
