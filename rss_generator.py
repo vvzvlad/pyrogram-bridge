@@ -28,6 +28,29 @@ Config = get_settings()
 
 logger = logging.getLogger(__name__)
 
+# XML 1.0 forbids most C0 control chars (\x00-\x08, \x0B, \x0C, \x0E-\x1F) and lone
+# surrogate code points (\uD800-\uDFFF, which in a Python str only ever appear
+# unpaired — a real non-BMP char is a single code point > \uFFFF, never a surrogate).
+# lxml (via feedgen) raises ValueError "All strings must be XML compatible" on ANY of
+# these, even inside CDATA, which turns one bad post into an HTTP 500 on the whole feed.
+# TAB (\x09), LF (\x0A) and CR (\x0D) ARE XML-compatible and are deliberately kept.
+# \x09 (TAB), \x0A (LF), \x0D (CR) are the only C0 chars XML 1.0 allows — keep them.
+# lxml also rejects the two BMP noncharacters U+FFFE/U+FFFF and lone surrogates.
+# (re interprets \x.. / \u.... escapes inside the pattern even in a raw string.)
+_XML_INCOMPATIBLE_RE = re.compile(r'[\x00-\x08\x0B\x0C\x0E-\x1F\uD800-\uDFFF\uFFFE\uFFFF]')
+
+
+def _strip_xml_incompatible(s):
+    """Remove XML-incompatible control chars and lone surrogates from a string.
+
+    Applied ONLY to the copy of post/channel text handed to the feedgen serializer,
+    immediately before serialization — the stored/returned post text is untouched.
+    Non-str input (e.g. an optional field that is None) is returned unchanged.
+    """
+    if not isinstance(s, str):
+        return s
+    return _XML_INCOMPATIBLE_RE.sub('', s)
+
 
 @dataclass
 class PreparedFeed:
@@ -472,11 +495,12 @@ async def generate_channel_rss(channel: str | int,
         fg = FeedGenerator()
         fg.load_extension('dc')
 
-        # Set feed metadata
+        # Set feed metadata. channel_title comes from Telegram (channel_info.title), so
+        # sanitize the strings that carry it before they reach feedgen/lxml.
         main_name = f"{channel_title} (@{channel_username})"
-        fg.title(main_name)
+        fg.title(_strip_xml_incompatible(main_name))
         fg.link(href=f"https://t.me/{channel_username}", rel='alternate')
-        fg.description(f'Telegram channel {channel_username} RSS feed')
+        fg.description(_strip_xml_incompatible(f'Telegram channel {channel_username} RSS feed'))
         fg.language('ru')
         fg.id(f"{base_url}/rss/{channel_username}") # Use username for feed ID consistency
 
@@ -493,16 +517,20 @@ async def generate_channel_rss(channel: str | int,
         
         for post in final_posts:
             fe = fg.add_entry()
-            fe.title(post['title'])
-            
+            # Every post-derived string is stripped of XML-incompatible control chars /
+            # lone surrogates here, at the feedgen boundary, so a single bad byte in any
+            # field cannot 500 the whole feed (issue #54). CDATA does NOT protect against
+            # this — lxml raises in the CDATA branch too.
+            fe.title(_strip_xml_incompatible(post['title']))
+
             post_link = f"https://t.me/{channel_username}/{post['message_id']}"
             fe.link(href=post_link)
-            
-            fe.description(post['text'].replace('\n', ' '))
+
+            fe.description(_strip_xml_incompatible(post['text'].replace('\n', ' ')))
             # post['html'] is already sanitized per-post inside _render_pipeline
             # (single project-wide bleach config, fail-closed). No per-post thread
             # hop / CSSSanitizer here anymore.
-            fe.content(content=post['html'], type='CDATA')
+            fe.content(content=_strip_xml_incompatible(post['html']), type='CDATA')
             
             if post['date'] is not None:
                 pub_date = datetime.fromtimestamp(post['date'], tz=timezone.utc)
@@ -516,7 +544,7 @@ async def generate_channel_rss(channel: str | int,
             fe.guid(post_link, permalink=True)
             
             if post['author'] and post['author'] != main_name:
-                fe.author(name="", email=post['author'])
+                fe.author(name="", email=_strip_xml_incompatible(post['author']))
         
         feed_gen_elapsed = time.time() - feed_gen_start_time
         logger.debug(f"rss_feed_generation_timing: channel {channel}, feed generated in {feed_gen_elapsed:.3f} seconds")
@@ -652,20 +680,25 @@ def create_error_feed(channel: str | int, base_url: str) -> str:
         Empty RSS feed as string in XML format.
     """
     fg = FeedGenerator()
-    
-    fg.title(f"Error: Channel @{channel} not found")
+
+    # `channel` is a caller/URL-derived identifier that flows into text AND into URL
+    # attributes (link/id/guid), and lxml rejects XML-incompatible chars in attributes
+    # too — so sanitize it ONCE here and use the clean value everywhere below (issue #54).
+    channel = _strip_xml_incompatible(channel)
+
+    fg.title(_strip_xml_incompatible(f"Error: Channel @{channel} not found"))
     fg.link(href=f"https://t.me/{channel}", rel='alternate')
-    fg.description(f'Error: Telegram channel @{channel} does not exist')
+    fg.description(_strip_xml_incompatible(f'Error: Telegram channel @{channel} does not exist'))
     fg.language('en')
     fg.id(f"{base_url}/rss/{channel}")
-    
+
     fe = fg.add_entry()
     fe.title("Channel not found")
     # Use the original channel string identifier passed to the function for links/text
     fe.link(href=f"https://t.me/{channel}")
     error_html = f"<p>The Telegram channel @{channel} does not exist or is not accessible.</p>"
-    fe.description(f"{error_html}")
-    fe.content(content=error_html, type='CDATA')
+    fe.description(_strip_xml_incompatible(f"{error_html}"))
+    fe.content(content=_strip_xml_incompatible(error_html), type='CDATA')
     fe.pubDate(datetime.now(tz=timezone.utc))
     fe.guid(f"https://t.me/{channel}", permalink=True)
 
