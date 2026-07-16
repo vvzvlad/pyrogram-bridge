@@ -29,7 +29,6 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import uvloop
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-from starlette.background import BackgroundTask
 import sys
 
 import magic
@@ -45,7 +44,7 @@ from post_parser import PostParser
 from url_signer import verify_media_digest
 from file_io import (DB_PATH, init_db_sync, get_all_media_file_ids_sync,
                      update_media_file_access_sync, update_media_file_access_bulk_sync,
-                     remove_media_file_ids_sync,
+                     remove_media_file_ids_sync, remove_media_file_ids_if_unchanged_sync,
                      get_mime_type_sync, set_mime_type_sync)
 from tg_cache import cleanup_legacy_cache_files, sweep_tgcache
 from channel_key import canonical_channel_key
@@ -604,25 +603,34 @@ async def find_file_id_in_message(message: Message, file_unique_id: str) -> Unio
     return None
 
 
-async def delayed_delete_file(file_path: str, delay: int = 300) -> None:
-    """Delete a temporary file after a delay. Runs as an async background task."""
-    await asyncio.sleep(delay)
+def _stat_size_or_none(path: str) -> int | None:
+    """Return the file size via a single os.stat, or None if the file does not exist.
+
+    Collapses an exists()+getsize() pair into ONE syscall (called off-loop via
+    asyncio.to_thread on the hot paths) and closes a TOCTOU: a file swept between an
+    exists() and a getsize() no longer raises into a generic 500 — a missing file simply
+    returns None so the caller falls through to its normal (download) path.
+
+    Any OSError (not just FileNotFoundError) collapses to None. This matches the
+    fail-open behaviour of the replaced os.path.exists() (which returned False on ANY
+    stat error) and preserves this helper's whole point — never turn a stat problem into
+    a 500; treat an unreadable/vanished cache file as absent and re-download it.
+    """
     try:
-        os.remove(file_path)
-        logger.info(f"Deleted temporary file {file_path} after delay of {delay} seconds")
-    except Exception as e:
-        logger.error(f"Failed to delete temporary file {file_path}: {str(e)}")
+        st = os.stat(path)
+    except OSError:
+        return None
+    return st.st_size
 
 
-async def prepare_file_response(file_path: str, request: Request, delete_after: bool = False,
+async def prepare_file_response(file_path: str, request: Request,
                                 media_key: tuple[str, int, str] | None = None) -> Response:
     """Serve a cached media file via Starlette's FileResponse.
 
     FileResponse handles Range/If-Range/206/416/multipart and sets
     Accept-Ranges/ETag/Last-Modified itself, and reads the file efficiently (no per-64KB
     to_thread hop that starved the threadpool). We keep: the early 404 pre-check, the MIME
-    logic (python-magic + SQLite type cache), the stage-2 temp_* mtime touch, and the
-    delete_after BackgroundTask.
+    logic (python-magic + SQLite type cache) and the stage-2 temp_* mtime touch.
     """
     # `request` is unused now that FileResponse parses the Range header itself, but the
     # signature is kept for call-site compatibility (and future needs).
@@ -649,6 +657,9 @@ async def prepare_file_response(file_path: str, request: Request, delete_after: 
     # reflect exactly the mtime observed after the optional touch above. The remaining
     # narrow window (deleted between this stat and FileResponse's own open) truncates the
     # body — that pre-existed the FileResponse migration and is not handled here.
+    # ACCEPTED RISK: this stat->open race window is very narrow, and for temp_* files it is
+    # further mitigated by the mtime keepalive touch above (an actively-viewed large video is
+    # refreshed away from the 1h sweeper's deletion window). Deliberately not fixed.
     try:
         stat_result = await asyncio.to_thread(os.stat, file_path)
     except FileNotFoundError:
@@ -690,10 +701,6 @@ async def prepare_file_response(file_path: str, request: Request, delete_after: 
     if not media_type: media_type = "application/octet-stream"  # Final fallback to octet-stream
 
     logger.debug(f"Determined media type for {os.path.basename(file_path)}: {media_type}")
-
-    # Delete the temporary file once the response has been fully sent (stage-2 delete_after).
-    # FileResponse runs this BackgroundTask after streaming the body.
-    background = BackgroundTask(delayed_delete_file, file_path) if delete_after else None
 
     # SECURITY: decide the RESPONSE content type from an allowlist, NOT from the sniffed
     # `media_type` above (which stays as the value persisted to the MIME cache). If magic
@@ -739,7 +746,6 @@ async def prepare_file_response(file_path: str, request: Request, delete_after: 
             "X-Content-Type-Options": "nosniff",
             "Content-Security-Policy": "sandbox; default-src 'none'",
         },
-        background=background,
     )
 
 def _media_download_timeout(file_size: int) -> float:
@@ -774,17 +780,21 @@ async def _download_atomic(file_id: str, final_path: str, timeout: float) -> str
     # downloads (permanently-dead file) never leaves an empty dir behind for the sweeper's
     # os.walk to trip over, and this self-heals a race with the sweeper's empty-dir rmdir
     # (which could run between an earlier makedirs and this open).
-    os.makedirs(os.path.dirname(part_path), exist_ok=True)
+    await asyncio.to_thread(os.makedirs, os.path.dirname(part_path), exist_ok=True)
     try:
         await client.safe_download_media(file_id, part_path, timeout=timeout)
-        if not os.path.exists(part_path) or os.path.getsize(part_path) == 0:
+        # Single off-loop stat: missing OR zero-size is a failed download (semantics kept).
+        part_size = await asyncio.to_thread(_stat_size_or_none, part_path)
+        if part_size is None or part_size == 0:
             raise ZeroSizeFileError(
                 f"Downloaded file for {final_path} is zero size or missing after download attempt."
             )
         # Publish atomically, but only if nobody else already produced the final file
-        # (a concurrent request that won the race). rename is atomic on POSIX.
-        if not os.path.exists(final_path):
-            os.rename(part_path, final_path)
+        # (a concurrent request that won the race). rename is atomic on POSIX. The
+        # rename-only-if-final-absent guard is preserved exactly; only its stat + rename
+        # now run off the event loop.
+        if not await asyncio.to_thread(os.path.exists, final_path):
+            await asyncio.to_thread(os.rename, part_path, final_path)
         return final_path
     finally:
         # Always clean up our partial: timeout, cancellation, zero-size, or race loser
@@ -797,7 +807,7 @@ async def _download_atomic(file_id: str, final_path: str, timeout: float) -> str
 
 
 async def _download_deduped(channel: Union[str, int], post_id: int, file_unique_id: str,
-                            semaphore: asyncio.Semaphore) -> tuple[Union[str, None], bool]:
+                            semaphore: asyncio.Semaphore) -> Union[str, None]:
     """Deduplicate concurrent downloads of the same media by (channel, post_id, fid).
 
     The first request for a key runs download_media_file in a DETACHED task and shares its
@@ -888,10 +898,10 @@ async def _download_deduped(channel: Union[str, int], post_id: int, file_unique_
     return await asyncio.wait_for(asyncio.shield(fut), timeout=waiter_timeout)
 
 
-async def download_media_file(channel: Union[str, int], post_id: int, file_unique_id: str) -> tuple[Union[str, None], bool]:
+async def download_media_file(channel: Union[str, int], post_id: int, file_unique_id: str) -> Union[str, None]:
     """
     Download media file from Telegram and save to cache
-    Returns tuple of (file path, delete_after)
+    Returns the cache file path (or None).
     """
     import time as _time
     _fn_start = _time.monotonic()
@@ -947,10 +957,12 @@ async def download_media_file(channel: Union[str, int], post_id: int, file_uniqu
         # For large video, download without permanent caching; use a temporary file.
         temp_file_path = os.path.join(post_dir, f"temp_{file_unique_id}")
         # A temp_{fid} file now only ever appears via atomic rename (see _download_atomic),
-        # so its presence GUARANTEES a complete file — serve it directly.
-        if os.path.exists(temp_file_path) and os.path.getsize(temp_file_path) > 0:
+        # so its presence GUARANTEES a complete file — serve it directly. Single off-loop
+        # stat instead of exists()+getsize() on the event loop.
+        temp_size = await asyncio.to_thread(_stat_size_or_none, temp_file_path)
+        if temp_size is not None and temp_size > 0:
             logger.info(f"Temporary file {temp_file_path} already exists, serving cached large video")
-            return temp_file_path, False
+            return temp_file_path
         file_id = await find_file_id_in_message(message, file_unique_id)
         if not file_id:
             logger.error(f"Media with file_unique_id {file_unique_id} not found in message {post_id}")
@@ -969,13 +981,14 @@ async def download_media_file(channel: Union[str, int], post_id: int, file_uniqu
             logger.error(f"Timeout downloading large video {file_unique_id}")
             raise HTTPException(status_code=504, detail="Download timeout")
         logger.info(f"Downloaded large video file {file_unique_id} to temporary path {temp_file_path}")
-        return file_path, False
+        return file_path
 
-    # Normal caching flow
+    # Normal caching flow. Single off-loop stat instead of exists()+getsize() on the loop.
     cache_path = os.path.join(post_dir, file_unique_id)
-    if os.path.exists(cache_path):
+    cache_size = await asyncio.to_thread(_stat_size_or_none, cache_path)
+    if cache_size is not None:
         # Check if the cached file is zero size
-        if os.path.getsize(cache_path) == 0:
+        if cache_size == 0:
             logger.warning(f"zero_size_cache_found: Found zero-size cached file: {cache_path}. Deleting and attempting redownload.")
             try:
                 os.remove(cache_path)
@@ -989,7 +1002,7 @@ async def download_media_file(channel: Union[str, int], post_id: int, file_uniqu
             # background flush persists it. Key channel as str(channel) — see _access_updates.
             logger.info(f"Found cached media file: {cache_path}")
             _access_updates[(str(channel), post_id, file_unique_id)] = datetime.now().timestamp()
-            return cache_path, False
+            return cache_path
 
     file_id = await find_file_id_in_message(message, file_unique_id)
     if not file_id:
@@ -1018,7 +1031,7 @@ async def download_media_file(channel: Union[str, int], post_id: int, file_uniqu
         raise HTTPException(status_code=504, detail="Download timeout")
 
     logger.info(f"Downloaded media file {file_unique_id} to {cache_path}")
-    return file_path, False
+    return file_path
 
 
 def remove_old_cached_files_sync(media_files: list, cache_dir: str) -> tuple[list, int]:
@@ -1261,13 +1274,18 @@ async def cache_media_files() -> None:
                     (r['channel'], r['post_id'], r['file_unique_id'])
                     for r in updated_media_files
                 }
+                # Carry the SNAPSHOTTED `added` into each removal tuple so the DELETE can be
+                # guarded (added <= snapshot). A row re-upserted by a live render DURING the
+                # long disk walk has a newer `added` and must survive — otherwise we would
+                # delete a just-rendered file and force a spurious re-download. See
+                # remove_media_file_ids_if_unchanged_sync.
                 removed_entries = [
-                    (r['channel'], r['post_id'], r['file_unique_id'])
+                    (r['channel'], r['post_id'], r['file_unique_id'], r['added'])
                     for r in media_files
                     if (r['channel'], r['post_id'], r['file_unique_id']) not in updated_set
                 ]
                 if removed_entries:
-                    await asyncio.to_thread(remove_media_file_ids_sync, DB_PATH, removed_entries)
+                    await asyncio.to_thread(remove_media_file_ids_if_unchanged_sync, DB_PATH, removed_entries)
                     logger.info(f"cache_sweep: purged {len(removed_entries)} entries "
                                 f"({files_removed} files removed from disk)")
             except Exception as e:
@@ -1619,7 +1637,11 @@ async def get_media(channel: str, post_id: int, file_unique_id: str, request: Re
             # download permit or touching Telegram. The permit now lives inside
             # _download_deduped's runner, so this handler never holds one.
             cache_path = media_cache_path(fs_channel, post_id, file_unique_id)
-            if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
+            # ONE off-loop stat (exists()+getsize() collapsed) — also closes the TOCTOU where
+            # a file swept between exists() and getsize() would raise into a generic 500; a
+            # missing file now returns None and simply falls through to the download path.
+            cache_size = await asyncio.to_thread(_stat_size_or_none, cache_path)
+            if cache_size is not None and cache_size > 0:
                 # File is already in cache — serve directly.
                 logger.info(f"pre_semaphore_cache_hit: {fs_channel}/{post_id}/{file_unique_id}")
                 # Record the access time into the accumulator instead of firing a per-hit
@@ -1634,7 +1656,8 @@ async def get_media(channel: str, post_id: int, file_unique_id: str, request: Re
             # No _access_updates: large videos aren't tracked in SQLite. The temp_* mtime
             # keepalive touch happens inside prepare_file_response.
             temp_cache_path = media_cache_path(fs_channel, post_id, f"temp_{file_unique_id}")
-            if os.path.exists(temp_cache_path) and os.path.getsize(temp_cache_path) > 0:
+            temp_size = await asyncio.to_thread(_stat_size_or_none, temp_cache_path)
+            if temp_size is not None and temp_size > 0:
                 logger.info(f"pre_semaphore_temp_cache_hit: {fs_channel}/{post_id}/{file_unique_id}")
                 return await prepare_file_response(temp_cache_path, request=request,
                                                    media_key=(fs_channel, post_id, file_unique_id))
@@ -1660,12 +1683,12 @@ async def get_media(channel: str, post_id: int, file_unique_id: str, request: Re
             # live download holds ONE permit no matter how many requests await the shared
             # Future. A saturated semaphore surfaces as DownloadAdmissionTimeout (-> 503
             # below); the waiter safety-net timeout surfaces as asyncio.TimeoutError (-> 504).
-            file_path, delete_after = await _download_deduped(fs_channel, post_id, file_unique_id,
-                                                              HTTP_DOWNLOAD_SEMAPHORE)
+            file_path = await _download_deduped(fs_channel, post_id, file_unique_id,
+                                                HTTP_DOWNLOAD_SEMAPHORE)
             if not file_path:
                 raise HTTPException(status_code=404, detail="File not found")
             if file_path:
-                return await prepare_file_response(file_path, request=request, delete_after=delete_after,
+                return await prepare_file_response(file_path, request=request,
                                                    media_key=(fs_channel, post_id, file_unique_id))
         except ZeroSizeFileError as e: # Catch zero-size file errors
             logger.warning(f"zero_size_file_encountered: {str(e)}. Instructing client to retry.")

@@ -12,8 +12,9 @@ Covers:
   416 Content-Range now `*/size`; ETag/Last-Modified now present; ASCII filename no longer
   gets a redundant filename*= form).
 - Stage-2 behavior preserved through the rewrite: a served temp_* file still has its mtime
-  refreshed; delete_after still schedules the temp-file BackgroundTask (and it actually
-  runs); the media_key MIME cache is still consulted and populated.
+  refreshed; the media_key MIME cache is still consulted and populated. (The dead
+  temp-file auto-deletion background-task machinery was removed in #53, so the response
+  now never carries a background task.)
 - The pure-ASGI RequestLoggingMiddleware: a normal request still returns (body intact, not
   buffered/truncated) and is logged.
 
@@ -54,7 +55,7 @@ BODY = bytes(range(256)) * 8  # 2048 deterministic bytes
 SIZE = len(BODY)
 
 
-def _make_client(file_path, delete_after=False, media_key=None):
+def _make_client(file_path, media_key=None):
     """Mount prepare_file_response on a tiny app so it is driven through real ASGI
     (FileResponse computes Range/206/416 at send time, so it must be exercised via a client)."""
     app = FastAPI()
@@ -62,7 +63,7 @@ def _make_client(file_path, delete_after=False, media_key=None):
     @app.get("/f")
     async def _serve(request: Request):
         return await api_server.prepare_file_response(
-            file_path, request=request, delete_after=delete_after, media_key=media_key
+            file_path, request=request, media_key=media_key
         )
 
     return TestClient(app)
@@ -208,50 +209,31 @@ def test_non_temp_file_mtime_untouched(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# 3.1 (stage-2 preserved) — delete_after still schedules the temp-file BackgroundTask.
+# 3.1 (#53) — the dead temp-file auto-deletion background-task machinery was removed: the
+# response never carries a background task, and a served file is NOT deleted after streaming.
 # --------------------------------------------------------------------------- #
-async def test_delete_after_attaches_background_task(tmp_path):
-    fp = tmp_path / "temp_todelete"
+async def test_response_has_no_background_task(tmp_path):
+    fp = tmp_path / "temp_kept"
     fp.write_bytes(b"x")
 
     class _Req:
         headers = {}
 
-    resp = await api_server.prepare_file_response(str(fp), request=_Req(), delete_after=True)
-    # FileResponse must carry a non-None background that deletes exactly this file.
-    assert resp.background is not None
-    assert resp.background.func is api_server.delayed_delete_file
-    assert resp.background.args == (str(fp),)
-
-
-async def test_no_delete_after_has_no_background(tmp_path):
-    fp = tmp_path / "keepme"
-    fp.write_bytes(b"x")
-
-    class _Req:
-        headers = {}
-
-    resp = await api_server.prepare_file_response(str(fp), request=_Req(), delete_after=False)
+    resp = await api_server.prepare_file_response(str(fp), request=_Req())
+    # No auto-deletion machinery anymore -> FileResponse must carry no background task.
     assert resp.background is None
 
 
-def test_delete_after_background_runs_and_removes_file(tmp_path, monkeypatch):
-    fp = tmp_path / "temp_gone"
+def test_served_file_not_deleted_after_response(tmp_path):
+    fp = tmp_path / "temp_survivor"
     fp.write_bytes(BODY)
 
-    # Patch the module-level deleter to remove immediately (real one sleeps 300s); the
-    # BackgroundTask picks up this reference at prepare_file_response call time.
-    async def _delete_now(path, delay=300):
-        os.remove(path)
-
-    monkeypatch.setattr(api_server, "delayed_delete_file", _delete_now)
-
-    c = _make_client(str(fp), delete_after=True)
+    c = _make_client(str(fp))
     r = c.get("/f")
     assert r.status_code == 200
     assert r.content == BODY
-    # TestClient blocks until the background task has run.
-    assert not os.path.exists(fp)
+    # TestClient blocks until any background task would have run; the file must survive.
+    assert os.path.exists(fp)
 
 
 # --------------------------------------------------------------------------- #
