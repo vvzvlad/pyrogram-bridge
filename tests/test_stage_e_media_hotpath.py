@@ -151,7 +151,10 @@ def test_mime_cache_overflow_clears_and_repopulates(sample_file, monkeypatch):
 
     r = c.get("/f")  # must clear-all on overflow, then insert the new key — no exception
     assert r.status_code == 200
-    assert r.headers["content-type"].startswith("text/plain")
+    # Issue #55: text/plain is not in the inline allowlist, so the RESPONSE is neutralized
+    # to octet-stream — but the INTERNAL MIME cache still stores the sniffed "text/plain"
+    # (asserted below), which is the invariant this test guards.
+    assert r.headers["content-type"] == "application/octet-stream"
     # Cleared then repopulated with just the one fresh key.
     assert len(api_server._mime_types) == 1
     assert api_server._mime_types[key] == "text/plain"
