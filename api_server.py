@@ -14,6 +14,8 @@ import os
 import re
 import uuid
 import mimetypes
+import hashlib
+import hmac
 from typing import List, Union, Any
 
 import json
@@ -39,7 +41,7 @@ from telegram_client import TelegramClient
 from config import get_settings, setup_logging
 from rss_generator import generate_channel_rss, generate_channel_html
 from post_parser import PostParser
-from url_signer import verify_media_digest, generate_media_digest
+from url_signer import verify_media_digest
 from file_io import (DB_PATH, init_db_sync, get_all_media_file_ids_sync,
                      update_media_file_access_sync, update_media_file_access_bulk_sync,
                      remove_media_file_ids_sync,
@@ -1139,7 +1141,32 @@ def is_local_request(request: Request) -> bool:
         # Direct connection (no trusted proxy): use TCP connection address.
         client_ip = connection_ip
 
+    # Security invariant: a forwarded client IP (X-Real-IP / X-Forwarded-For) is honored
+    # ONLY when the real socket peer is itself in the TRUSTED_PROXIES allowlist; otherwise
+    # the socket peer is used verbatim, so an external client cannot spoof "local" to skip auth.
     return client_ip in local_hosts
+
+
+def _enforce_token(request: Request, token: str | None, endpoint: str) -> None:
+    """Authorize a request against the shared-secret token unless it is local.
+
+    Security invariants (issue #56): never log the presented token or the expected
+    secret at any level. On failure we log only a short SHA-256 prefix of the
+    *presented* token so an attack can be correlated in the logs without disclosing
+    either secret. The comparison is constant-time (hmac.compare_digest over the
+    UTF-8 bytes, which also tolerates a non-ASCII presented token without raising)
+    to deny a timing side-channel on the token value.
+    """
+    if not Config["token"]:
+        return
+    if is_local_request(request):
+        logger.info("Local request, skipping token check for %s.", endpoint)
+        return
+    if not hmac.compare_digest((token or "").encode("utf-8"), str(Config["token"]).encode("utf-8")):
+        presented_hash = hashlib.sha256((token or "").encode("utf-8")).hexdigest()[:8]
+        logger.error("invalid_token for %s (presented token sha256:%s)", endpoint, presented_hash)
+        raise HTTPException(status_code=403, detail="Invalid token")
+    logger.info("Valid token for %s", endpoint)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -1180,14 +1207,7 @@ async def index() -> HTMLResponse:
 @app.get("/html/{channel}/{post_id}/{token}", response_class=HTMLResponse)  
 @app.get("/post/html/{channel}/{post_id}/{token}", response_class=HTMLResponse)
 async def get_post_html(channel: str, post_id: int, request: Request, token: str | None = None, debug: bool = False) -> HTMLResponse:
-    if Config["token"] and not is_local_request(request):
-        if token != Config["token"]:
-            logger.error(f"Invalid token for HTML post: {token}, expected: {Config['token']}")
-            raise HTTPException(status_code=403, detail="Invalid token")
-        else:
-            logger.info(f"Valid token for HTML post: {token}")
-    elif Config["token"] and is_local_request(request):
-        logger.info(f"Local request, skipping token check for HTML post.")
+    _enforce_token(request, token, "HTML post")
         
     try:
         parser = PostParser(client.client)
@@ -1206,14 +1226,7 @@ async def get_post_html(channel: str, post_id: int, request: Request, token: str
 @app.get("/json/{channel}/{post_id}/{token}")
 @app.get("/post/json/{channel}/{post_id}/{token}")
 async def get_post(channel: str, post_id: int, request: Request, token: str | None = None, debug: bool = False) -> Response:
-    if Config["token"] and not is_local_request(request):
-        if token != Config["token"]:
-            logger.error(f"Invalid token for JSON post: {token}, expected: {Config['token']}")
-            raise HTTPException(status_code=403, detail="Invalid token")
-        else:
-            logger.info(f"Valid token for JSON post: {token}")
-    elif Config["token"] and is_local_request(request):
-        logger.info(f"Local request, skipping token check for JSON post.")
+    _enforce_token(request, token, "JSON post")
             
     try:
         parser = PostParser(client.client)
@@ -1230,14 +1243,7 @@ async def get_post(channel: str, post_id: int, request: Request, token: str | No
 @app.get("/raw_json/{channel}/{post_id}")
 @app.get("/raw_json/{channel}/{post_id}/{token}")
 async def get_raw_post_json(channel: str, post_id: int, request: Request, token: str | None = None) -> Response:
-    if Config["token"] and not is_local_request(request):
-        if token != Config["token"]:
-            logger.error(f"Invalid token for raw JSON post: {token}, expected: {Config['token']}")
-            raise HTTPException(status_code=403, detail="Invalid token")
-        else:
-            logger.info(f"Valid token for raw JSON post: {token}")
-    elif Config["token"] and is_local_request(request):
-        logger.info(f"Local request, skipping token check for raw JSON post.")
+    _enforce_token(request, token, "raw JSON post")
             
     try:
         # Convert numeric channel ID to int if needed
@@ -1305,14 +1311,7 @@ async def ping() -> JSONResponse:
 @app.get("/health")
 @app.get("/health/{token}")
 async def health_check(request: Request, token: str | None = None) -> Response:
-    if Config["token"] and not is_local_request(request):
-        if token != Config["token"]:
-            logger.error(f"Invalid token for health check: {token}, expected: {Config['token']}")
-            raise HTTPException(status_code=403, detail="Invalid token")
-        else:
-            logger.info(f"Valid token for health check: {token}")
-    elif Config["token"] and is_local_request(request):
-        logger.info(f"Local request, skipping token check for health check.")
+    _enforce_token(request, token, "health check")
             
     try:
         # Bound the Telegram RPC so a hung get_me cannot hang the healthcheck.
@@ -1351,11 +1350,11 @@ async def get_media(channel: str, post_id: int, file_unique_id: str, request: Re
     try:
         url = f"{channel}/{post_id}/{file_unique_id}"
         if not verify_media_digest(url, digest):
-            expected_digest = generate_media_digest(url)
-            logger.error(f"Invalid digest for media {url}: {digest}, expected: {expected_digest}")
+            # Never log the expected digest: it is a signature over a secret key and would
+            # leak signing-oracle output for a chosen url. The presented digest is
+            # attacker-supplied, so it is safe to log for correlation.
+            logger.warning(f"Invalid media digest for {url} (presented digest {digest} rejected)")
             raise HTTPException(status_code=403, detail="Invalid URL signature")
-        #else:
-        #    logger.info(f"Valid digest for media {url}: {digest}")   
             
         # Canonical filesystem/DB/API key. Computed AFTER the digest check (which must run
         # against the ORIGINAL url string) so 'Durov', 'durov' and '@durov' collapse to one
@@ -1472,14 +1471,7 @@ async def get_rss_feed(channel: str,
                         exclude_text: str | None = None,
                         merge_seconds: int = 5,
                         ) -> Response:
-    if Config["token"] and not is_local_request(request):
-        if token != Config["token"]:
-            logger.error(f"invalid_token_error: token {token}, expected {Config['token']}")
-            raise HTTPException(status_code=403, detail="Invalid token")
-        else:
-            logger.info(f"Valid token for RSS endpoint: {token}")
-    elif Config["token"] and is_local_request(request):
-        logger.info(f"Local request, skipping token check for RSS endpoint.")
+    _enforce_token(request, token, "RSS endpoint")
         
     try:
         start_time = time.time()
@@ -1531,14 +1523,7 @@ async def get_rss_feed(channel: str,
 @app.get("/flags/{token}", response_model=List[str])
 async def get_available_flags(request: Request, token: str | None = None) -> Response:
     """Returns a list of all possible flags that can be assigned to posts."""
-    if Config["token"] and not is_local_request(request):
-        if token != Config["token"]:
-            logger.error(f"Invalid token for flags endpoint: {token}, expected: {Config['token']}")
-            raise HTTPException(status_code=403, detail="Invalid token")
-        else:
-            logger.info(f"Valid token for flags endpoint: {token}")
-    elif Config["token"] and is_local_request(request):
-        logger.info(f"Local request, skipping token check for flags endpoint.")
+    _enforce_token(request, token, "flags endpoint")
 
     try:
         flags = PostParser.get_all_possible_flags()
