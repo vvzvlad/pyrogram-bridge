@@ -118,7 +118,12 @@ def update_media_file_access_bulk_sync(db_path: str, entries: List[tuple]) -> No
 
 
 def get_all_media_file_ids_sync(db_path: str) -> List[dict]:
-    """Return all rows from media_file_ids as a list of dicts."""
+    """Return all rows from media_file_ids as a list of dicts.
+
+    Loads the ENTIRE media_file_ids table into memory. This runs on every cache sweep
+    and on /health; it is an accepted cost up to ~100k rows (a few MB of dicts), well
+    within the expected working set. Revisit (stream/paginate) only past that scale.
+    """
     with _db_connection(db_path) as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.execute("SELECT channel, post_id, file_unique_id, added FROM media_file_ids")
@@ -131,6 +136,23 @@ def remove_media_file_ids_sync(db_path: str, entries: List[tuple]) -> None:
     with _db_connection(db_path) as conn:
         conn.executemany(
             "DELETE FROM media_file_ids WHERE channel = ? AND post_id = ? AND file_unique_id = ?",
+            entries,
+        )
+
+
+def remove_media_file_ids_if_unchanged_sync(db_path: str, entries: List[tuple]) -> None:
+    """Remove media file ID records only if their `added` has not grown since the snapshot.
+
+    entries: iterable of (channel, post_id, file_unique_id, added) tuples, where `added` is
+    the value observed when the sweeper snapshotted the table. The DELETE is guarded with
+    `added <= ?`, so a row that was re-upserted DURING the (long) disk walk — bumping its
+    `added` above the snapshot value — is NOT deleted. This prevents the sweeper from
+    dropping a freshly-rendered row (and triggering a spurious media re-download).
+    Uses executemany (one connection, one commit), mirroring remove_media_file_ids_sync.
+    """
+    with _db_connection(db_path) as conn:
+        conn.executemany(
+            "DELETE FROM media_file_ids WHERE channel = ? AND post_id = ? AND file_unique_id = ? AND added <= ?",
             entries,
         )
 

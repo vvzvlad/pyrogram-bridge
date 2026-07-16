@@ -68,9 +68,8 @@ async def test_poll_with_description_media_downloads(monkeypatch, tmp_path):
 
     monkeypatch.setattr(api_server, "_download_atomic", fake_download_atomic)
 
-    file_path, delete_after = await api_server.download_media_file("PollChan", 501, "poll_uid")
+    file_path = await api_server.download_media_file("PollChan", 501, "poll_uid")
 
-    assert delete_after is False
     assert file_path is not None
     assert downloaded == ["poll_fid"]
     # File landed in the per-post cache dir under its file_unique_id.

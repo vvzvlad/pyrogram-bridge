@@ -224,7 +224,7 @@ async def test_get_media_concurrent_shares_one_download_and_drains_registry(monk
     # Serve step is not under test here; keep it to a sentinel so we assert on dedup + registry.
     sentinel = object()
 
-    async def fake_prepare(file_path, request=None, delete_after=False, media_key=None):
+    async def fake_prepare(file_path, request=None, media_key=None):
         return sentinel
 
     monkeypatch.setattr(api_server, "prepare_file_response", fake_prepare)
@@ -234,7 +234,7 @@ async def test_get_media_concurrent_shares_one_download_and_drains_registry(monk
     async def slow_dl(channel, post_id, fid):
         calls.append(fid)
         await asyncio.sleep(0.05)  # real overlap window for the two requests
-        return (f"/final/{fid}", False)
+        return f"/final/{fid}"
 
     monkeypatch.setattr(api_server, "download_media_file", slow_dl)
 
@@ -255,7 +255,7 @@ async def test_get_media_request_cancel_does_not_stick_registry_or_hang_sibling(
     monkeypatch.setattr(api_server, "verify_media_digest", lambda url, digest: True)
     sentinel = object()
 
-    async def fake_prepare(file_path, request=None, delete_after=False, media_key=None):
+    async def fake_prepare(file_path, request=None, media_key=None):
         return sentinel
 
     monkeypatch.setattr(api_server, "prepare_file_response", fake_prepare)
@@ -266,7 +266,7 @@ async def test_get_media_request_cancel_does_not_stick_registry_or_hang_sibling(
     async def held_dl(channel, post_id, fid):
         calls.append(fid)
         await gate.wait()  # hold the shared download open until we release it
-        return (f"/final/{fid}", False)
+        return f"/final/{fid}"
 
     monkeypatch.setattr(api_server, "download_media_file", held_dl)
 

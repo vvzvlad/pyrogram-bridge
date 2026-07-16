@@ -142,7 +142,7 @@ async def test_concurrent_large_video_no_partial_served(monkeypatch, tmp_path):
 
     t1 = asyncio.create_task(api_server.download_media_file("chan", 7, "vidfid"))
     t2 = asyncio.create_task(api_server.download_media_file("chan", 7, "vidfid"))
-    (p1, _), (p2, _) = await asyncio.gather(t1, t2)
+    p1, p2 = await asyncio.gather(t1, t2)
 
     assert p1 == p2
     assert os.path.basename(p1) == "temp_vidfid"  # large videos keep the TTL-cleaned name

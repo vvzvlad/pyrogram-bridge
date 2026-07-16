@@ -61,10 +61,9 @@ async def test_cache_hit_records_accumulator_no_sqlite(tmp_path, monkeypatch):
     monkeypatch.setattr(api_server, "update_media_file_access_sync",
                         lambda *a, **k: called.append(a))
 
-    path, delete_after = await api_server.download_media_file(channel, post_id, fid)
+    path = await api_server.download_media_file(channel, post_id, fid)
 
     assert path == str(cache_dir / fid)
-    assert delete_after is False
     assert called == []  # no synchronous SQLite access-write happened
     assert (channel, post_id, fid) in api_server._access_updates
 
