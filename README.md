@@ -78,6 +78,9 @@ Use this if you rss bridge access all world, otherwise your bridge can be used b
 TIME_BASED_MERGE - optional, if set to true, will merge posts by time. Merge time is 5 seconds, use &merge_seconds=XX in rss url for tuning.  
 SHOW_BRIDGE_LINK - optional, if set to true, will add "Open in Bridge" link to html post view. Default is false.  
 SHOW_POST_FLAGS - optional, if set to true, will show post flags in html post view. Default is false.  
+MEDIA_SIGNING_SECRET - optional, secret used to sign media URLs (HMAC-SHA256, v2 scheme). If unset, the signing key is derived from TOKEN (if set), otherwise from an auto-generated key file in the data volume. Set this (or TOKEN) so media URLs keep working after the data volume is recreated — the file-based key is wiped with the volume and all previously issued media URLs would die. Key derivation uses HKDF-SHA256; the same secret always yields the same key.  
+MEDIA_ALLOW_LEGACY_DIGEST - optional, default true. Also accept the old pre-v2 (SHA-1/8-char) media digests, so media URLs already delivered to readers keep working after upgrade. Set to false only once every feed has been re-polled and all URLs regenerated with the v2 scheme.  
+MEDIA_URL_TTL_DAYS - optional, default unset (no expiry). When set to a positive integer, freshly generated media URLs carry a signed expiry that many days out. Leave unset for RSS: readers may fetch a feed entry days/weeks later, and a hard expiry breaks those legitimate late fetches. Each feed regeneration refreshes the expiry.  
 
 ## Get channel rss feed (use it in your rss reader)
 
