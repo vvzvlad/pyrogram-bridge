@@ -73,9 +73,9 @@ def _degraded_post(group: list[Message], error: Exception) -> dict:
     """Build a visible placeholder entry for a post group whose render raised (#60).
 
     A render exception must NOT make the post vanish silently from the feed: instead we
-    emit a degraded entry carrying the SAME message_id the successful render would have
-    used, so the feed guid (built from message_id) stays stable — once the render is
-    fixed the reader updates that entry in place rather than resurfacing it as new.
+    emit a degraded entry carrying the SAME guid_basis the successful render would have
+    used (window-independent album/min-id basis, #58), so the feed guid stays stable —
+    once the render is fixed the reader updates that entry in place, not resurfaces it.
 
     All attribute access here is defensive: the group already failed to render, so we
     must not raise a second time while describing the failure.
@@ -98,11 +98,20 @@ def _degraded_post(group: list[Message], error: Exception) -> dict:
     except Exception:
         date_ts = None
 
+    # Keep the SAME window-independent guid basis a successful render would use (#58),
+    # so a degraded album entry does not diverge from its rendered self and get shown
+    # twice. Defensive: the group already failed once, must not raise a second time.
+    try:
+        guid_basis = _stable_guid_basis(group)
+    except Exception:
+        guid_basis = ("msg", message_id)
+
     return {
         # sanitize_html (in _render_pipeline) keeps this plain <p> text as-is.
         'html': f"<p>{_RENDER_FAILED_NOTE}</p>",
         'date': date_ts,
         'message_id': message_id,
+        'guid_basis': guid_basis,
         'title': _RENDER_FAILED_TITLE,
         'text': _RENDER_FAILED_NOTE,
         'author': None,
@@ -120,6 +129,38 @@ def _strip_xml_incompatible(s):
     if not isinstance(s, str):
         return s
     return _XML_INCOMPATIBLE_RE.sub('', s)
+
+
+def _stable_guid_basis(group: list[Message]) -> tuple[str, object]:
+    """Return a window-independent identity for a rendered group's feed guid (issue #58).
+
+    A media group's guid must NOT depend on which subset of its messages happens to fall
+    inside the current fetch window: the reader dedups on the guid, so a guid that shifts
+    when the window boundary moves re-surfaces the same album as a brand-new (duplicate)
+    unread entry on every poll while the album is entering or leaving the window.
+
+    The old basis — the message_id of the "first message carrying text/caption" — moves
+    both when that message leaves the window AND, as an album enters the window newest
+    member first, while the group composition itself grows ({102} -> {101,102} ->
+    {100,101,102}). A minimum-message_id basis has the same growth sensitivity. Only the
+    Telegram-assigned media_group_id is identical for every album member and independent
+    of how many are currently in the window.
+
+    Returns a (kind, key) pair, consumed by the RSS formatter which owns channel_username:
+    - ('album', media_group_id): the group's messages all share one truthy, immutable
+      Telegram media_group_id (a native album — including the transient case where only
+      part of it is in the window). Fully window-independent.
+    - ('msg', min_message_id): a single non-album message, or a TIME_BASED synthetic
+      cluster of unrelated posts (mixed/absent media_group_id). message ids are immutable
+      and min() is independent of text-presence/index/order; a synthetic cluster has no
+      window-independent album id, so this is best-effort.
+    """
+    mgids = {getattr(m, "media_group_id", None) for m in group}
+    if len(mgids) == 1:
+        only = next(iter(mgids))
+        if only:
+            return ("album", only)
+    return ("msg", min(m.id for m in group))
 
 
 @dataclass
@@ -297,6 +338,7 @@ def _render_messages_groups(messages_groups: list[list[Message]],
                     'html': _wrap_post_html(message_data["html"]["body"], message_data["html"]["footer"]),
                     'date': message_data['date'],
                     'message_id': message_data['message_id'],
+                    'guid_basis': _stable_guid_basis(group),
                     'title': message_data['html']['title'],
                     'text': message_data['text'],
                     'author': message_data['author'],
@@ -337,6 +379,7 @@ def _render_messages_groups(messages_groups: list[list[Message]],
                     'html': _wrap_post_html(combined_html_body, footer_html),
                     'date': main_message['date'],
                     'message_id': main_message['message_id'],
+                    'guid_basis': _stable_guid_basis(group),
                     'title': main_message['html']['title'],
                     'text': combined_text,
                     'author': main_message['author'],
@@ -601,6 +644,8 @@ async def generate_channel_rss(channel: str | int,
             # this — lxml raises in the CDATA branch too.
             fe.title(_strip_xml_incompatible(post['title']))
 
+            # The human-facing <link> points at the group's representative message (may
+            # shift harmlessly as an album enters/leaves the window — cosmetic only).
             post_link = f"https://t.me/{channel_username}/{post['message_id']}"
             fe.link(href=post_link)
 
@@ -609,7 +654,7 @@ async def generate_channel_rss(channel: str | int,
             # (single project-wide bleach config, fail-closed). No per-post thread
             # hop / CSSSanitizer here anymore.
             fe.content(content=_strip_xml_incompatible(post['html']), type='CDATA')
-            
+
             if post['date'] is not None:
                 pub_date = datetime.fromtimestamp(post['date'], tz=timezone.utc)
                 logger.debug(f"rss_entry_date: channel {channel}, message_id {post['message_id']}, timestamp {post['date']}, pub_date {pub_date.isoformat()}")
@@ -619,7 +664,17 @@ async def generate_channel_rss(channel: str | int,
                 pub_date = datetime.now(tz=timezone.utc)
                 logger.warning(f"rss_entry_missing_date: channel {channel}, message_id {post['message_id']}, using current time as fallback")
                 fe.pubDate(pub_date)
-            fe.guid(post_link, permalink=True)
+            # Derive the guid from the group's window-independent identity (issue #58) so a
+            # media group is not re-shown as a duplicate when the fetch window boundary
+            # shifts. A native album keys on its immutable Telegram media_group_id (not a
+            # real page, so isPermaLink="false"); everything else keys on the immutable
+            # message id, keeping the t.me permalink form. Falls back to message_id for any
+            # post dict lacking a basis (defensive).
+            guid_kind, guid_key = post.get('guid_basis', ('msg', post['message_id']))
+            if guid_kind == 'album':
+                fe.guid(f"https://t.me/{channel_username}?mediagroup={guid_key}", permalink=False)
+            else:
+                fe.guid(f"https://t.me/{channel_username}/{guid_key}", permalink=True)
             
             if post['author'] and post['author'] != main_name:
                 fe.author(name="", email=_strip_xml_incompatible(post['author']))
