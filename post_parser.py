@@ -123,13 +123,17 @@ def _story_media_object(message):
 # and it is deliberately never collected/downloaded (paid content).
 # --------------------------------------------------------------------------- #
 def _select_document(message):
-    """DOCUMENT selector: PDF documents render as a t.me link ('pdf'), everything
-    else as an image ('img_400'). The selected object is always message.document."""
+    """DOCUMENT selector: PDF documents render as a t.me link ('pdf'), image
+    documents (mime image/*) render inline as an image ('img_400'), everything
+    else (.stl/.zip/... including a missing mime) as a generic file-info block
+    ('file'). The selected object is always message.document."""
     document = message.document
-    if (document is not None and hasattr(document, 'mime_type')
-            and document.mime_type == 'application/pdf'):
+    mime = getattr(document, 'mime_type', None) if document is not None else None
+    if mime == 'application/pdf':
         return document, 'pdf'
-    return document, 'img_400'
+    if isinstance(mime, str) and mime.startswith('image/'):
+        return document, 'img_400'
+    return document, 'file'
 
 
 def _select_sticker(message):
@@ -198,16 +202,20 @@ class RenderCtx:
     channel_username guard, and the mime/emoji/tg_link values chosen BY MEDIA TYPE);
     a renderer only formats the string and never inspects the Message."""
     url: str
-    tg_link: Optional[str] = None   # t.me deep link — only the 'pdf' renderer uses it
+    tg_link: Optional[str] = None   # t.me deep link — only the 'pdf' and 'file' renderers use it
     emoji: str = ''                 # sticker alt text
     mime: Optional[str] = None      # audio/voice <source> type; default chosen by media type
+    file_name: Optional[str] = None  # document file name — only the 'file' renderer uses it
+    file_size: Optional[int] = None  # document size in bytes — only the 'file' renderer uses it
 
 
 # Renderers return list[str] so the byte structure of the '\n'.join in
 # _generate_html_media is preserved (audio emits TWO items: <audio> tag + <br>;
 # pdf emits its two-append div block). Bodies are lifted VERBATIM from the old
 # if/elif branches, including the `src="{url}"style=` concatenation artifacts —
-# byte-for-byte fidelity is the stage-5a contract.
+# byte-for-byte fidelity is the stage-5a contract. The one post-stage-5 addition
+# is _render_file (generic non-image documents), which replaced a broken <img>
+# and therefore has no pre-refactor bytes to preserve.
 def _render_img_400(ctx: 'RenderCtx') -> List[str]:
     return [f'<img src="{ctx.url}" style="max-width:100%; width:auto; height:auto;'
             f'max-height:{MEDIA_MAX_HEIGHT_PX}; object-fit:contain;">']
@@ -246,6 +254,32 @@ def _render_pdf(ctx: 'RenderCtx') -> List[str]:
             f'<a href="{ctx.tg_link}" target="_blank">[PDF-файл]</a></div>']
 
 
+def _format_file_size(size) -> str:
+    """Human-readable file size ('429.9 KB'); empty string when unknown/invalid."""
+    if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
+        return ''
+    if size < 1024:
+        return f"{size} B"
+    if size < 1024 * 1024:
+        return f"{size / 1024:.1f} KB"
+    if size < 1024 * 1024 * 1024:
+        return f"{size / (1024 * 1024):.1f} MB"
+    return f"{size / (1024 * 1024 * 1024):.2f} GB"
+
+
+def _render_file(ctx: 'RenderCtx') -> List[str]:
+    """Generic-document info block: file name + size linking to the t.me post.
+    Replaces the broken <img> that non-image documents (.stl/.zip/...) used to
+    render as. file_name is user-controlled -> escaped here (the boundary
+    sanitize pass would otherwise mangle any markup-looking name)."""
+    name = html.escape(ctx.file_name) if ctx.file_name else 'Файл'
+    size = _format_file_size(ctx.file_size)
+    size_part = f' ({size})' if size else ''
+    return [f'<div class="document-file">',
+            f'📎 <a href="{ctx.tg_link}" target="_blank">{name}</a>{size_part}'
+            f' — откройте Telegram, чтобы скачать</div>']
+
+
 RENDERERS: Dict[str, Callable[['RenderCtx'], List[str]]] = {
     'img_400':         _render_img_400,
     'video_400':       _render_video_400,
@@ -254,6 +288,7 @@ RENDERERS: Dict[str, Callable[['RenderCtx'], List[str]]] = {
     'img_200_sticker': _render_img_200_sticker,
     'video_loop_400':  _render_video_loop_400,
     'pdf':             _render_pdf,
+    'file':            _render_file,
 }
 
 
@@ -336,7 +371,36 @@ class PostParser:
             if not message or getattr(message, 'empty', False):
                 logger.error(f"post_not_found_or_empty: channel {prepared_channel_id}, post_id {post_id}")
                 return None
-            
+
+            # HTML single-post page only: a message that is part of a media group
+            # (album) is rendered together with its siblings, so e.g. all files of a
+            # 3-document album show up on any of the three /html/<chan>/<id> pages.
+            # The JSON path is deliberately untouched (API consumers depend on the
+            # single-message shape staying byte-identical).
+            if output_type == 'html' and getattr(message, 'media_group_id', None):
+                group = None
+                try:
+                    # Bound the RPC like every other Telegram call in this file.
+                    group = await asyncio.wait_for(
+                        self.client.get_media_group(prepared_channel_id, post_id), timeout=30)
+                except Exception as e:
+                    # Fall back to single-message rendering — the page must not 500 because
+                    # the album fetch failed.
+                    logger.warning(f"media_group_fetch_failed: channel {prepared_channel_id}, post_id {post_id}, error_type {type(e).__name__}, error {e}")
+                if group and len(group) > 1:
+                    try:
+                        html_content = self._format_group_html(list(group), debug=debug,
+                                                               raw_message=str(message) if debug else None)
+                        await self._flush_pending_media_ids()
+                        return html_content
+                    except Exception as e:
+                        # A broken album neighbor must not take down the page — fall back to
+                        # rendering just the requested message (same guarantee the feed path
+                        # gives via its degraded placeholder, issue #60). Any media file-ids
+                        # collected before the failure stay pending and are picked up by the
+                        # fallback path's flush (flush runs once per request on every path).
+                        logger.error(f"media_group_render_failed: channel {prepared_channel_id}, post_id {post_id}, error_type {type(e).__name__}, error {e}; falling back to single message")
+
             # Single-post outputs need sanitized body/footer (no whole-feed pass exists here).
             # raw_message is only needed for JSON output and for debug HTML.
             include_raw = (output_type == 'json') or debug
@@ -763,6 +827,36 @@ class PostParser:
         html_data = '\n'.join(html_content)
         return html_data
 
+    def _format_group_html(self, group: List[Message], debug: bool = False,
+                           raw_message: Optional[str] = None) -> str:
+        """Render a full media group (album) as one single-post HTML page.
+
+        Mirrors the merged-group branch of rss_generator._render_messages_groups
+        (kept in sync by hand — importing it here would be a circular import):
+        same main-message criterion, same '\\n<br><br>\\n' body join, same
+        first-seen merged flags + 'merged', footer rendered from the real main
+        Message. Sanitization happens exactly once here at the output boundary.
+        """
+        processed = [self.process_message(m, include_raw=False, sanitize=False) for m in group]
+        main_idx = next((i for i, m in enumerate(group) if (m.text or m.caption)), 0)
+        main_raw = group[main_idx]
+        main = processed[main_idx]
+        bodies = [p['html']['body'] for p in processed if p['html']['body']]
+        combined_body = '\n<br><br>\n'.join(bodies)
+        merged_flags = list(dict.fromkeys(f for p in processed for f in p['flags']))
+        merged_flags.append('merged')
+        footer_html = self.generate_html_footer(main_raw, flags_list=merged_flags)
+        data: Dict[str, Any] = {
+            'html': {
+                'title': main['html']['title'],
+                'body': self._sanitize_html(combined_body),
+                'footer': self._sanitize_html(footer_html),
+            },
+        }
+        if raw_message is not None:
+            data['raw_message'] = raw_message
+        return self._format_html(data, debug)
+
     def _format_flags(self, flags_list: list) -> str:
         if not Config['show_post_flags']: return ''
         
@@ -1009,11 +1103,15 @@ class PostParser:
                     renderer = RENDERERS.get(kind) if kind else None
                     if renderer is not None:
                         ctx = RenderCtx(url=url)
-                        if kind == 'pdf':
+                        if kind in ('pdf', 'file'):
                             if channel_username.startswith('-100'):
                                 ctx.tg_link = f"https://t.me/c/{channel_username[4:]}/{message.id}"
                             else:
                                 ctx.tg_link = f"https://t.me/{channel_username}/{message.id}"
+                            if kind == 'file':
+                                document = message.document
+                                ctx.file_name = getattr(document, 'file_name', None)
+                                ctx.file_size = getattr(document, 'file_size', None)
                         elif kind == 'audio':
                             if message.media == MessageMediaType.VOICE:
                                 ctx.mime = getattr(message.voice, 'mime_type', 'audio/ogg')

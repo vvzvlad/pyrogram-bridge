@@ -112,6 +112,12 @@ def build_corpus():
                                              document=SimpleNamespace(file_unique_id="doc1", mime_type="application/pdf"))]))
     corpus.append(("document_other", [make_msg(media=MessageMediaType.DOCUMENT,
                                                document=SimpleNamespace(file_unique_id="doc2", mime_type="image/png"))]))
+    # Generic (non-image, non-PDF) document: renders the 'file' info block whose
+    # name/size come from document.file_name/file_size — a snapshot that drops
+    # file_name would render the generic 'Файл' label and diverge here.
+    corpus.append(("document_file", [make_msg(media=MessageMediaType.DOCUMENT,
+                                              document=SimpleNamespace(file_unique_id="doc3", mime_type="application/x-cd-image",
+                                                                       file_name="image.iso", file_size=440184))]))
     corpus.append(("audio", [make_msg(media=MessageMediaType.AUDIO,
                                       audio=SimpleNamespace(file_unique_id="au1", mime_type="audio/mpeg"))]))
     corpus.append(("voice", [make_msg(media=MessageMediaType.VOICE,

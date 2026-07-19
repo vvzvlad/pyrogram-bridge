@@ -34,7 +34,10 @@ logger = logging.getLogger(__name__)
 # v3: added the depth-1 reply_to_message snapshot (reply targets are now resolved at
 # fetch time and persisted). A v2 file lacks the key, so a cached reply message would
 # restore without its quote block — invalidate v2 files (one-time refetch).
-SNAPSHOT_VERSION = 3
+# v4: added document.file_name (needed by the new generic-file render block); a v3 file
+# lacks it, so a cached document post would render a nameless file block — invalidate
+# v3 files (one-time refetch).
+SNAPSHOT_VERSION = 4
 
 
 class CachedStr(str):
@@ -354,7 +357,7 @@ def snapshot_message(message: Any) -> dict:
         # _save_media_file_ids' >100MB skip (MEDIA_SOURCES: document/audio/animation/
         # video_note select this exact object). Without it a restored >100MB media
         # would have file_size=None and be wrongly collected on a cache hit (F1).
-        "document": _snapshot_obj(getattr(message, "document", None), ["file_unique_id", "mime_type", "file_size"]),
+        "document": _snapshot_obj(getattr(message, "document", None), ["file_unique_id", "mime_type", "file_size", "file_name"]),
         "audio": _snapshot_obj(getattr(message, "audio", None), ["file_unique_id", "mime_type", "file_size"]),
         "voice": _snapshot_obj(getattr(message, "voice", None), ["file_unique_id", "mime_type"]),
         "video_note": _snapshot_obj(getattr(message, "video_note", None), ["file_unique_id", "file_size"]),
@@ -586,7 +589,7 @@ class CachedMessage:
         self.web_page = _restore_web_page(data.get("web_page"))
         self.photo = _ns(data.get("photo"), ["file_unique_id"])
         self.video = _ns(data.get("video"), ["file_unique_id", "file_size"])
-        self.document = _ns(data.get("document"), ["file_unique_id", "mime_type", "file_size"])
+        self.document = _ns(data.get("document"), ["file_unique_id", "mime_type", "file_size", "file_name"])
         self.audio = _ns(data.get("audio"), ["file_unique_id", "mime_type", "file_size"])
         self.voice = _ns(data.get("voice"), ["file_unique_id", "mime_type"])
         self.video_note = _ns(data.get("video_note"), ["file_unique_id", "file_size"])
