@@ -4,22 +4,24 @@
 """
 Stage 3 (render-pipeline refactor epic, issue #30/#34) — reply-enrichment lock.
 
-Stage 3 merges generate_channel_rss/generate_channel_html around the shared
-_prepare_feed_posts and moves _reply_enrichment (the live client.get_messages
-reply-target fetch) INTO that shared path (enrich_replies=True for HTML,
-False for RSS).
+Reply enrichment (the live client.get_messages reply-target fetch) now lives in
+the FETCH layer: tg_cache.cached_get_chat_history enriches once per history-cache
+miss and persists the resolved reply target inside the history snapshot. The
+render layer (_prepare_feed_posts) no longer enriches at all — BOTH feeds (RSS
+and HTML) receive messages whose .reply_to_message is already populated
+(live-fetched or cache-restored) and render the quote from it.
 
-The stage-0 golden oracle CANNOT see this move: its harness replays the corpus
-through monkeypatched tg_cache but leaves client.get_messages a no-op (the client
-is a bare SimpleNamespace, so get_messages raises AttributeError and enrichment
-silently no-ops). So enrichment is locked here instead, exactly as mandated on #30:
+The stage-0 golden oracle CANNOT see this: its harness replays the corpus
+through monkeypatched tg_cache, bypassing the real fetch layer. So enrichment is
+locked here instead:
 
   (a) get_messages is BATCHED by chat_id (one call per chat, not one per reply);
   (b) the fetched reply target is set onto the right source message by
       (chat_id, message.id);
-  (c) the enriched reply block actually renders in the HTML feed.
-
-Plus: RSS deliberately does NOT enrich (keeps polling cheap) — locked too.
+  (c) BOTH feeds render the reply block from an already-resolved target without
+      any render-layer get_messages call;
+  (d) the real cached_get_chat_history enriches on a miss and the enriched
+      target lands in the snapshot payload it saves.
 """
 from types import SimpleNamespace
 from datetime import datetime, timezone
@@ -28,8 +30,9 @@ import pytest
 
 from pyrogram import errors
 
-import rss_generator as rss_module
-from rss_generator import _reply_enrichment, generate_channel_html, generate_channel_rss
+import tg_cache
+from tg_cache import _reply_enrichment
+from rss_generator import generate_channel_html, generate_channel_rss
 
 
 class _Str(str):
@@ -135,8 +138,9 @@ async def test_reply_enrichment_no_replies_makes_no_calls():
 
 
 # --------------------------------------------------------------------------- #
-# (c) the enriched reply block renders in the HTML feed — AND enrichment now runs
-#     inside the shared _prepare_feed_posts path (enrich_replies=True for HTML).
+# (c) BOTH feeds render the reply block from an already-resolved target — the
+#     history source (fetch layer) delivers messages carrying .reply_to_message,
+#     and the render layer performs NO get_messages call of its own.
 # --------------------------------------------------------------------------- #
 def _patch_feed_source(monkeypatch, messages):
     async def fake_get_chat(client, channel):
@@ -150,34 +154,97 @@ def _patch_feed_source(monkeypatch, messages):
 
 
 @pytest.mark.asyncio
-async def test_html_feed_renders_enriched_reply_block(monkeypatch):
+async def test_html_feed_renders_reply_block_from_fetch_layer(monkeypatch):
     MARKER = "ENRICHED_REPLY_MARKER_XYZ"
-    # A shallow message: it has a reply_to_message_id but NO resolved reply_to_message
-    # yet — enrichment must fetch and fill it before render.
+    # The history source already carries a resolved reply target (live-enriched at
+    # fetch time or restored from the history snapshot) — render must just use it.
     msg = make_message(77, chat_id=-1001234567890, reply_to_message_id=70,
-                       reply_to_message=None, text="body text")
+                       reply_to_message=_reply_target(70, MARKER), text="body text")
     _patch_feed_source(monkeypatch, [msg])
 
-    client = RecordingClient(target_text_for=lambda chat_id, mid: MARKER)
+    client = RecordingClient()
     html = await generate_channel_html("testchan", client=client, limit=5)
 
-    # Enrichment ran inside _prepare_feed_posts and was BATCHED (one call for the chat).
-    assert client.calls == [(-1001234567890, [77])], f"enrichment not run/batched: {client.calls}"
-    # The resolved reply target renders as a reply block carrying the marker text.
+    # The render layer never fetches reply targets itself.
+    assert client.calls == [], f"render layer must not call get_messages: {client.calls}"
+    # The pre-resolved reply target renders as a reply block carrying the marker text.
     assert '<div class="message-reply">' in html, "reply block not rendered"
     assert MARKER in html, "resolved reply-target text missing from the rendered feed"
 
 
 @pytest.mark.asyncio
-async def test_rss_feed_does_not_enrich_replies(monkeypatch):
-    # RSS deliberately skips enrichment (enrich_replies=False) to keep polling cheap.
+async def test_rss_feed_renders_reply_block_from_fetch_layer(monkeypatch):
+    MARKER = "RSS_REPLY_MARKER_XYZ"
+    # Same contract for RSS: the quote renders from the pre-resolved target — no
+    # render-layer RPC (RSS polling stays cheap because enrichment happened at fetch
+    # time, once per history-cache miss).
     msg = make_message(88, chat_id=-1001234567890, reply_to_message_id=80,
-                       reply_to_message=None, text="body text")
+                       reply_to_message=_reply_target(80, MARKER), text="body text")
     _patch_feed_source(monkeypatch, [msg])
 
     client = RecordingClient()
-    await generate_channel_rss("testchan", client=client, limit=5)
-    assert client.calls == [], "RSS must NOT call get_messages (enrich_replies=False)"
+    rss = await generate_channel_rss("testchan", client=client, limit=5)
+
+    assert client.calls == [], f"render layer must not call get_messages: {client.calls}"
+    assert MARKER in rss, "resolved reply-target text missing from the RSS body"
+    assert "Reply to" in rss, "reply quote block missing from the RSS body"
+
+
+# --------------------------------------------------------------------------- #
+# (d) the REAL fetch layer: cached_get_chat_history enriches on a cache miss and
+#     the resolved target is part of the snapshot payload it persists.
+# --------------------------------------------------------------------------- #
+class FetchLayerClient(RecordingClient):
+    """RecordingClient plus a live history source: get_chat_history is an ASYNC
+    GENERATOR (like pyrogram's) yielding the prepared shallow messages."""
+
+    def __init__(self, history, **kwargs):
+        super().__init__(**kwargs)
+        self._history = history
+
+    async def get_chat_history(self, chat_id, limit=20):
+        for m in self._history:
+            yield m
+
+
+@pytest.mark.asyncio
+async def test_cached_get_chat_history_enriches_and_snapshots_replies(monkeypatch):
+    CHAT = -1001234567890
+    saved = {}
+
+    # Force the miss path and capture what would be persisted instead of touching disk.
+    monkeypatch.setattr(tg_cache, "_get_history_from_cache", lambda channel_id, limit, max_age_hours=8: None)
+
+    def capture_save(channel_id, messages, limit):
+        saved["channel_id"] = channel_id
+        saved["messages"] = messages
+        saved["limit"] = limit
+
+    monkeypatch.setattr(tg_cache, "_save_history_to_cache", capture_save)
+
+    # One shallow message: reply_to_message_id set, target NOT yet resolved.
+    msg = make_message(77, chat_id=CHAT, reply_to_message_id=70,
+                       reply_to_message=None, text="body text")
+    client = FetchLayerClient([msg])
+
+    result = await tg_cache.cached_get_chat_history(client, "testchan", limit=5)
+
+    # Exactly one BATCHED get_messages call for the chat.
+    assert client.calls == [(CHAT, [77])], f"enrichment not run/batched: {client.calls}"
+
+    # The returned messages carry the resolved reply target.
+    assert result[0].reply_to_message is not None, "fetch layer did not enrich the reply"
+    assert result[0].reply_to_message.id == 77 + 5000
+    assert result[0].reply_to_message.text == f"TARGET_{CHAT}_77"
+
+    # The enriched messages are what gets persisted, and snapshotting them (exactly
+    # what _save_history_to_cache does via snapshot_messages) keeps the reply target.
+    from message_snapshot import snapshot_messages
+    assert saved["messages"] is result
+    snap = snapshot_messages(saved["messages"])[0]
+    assert snap["reply_to_message"] is not None, "reply target missing from the snapshot payload"
+    assert snap["reply_to_message"]["id"] == 77 + 5000
+    assert snap["reply_to_message"]["text"] == f"TARGET_{CHAT}_77"
 
 
 # --------------------------------------------------------------------------- #

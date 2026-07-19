@@ -173,6 +173,60 @@ def _get_history_from_cache(channel_id: Union[str, int], limit: int, max_age_hou
         return None
 
 
+async def _reply_enrichment(client: Client, messages: list[Message]) -> list[Message]:
+    """
+    Enrich messages with reply-to messages.
+
+    Runs at FETCH time (from cached_get_chat_history, once per history-cache-miss) so
+    the resolved reply targets get snapshotted into the history cache — feed renders
+    (RSS and HTML) then read the quote from cache instead of re-fetching per poll.
+
+    Instead of one API call per message, replies are batched: all message IDs
+    that need enrichment are grouped by chat_id and fetched in a single
+    client.get_messages() call per chat_id.
+    """
+    # Collect messages that need reply enrichment, grouped by chat_id
+    chat_messages: dict[int, list[Message]] = {}
+    for message in messages:
+        if message.reply_to_message_id and message.chat:
+            chat_id = message.chat.id
+            if chat_id not in chat_messages:
+                chat_messages[chat_id] = []
+            chat_messages[chat_id].append(message)
+
+    if not chat_messages:
+        # No messages with replies — return unchanged
+        return messages
+
+    # Build a lookup: {(chat_id, message_id): full_message} using one batch call per chat
+    reply_lookup: dict[tuple[int, int], Message] = {}
+    for chat_id, chat_msgs in chat_messages.items():
+        ids_to_fetch = [m.id for m in chat_msgs]
+        try:
+            # Throttle under the global RPC gate and bound the call via the shared
+            # tg_rpc_bounded so a hung get_messages cannot pin the gate.
+            async with tg_rpc_bounded(Config["tg_rpc_timeout"]):
+                fetched = await client.get_messages(chat_id, ids_to_fetch)
+            # get_messages may return a single Message or a list
+            if not isinstance(fetched, list):
+                fetched = [fetched]
+            for fm in fetched:
+                if fm and not getattr(fm, 'empty', False):
+                    reply_lookup[(chat_id, fm.id)] = fm
+        except Exception as e:
+            logger.error(f"reply_enrichment_batch_error: chat_id {chat_id}, ids {ids_to_fetch}, error {str(e)}")
+
+    # Apply reply_to_message from lookup
+    for message in messages:
+        if message.reply_to_message_id and message.chat:
+            key = (message.chat.id, message.id)
+            full_message = reply_lookup.get(key)
+            if full_message and full_message.reply_to_message:
+                message.reply_to_message = full_message.reply_to_message
+
+    return messages
+
+
 async def cached_get_chat_history(client: Client, channel_id: Union[str, int], limit: int = 20) -> List[Message]:
     """
     Gets chat message history with caching.
@@ -199,6 +253,10 @@ async def cached_get_chat_history(client: Client, channel_id: Union[str, int], l
         # fetch; see the note in tg_rpc_bounded.
         async with tg_rpc_bounded(Config["tg_rpc_timeout"]):
             messages = [m async for m in client.get_chat_history(channel_id, limit=limit)]
+        # Resolve reply targets ONCE at fetch time so they are persisted in the
+        # history snapshot below — feed renders (RSS and HTML) then read the quote
+        # from cache instead of re-fetching it on every poll.
+        messages = await _reply_enrichment(client, messages)
         await asyncio.to_thread(_save_history_to_cache, channel_id, messages, limit)
 
         return messages

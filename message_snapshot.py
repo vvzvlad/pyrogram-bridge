@@ -31,7 +31,10 @@ logger = logging.getLogger(__name__)
 # game, giveaway, giveaway_winners, checklist, paid_media) plus live_photo. A v1 file lacks
 # these keys, so a cached special-media / live-photo message would restore with an empty
 # block — invalidate v1 files.
-SNAPSHOT_VERSION = 2
+# v3: added the depth-1 reply_to_message snapshot (reply targets are now resolved at
+# fetch time and persisted). A v2 file lacks the key, so a cached reply message would
+# restore without its quote block — invalidate v2 files (one-time refetch).
+SNAPSHOT_VERSION = 3
 
 
 class CachedStr(str):
@@ -193,6 +196,31 @@ def _snapshot_web_page(wp: Any) -> Optional[dict]:
     }
 
 
+# Reply-target texts are truncated at snapshot time: the renderer
+# (_format_reply_info) truncates to 100 chars anyway, so 300 keeps headroom for a
+# future render change while bounding cache growth for channels with long posts.
+_REPLY_TEXT_MAX_CHARS = 300
+
+
+def _snapshot_reply(reply: Any) -> Optional[dict]:
+    """DEPTH-1 snapshot of a resolved reply target (message.reply_to_message).
+
+    Stores ONLY the fields _format_reply_info (post_parser.py) reads: id, text,
+    caption, sender_chat(id/title/username). The reply's own nested
+    reply_to_message is deliberately NOT snapshotted (no recursion).
+    """
+    if reply is None:
+        return None
+    text = _unwrap_text(getattr(reply, "text", None))
+    caption = _unwrap_text(getattr(reply, "caption", None))
+    return {
+        "id": getattr(reply, "id", None),
+        "text": text[:_REPLY_TEXT_MAX_CHARS] if text is not None else None,
+        "caption": caption[:_REPLY_TEXT_MAX_CHARS] if caption is not None else None,
+        "sender_chat": _snapshot_obj(getattr(reply, "sender_chat", None), ["id", "title", "username"]),
+    }
+
+
 # --------------------------------------------------------------------------- #
 # Special-media snapshots (issue #23 review fix).
 #
@@ -311,6 +339,7 @@ def snapshot_message(message: Any) -> dict:
         "views": getattr(message, "views", None),
         "show_caption_above_media": getattr(message, "show_caption_above_media", None),
         "reply_to_message_id": getattr(message, "reply_to_message_id", None),
+        "reply_to_message": _snapshot_reply(getattr(message, "reply_to_message", None)),
         "empty": getattr(message, "empty", None),
         "chat": _snapshot_chat(getattr(message, "chat", None)),
         "sender_chat": _snapshot_obj(getattr(message, "sender_chat", None), ["id", "title", "username"]),
@@ -431,6 +460,18 @@ def _restore_web_page(d: Optional[dict]) -> Optional[SimpleNamespace]:
     )
 
 
+def _restore_reply(d: Optional[dict]) -> Optional[SimpleNamespace]:
+    """Restore a depth-1 reply target exposing exactly what _format_reply_info reads."""
+    if d is None:
+        return None
+    return SimpleNamespace(
+        id=d.get("id"),
+        text=d.get("text"),
+        caption=d.get("caption"),
+        sender_chat=_ns(d.get("sender_chat"), ["id", "title", "username"]),
+    )
+
+
 def _restore_media(name: Optional[str]) -> Optional[MessageMediaType]:
     if name is None:
         return None
@@ -513,8 +554,10 @@ def _restore_paid_media(d: Optional[dict]) -> Optional[SimpleNamespace]:
 class CachedMessage:
     """Duck-typed stand-in for a pyrogram Message, restored from a snapshot dict.
 
-    Mutable (reply enrichment assigns ``.reply_to_message``). Every top-level attribute the
-    render pipeline reads exists with a None/False default so getattr never raises.
+    ``.reply_to_message`` comes from the snapshot itself (reply targets are resolved at
+    fetch time in cached_get_chat_history and persisted); nothing assigns it post-restore.
+    Every top-level attribute the render pipeline reads exists with a None/False default
+    so getattr never raises.
     """
 
     def __init__(self, data: dict):
@@ -532,7 +575,7 @@ class CachedMessage:
         self.views = data.get("views")
         self.show_caption_above_media = data.get("show_caption_above_media")
         self.reply_to_message_id = data.get("reply_to_message_id")
-        self.reply_to_message = None
+        self.reply_to_message = _restore_reply(data.get("reply_to_message"))
         self.empty = bool(data.get("empty"))
         self.chat = _restore_chat(data.get("chat"))
         self.sender_chat = _ns(data.get("sender_chat"), ["id", "title", "username"])

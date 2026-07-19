@@ -22,7 +22,6 @@ from pyrogram import errors, Client
 from pyrogram.types import Message
 from post_parser import PostParser, _wrap_post_html
 from config import get_settings
-from tg_throttle import tg_rpc_bounded
 from sanitizer import sanitize_html
 
 Config = get_settings()
@@ -214,7 +213,7 @@ def _stable_guid_basis(group: list[Message]) -> tuple[str, object]:
 @dataclass
 class PreparedFeed:
     """Output of _prepare_feed_posts — everything both formatters need after
-    fetch -> enrich -> render -> filter -> sanitize."""
+    fetch -> render -> filter -> sanitize."""
     channel_username: str
     channel_title: str            # used by RSS metadata only
     posts: list[dict]             # rendered, filtered, sorted, SANITIZED
@@ -534,13 +533,14 @@ async def _prepare_feed_posts(channel: str | int,
                               exclude_text: str | None,
                               merge_seconds: int,
                               history_limit: int,
-                              enrich_replies: bool,
                               log_prefix: str) -> PreparedFeed:
     """Single code path feeding both feeds: validate -> resolve chat -> fetch history ->
-    (optionally) enrich replies -> render/filter/sort/sanitize in one worker thread. The
-    RSS/HTML formatters used to duplicate this ~80% verbatim; path differences are now
-    EXPLICIT parameters (history_limit: RSS over-fetches limit*2; enrich_replies: HTML-only;
-    log_prefix 'rss'|'html' keeps today's paired log-line names).
+    render/filter/sort/sanitize in one worker thread. The RSS/HTML formatters used to
+    duplicate this ~80% verbatim; path differences are now EXPLICIT parameters
+    (history_limit: RSS over-fetches limit*2; log_prefix 'rss'|'html' keeps today's
+    paired log-line names). Reply targets arrive already resolved from
+    cached_get_chat_history (enriched at fetch time, persisted in the history snapshot),
+    so BOTH feeds render the reply quote without extra RPC here.
 
     Raises ChannelNotFound (formatter -> create_error_feed), re-raises errors.FloodWait
     for both the get_chat and the get_history path (§3.9; api_server -> HTTP 429), and
@@ -598,14 +598,7 @@ async def _prepare_feed_posts(channel: str | int,
     messages_elapsed = time.time() - messages_start_time
     logger.debug(f"{log_prefix}_messages_retrieval_timing: channel {channel}, {len(messages)} messages retrieved in {messages_elapsed:.3f} seconds")
 
-    # 4) Optional reply enrichment (HTML-only today — deliberate, keeps RSS polling cheap).
-    if enrich_replies:
-        enrichment_start_time = time.time()
-        messages = await _reply_enrichment(client, messages)
-        enrichment_elapsed = time.time() - enrichment_start_time
-        logger.debug(f"{log_prefix}_reply_enrichment_timing: channel {channel}, replies enriched in {enrichment_elapsed:.3f} seconds")
-
-    # 5) Process messages into groups and render them. The whole grouping/trimming/
+    # 4) Process messages into groups and render them. The whole grouping/trimming/
     # rendering pipeline is CPU-heavy (per-message rendering) and contains no
     # await, so run it in ONE worker thread to keep the event loop responsive.
     processing_start_time = time.time()
@@ -638,8 +631,8 @@ async def generate_channel_rss(channel: str | int,
     Generate RSS feed for channel using actual messages.
 
     Thin formatter over the shared _prepare_feed_posts: it only turns the prepared,
-    sanitized posts into a feedgen RSS document. RSS over-fetches (history_limit=limit*2)
-    and skips reply enrichment (enrich_replies=False).
+    sanitized posts into a feedgen RSS document. RSS over-fetches (history_limit=limit*2).
+    Reply quotes come pre-resolved from the fetch layer (cached_get_chat_history).
     Args:
         channel: Telegram channel name
         client: Telegram client instance
@@ -657,7 +650,7 @@ async def generate_channel_rss(channel: str | int,
             channel, client,
             limit=limit, exclude_flags=exclude_flags, exclude_text=exclude_text,
             merge_seconds=merge_seconds, history_limit=limit * 2,
-            enrich_replies=False, log_prefix="rss",
+            log_prefix="rss",
         )
 
         channel_username = prepared.channel_username
@@ -754,56 +747,7 @@ async def generate_channel_rss(channel: str | int,
         logger.error(f"generate_channel_rss: channel {channel}, error {str(e)}")
         raise
 
-async def _reply_enrichment(client: Client, messages: list[Message]) -> list[Message]:
-    """
-    Enrich messages with reply-to messages.
-
-    Instead of one API call per message, replies are batched: all message IDs
-    that need enrichment are grouped by chat_id and fetched in a single
-    client.get_messages() call per chat_id.
-    """
-    # Collect messages that need reply enrichment, grouped by chat_id
-    chat_messages: dict[int, list[Message]] = {}
-    for message in messages:
-        if message.reply_to_message_id and message.chat:
-            chat_id = message.chat.id
-            if chat_id not in chat_messages:
-                chat_messages[chat_id] = []
-            chat_messages[chat_id].append(message)
-
-    if not chat_messages:
-        # No messages with replies — return unchanged
-        return messages
-
-    # Build a lookup: {(chat_id, message_id): full_message} using one batch call per chat
-    reply_lookup: dict[tuple[int, int], Message] = {}
-    for chat_id, chat_msgs in chat_messages.items():
-        ids_to_fetch = [m.id for m in chat_msgs]
-        try:
-            # Throttle under the global RPC gate and bound the call via the shared
-            # tg_rpc_bounded so a hung get_messages cannot pin the gate.
-            async with tg_rpc_bounded(Config["tg_rpc_timeout"]):
-                fetched = await client.get_messages(chat_id, ids_to_fetch)
-            # get_messages may return a single Message or a list
-            if not isinstance(fetched, list):
-                fetched = [fetched]
-            for fm in fetched:
-                if fm and not getattr(fm, 'empty', False):
-                    reply_lookup[(chat_id, fm.id)] = fm
-        except Exception as e:
-            logger.error(f"reply_enrichment_batch_error: chat_id {chat_id}, ids {ids_to_fetch}, error {str(e)}")
-
-    # Apply reply_to_message from lookup
-    for message in messages:
-        if message.reply_to_message_id and message.chat:
-            key = (message.chat.id, message.id)
-            full_message = reply_lookup.get(key)
-            if full_message and full_message.reply_to_message:
-                message.reply_to_message = full_message.reply_to_message
-
-    return messages
-
-async def generate_channel_html(channel: str | int, 
+async def generate_channel_html(channel: str | int,
                                 client: Client,
                                 limit: int = 20, 
                                 exclude_flags: str | None = None,
@@ -814,8 +758,8 @@ async def generate_channel_html(channel: str | int,
     Generate HTML feed for channel using actual messages.
 
     Thin formatter over the shared _prepare_feed_posts: it only joins the prepared,
-    sanitized posts with the <hr> divider. HTML fetches exactly `limit` messages and
-    enables reply enrichment (enrich_replies=True).
+    sanitized posts with the <hr> divider. HTML fetches exactly `limit` messages.
+    Reply quotes come pre-resolved from the fetch layer (cached_get_chat_history).
     Args:
         channel: Telegram channel name
         client: Telegram client instance
@@ -833,7 +777,7 @@ async def generate_channel_html(channel: str | int,
             channel, client,
             limit=limit, exclude_flags=exclude_flags, exclude_text=exclude_text,
             merge_seconds=merge_seconds, history_limit=limit,
-            enrich_replies=True, log_prefix="html",
+            log_prefix="html",
         )
 
         final_posts = prepared.posts

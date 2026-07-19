@@ -231,6 +231,44 @@ def test_cachedstr_survives_pickle():
 
 
 # --------------------------------------------------------------------------- #
+# Reply-target snapshot (schema v3): a resolved reply_to_message is persisted
+# depth-1 and restored exposing exactly what _format_reply_info reads.
+# --------------------------------------------------------------------------- #
+def test_reply_to_message_roundtrip():
+    reply = SimpleNamespace(
+        id=70,
+        text=FakeStr("quoted reply text", "quoted <b>reply</b> text"),
+        caption=None,
+        sender_chat=SimpleNamespace(id=-100999, title="Src Chan", username="srcuser"),
+    )
+    msg = SimpleNamespace(id=77, reply_to_message_id=70, reply_to_message=reply)
+    restored, snap = _roundtrip(msg)
+
+    assert snap["reply_to_message"]["id"] == 70
+    assert restored.reply_to_message.id == 70
+    assert restored.reply_to_message.text == "quoted reply text"
+    assert restored.reply_to_message.caption is None
+    assert restored.reply_to_message.sender_chat.username == "srcuser"
+
+
+def test_message_without_reply_restores_none():
+    restored, snap = _roundtrip(SimpleNamespace(id=1))
+    assert snap["reply_to_message"] is None
+    assert restored.reply_to_message is None
+
+
+def test_reply_text_truncated_to_300_chars():
+    # The renderer truncates to 100 chars; the snapshot stores 300 (headroom while
+    # bounding cache growth). Longer texts must be stored truncated.
+    long_text = "x" * 500
+    reply = SimpleNamespace(id=71, text=long_text, caption=None, sender_chat=None)
+    restored, snap = _roundtrip(SimpleNamespace(id=78, reply_to_message=reply))
+
+    assert len(snap["reply_to_message"]["text"]) == 300
+    assert restored.reply_to_message.text == "x" * 300
+
+
+# --------------------------------------------------------------------------- #
 # Test 7 — unknown media name -> None, no exception.
 # --------------------------------------------------------------------------- #
 def test_unknown_media_type():
