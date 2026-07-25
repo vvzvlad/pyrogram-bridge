@@ -82,12 +82,36 @@ def test_roundtrip_date_naive_and_aware():
     assert r_aware.date == datetime(2021, 5, 5, 10, 0, 0, tzinfo=timezone.utc)
 
 
-def test_text_falls_back_to_plain_when_no_html():
-    # A bare str (no .html) -> html defaults to the plain text.
-    msg = SimpleNamespace(text="plain only")
-    restored, _ = _roundtrip(msg)
-    assert restored.text.html == "plain only"
+def test_text_html_falls_back_to_escaped_plain_when_no_html():
+    # A bare str (no .html) -> html falls back to the ESCAPED plain text, matching what the
+    # renderers do for a value without .html. Storing it raw would make a cache hit emit
+    # markup where a live fetch emits escaped text.
+    msg = SimpleNamespace(text='<b>x</b> & "y"')
+    restored, snap = _roundtrip(msg)
+    assert snap["text"]["plain"] == '<b>x</b> & "y"'
+    assert snap["text"]["html"] == '&lt;b&gt;x&lt;/b&gt; &amp; &quot;y&quot;'
+    assert restored.text.html == '&lt;b&gt;x&lt;/b&gt; &amp; &quot;y&quot;'
+    assert str(restored.text) == '<b>x</b> & "y"'
     assert isinstance(restored.text, CachedStr)
+
+
+def test_restore_str_defensive_bare_string_payload():
+    # Defensive branch: a bare string where a {'plain','html'} dict is expected. The html must
+    # be the ESCAPED plain, or the divergence _snapshot_str closes would come back.
+    from message_snapshot import _restore_str
+    restored = _restore_str('<b>x</b> & "y"')
+    assert str(restored) == '<b>x</b> & "y"'
+    assert restored.html == '&lt;b&gt;x&lt;/b&gt; &amp; &quot;y&quot;'
+
+
+def test_restore_str_defensive_null_html():
+    # A stored html of None must NOT survive: CachedStr.html is read as text.html.replace(...)
+    # by _get_post_text_with_urls, so None would crash the renderer.
+    from message_snapshot import _restore_str
+    restored = _restore_str({"plain": "<b>x</b>", "html": None})
+    assert restored.html == "&lt;b&gt;x&lt;/b&gt;"
+    # An explicitly stored empty html is still honoured (only None falls back).
+    assert _restore_str({"plain": "<b>x</b>", "html": ""}).html == ""
 
 
 # --------------------------------------------------------------------------- #
@@ -251,21 +275,53 @@ def test_reply_to_message_roundtrip():
     assert restored.reply_to_message.sender_chat.username == "srcuser"
 
 
+def test_reply_text_html_survives_roundtrip():
+    # The renderer quotes the reply target via .html, so the entity formatting must be
+    # persisted alongside the plain text (v5 schema).
+    reply = SimpleNamespace(
+        id=71,
+        text=FakeStr("bold quote", "<b>bold</b> quote"),
+        caption=None,
+        sender_chat=None,
+    )
+    restored, snap = _roundtrip(SimpleNamespace(id=79, reply_to_message=reply))
+
+    assert snap["reply_to_message"]["text"] == {"plain": "bold quote", "html": "<b>bold</b> quote"}
+    assert restored.reply_to_message.text.html == "<b>bold</b> quote"
+    assert str(restored.reply_to_message.text) == "bold quote"
+
+
+def test_reply_from_user_roundtrip():
+    reply = SimpleNamespace(
+        id=72,
+        text="user reply",
+        caption=None,
+        sender_chat=None,
+        from_user=SimpleNamespace(id=5, first_name="John", last_name="Doe", username="johndoe"),
+    )
+    restored, snap = _roundtrip(SimpleNamespace(id=80, reply_to_message=reply))
+
+    assert snap["reply_to_message"]["from_user"]["username"] == "johndoe"
+    assert restored.reply_to_message.from_user.first_name == "John"
+    assert restored.reply_to_message.from_user.last_name == "Doe"
+    assert restored.reply_to_message.from_user.username == "johndoe"
+
+
 def test_message_without_reply_restores_none():
     restored, snap = _roundtrip(SimpleNamespace(id=1))
     assert snap["reply_to_message"] is None
     assert restored.reply_to_message is None
 
 
-def test_reply_text_truncated_to_300_chars():
-    # The renderer truncates to 100 chars; the snapshot stores 300 (headroom while
-    # bounding cache growth). Longer texts must be stored truncated.
+def test_reply_text_stored_in_full():
+    # The renderer shows the FULL quote (no 100-char cut), so the snapshot must not
+    # truncate either — otherwise a cache hit would render a shorter quote than a live fetch.
     long_text = "x" * 500
     reply = SimpleNamespace(id=71, text=long_text, caption=None, sender_chat=None)
     restored, snap = _roundtrip(SimpleNamespace(id=78, reply_to_message=reply))
 
-    assert len(snap["reply_to_message"]["text"]) == 300
-    assert restored.reply_to_message.text == "x" * 300
+    assert len(snap["reply_to_message"]["text"]["plain"]) == 500
+    assert str(restored.reply_to_message.text) == long_text
 
 
 # --------------------------------------------------------------------------- #

@@ -285,11 +285,12 @@ async def test_get_post_html_album_debug_includes_raw_message():
 
 
 # ---------------------------------------------------------------------------
-# 6. Snapshot schema v4: document.file_name survives the round trip
+# 6. Snapshot schema (v5 current): document.file_name survives the round trip
 # ---------------------------------------------------------------------------
 
-def test_snapshot_version_is_4():
-    assert SNAPSHOT_VERSION == 4
+def test_snapshot_version_is_current():
+    # v5: reply targets store full text + html + from_user (reply-block render change).
+    assert SNAPSHOT_VERSION == 5
 
 
 def test_document_file_name_survives_roundtrip():

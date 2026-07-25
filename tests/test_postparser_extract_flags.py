@@ -6,6 +6,7 @@
 # pylance: disable=reportMissingImports, reportMissingModuleSource
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, PropertyMock
 
 from pyrogram.types import Message, Chat, Reaction, MessageReactions
@@ -483,6 +484,95 @@ class TestPostParserExtractFlags(unittest.TestCase):
         # Use _generate_html_body to ensure link detection logic runs
         _ = self.parser._generate_html_body(message)
         self.assertIn("link", self.parser._extract_flags(message))
+
+    # --- Reply/pinned blocks must NOT contribute flags (they quote SOMEONE ELSE's post,
+    #     while flags describe this post's own content and are a public filter via
+    #     exclude_flags). ---
+
+    _NOISY_QUOTE = 'Quoted: @somechannel https://example.com https://t.me/otherchannel'
+
+    def _noisy_reply_target(self):
+        return SimpleNamespace(
+            id=4145,
+            text=StrWithHtml(self._NOISY_QUOTE),
+            caption=None,
+            sender_chat=SimpleNamespace(id=-1009999999999, title="Other Chan", username="somechannel"),
+            from_user=None,
+        )
+
+    def test_reply_block_does_not_leak_flags(self):
+        own_text = "Обычный пост без ссылок и упоминаний"
+        baseline = self.parser._extract_flags(self._create_mock_message(text=own_text))
+
+        message = self._create_mock_message(text=own_text)
+        message.reply_to_message = self._noisy_reply_target()
+        flags = self.parser._extract_flags(message)
+
+        self.assertCountEqual(flags, baseline, "the reply block changed the flag set")
+        for leaked in ("mention", "link", "foreign_channel"):
+            self.assertNotIn(leaked, flags, f"'{leaked}' leaked from the quoted post")
+        # The rendered body still carries the quote — only flag detection ignores it.
+        self.assertIn("Other Chan (@somechannel)", self.parser._generate_html_body(message))
+        self.assertIn("t.me/otherchannel", self.parser._generate_html_body(message))
+
+    def test_pinned_block_does_not_leak_flags(self):
+        own_text = "Обычный пост без ссылок и упоминаний"
+        baseline = self.parser._extract_flags(self._create_mock_message(text=own_text))
+
+        message = self._create_mock_message(text=own_text)
+        message.reply_to_message = self._noisy_reply_target()
+        message.service = "MessageServiceType.PINNED_MESSAGE"
+        flags = self.parser._extract_flags(message)
+
+        self.assertCountEqual(flags, baseline, "the pinned block changed the flag set")
+        for leaked in ("mention", "link", "foreign_channel"):
+            self.assertNotIn(leaked, flags, f"'{leaked}' leaked from the pinned quote")
+        self.assertIn('<div class="message-pinned">', self.parser._generate_html_body(message))
+
+    def test_reply_quote_with_literal_closing_div_does_not_leak_flags(self):
+        # pyrogram's .html leaves text outside entity ranges unescaped, so a quoted post can
+        # contain a literal </div>. A regex cut would end early there and leak the rest.
+        own_text = "Обычный пост без ссылок и упоминаний"
+        baseline = self.parser._extract_flags(self._create_mock_message(text=own_text))
+
+        message = self._create_mock_message(text=own_text)
+        message.reply_to_message = SimpleNamespace(
+            id=4146,
+            # The </div><br> tail mimics the real end of the block, so a regex anchored on it
+            # would ALSO cut early here — the exact-fragment removal does not care.
+            text=StrWithHtml('start </div><br> @somebody https://example.com https://t.me/otherchan'),
+            caption=None,
+            sender_chat=None,
+            from_user=None,
+        )
+        flags = self.parser._extract_flags(message)
+
+        self.assertCountEqual(flags, baseline, "the reply block changed the flag set")
+        for leaked in ("mention", "link", "foreign_channel"):
+            self.assertNotIn(leaked, flags, f"'{leaked}' leaked past a literal </div> in the quote")
+
+    def test_literal_reply_div_in_own_text_does_not_swallow_own_flags(self):
+        # A post whose OWN text contains the block's opening tag must keep its own flags: a
+        # greedy/DOTALL regex cut would eat the rest of the body and let the author bypass
+        # the public exclude_flags filter.
+        message = self._create_mock_message(
+            text='<div class="message-reply"> @myfriend https://example.org https://t.me/foreignchan')
+        flags = self.parser._extract_flags(message)
+
+        self.assertIn("mention", flags)
+        self.assertIn("link", flags)
+        self.assertIn("foreign_channel", flags)
+
+    def test_own_content_still_flags_when_a_reply_block_is_present(self):
+        # The strip must not swallow the post's OWN mention/link/foreign-channel content.
+        message = self._create_mock_message(
+            text="Мой пост: @myfriend https://example.org https://t.me/foreignchan")
+        message.reply_to_message = self._noisy_reply_target()
+        flags = self.parser._extract_flags(message)
+
+        self.assertIn("mention", flags)
+        self.assertIn("link", flags)
+        self.assertIn("foreign_channel", flags)
 
     def test_get_all_possible_flags_returns_list(self):
         """Test that get_all_possible_flags returns a list with more than one flag."""

@@ -618,28 +618,107 @@ class PostParser:
         return title
 
 
+    def _reply_author_label(self, reply_to: Any) -> str:
+        """Human-readable author of a reply target (channel title / user name / #id).
+
+        Only getattr is used: restored cache snapshots are SimpleNamespace objects that
+        may lack whole attributes (e.g. from_user), so plain attribute access would raise.
+        Formatting mirrors _get_author_info / _format_forward_info: "Title (@username)".
+        """
+        sender_chat = getattr(reply_to, "sender_chat", None)
+        if sender_chat is not None:
+            title = getattr(sender_chat, "title", None)
+            username = getattr(sender_chat, "username", None)
+            title = title.strip() if title else ''
+            username = username.strip() if username else ''
+            if username:
+                return f"{title} (@{username})" if title else f"@{username}"
+            if title:
+                return title
+
+        from_user = getattr(reply_to, "from_user", None)
+        if from_user is not None:
+            first = getattr(from_user, "first_name", None)
+            last = getattr(from_user, "last_name", None)
+            username = getattr(from_user, "username", None)
+            first = first.strip() if first else ''
+            last = last.strip() if last else ''
+            username = username.strip() if username else ''
+            name = ' '.join(filter(None, [first, last]))
+            if name:
+                return f"{name} (@{username})" if username else name
+            if username:
+                return f"@{username}"
+
+        reply_id = getattr(reply_to, "id", None)
+        if reply_id is not None:
+            return f"#{reply_id}"
+        return "Unknown author"
+
+    def _reply_target_url(self, reply_to: Any) -> Optional[str]:
+        """Public t.me link to the reply target, or None when it cannot be built."""
+        reply_id = getattr(reply_to, "id", None)
+        if not reply_id:
+            # id 0 is not a real message id — it would build a link to nothing.
+            return None
+        sender_chat = getattr(reply_to, "sender_chat", None)
+        if sender_chat is None:
+            return None
+        username = getattr(sender_chat, "username", None)
+        if username:
+            return f"https://t.me/{username}/{reply_id}"
+        chat_id = getattr(sender_chat, "id", None)
+        if chat_id is not None:
+            chat_id_str = str(chat_id)
+            if chat_id_str.startswith('-100'):
+                # Private-channel web link convention, same as the footer links below.
+                return f"https://t.me/c/{chat_id_str[4:]}/{reply_id}"
+        return None
+
+    def _format_reply_quote(self, reply_to: Any) -> str:
+        """Full (never truncated) HTML-safe quote of a reply target."""
+        value = getattr(reply_to, "text", None) or getattr(reply_to, "caption", None) or ''
+        if not value:
+            return ''
+        # Live pyrogram Str and the cached CachedStr both expose .html with the entity
+        # formatting preserved; a plain string must be escaped before entering the markup.
+        raw_html = getattr(value, "html", None)
+        quote = str(raw_html) if raw_html is not None else html.escape(str(value))
+        quote = quote.replace('\n', '<br>')
+        # Same treatment as the post body: bare URLs inside the quote become clickable.
+        return self._add_hyperlinks_to_raw_urls(quote)
+
     def _format_reply_info(self, message: Message) -> Union[str, None]:
         is_pinned = (getattr(message, "service", None) and 'PINNED_MESSAGE' in str(message.service))
         reply_to = getattr(message, "reply_to_message", None)
         if is_pinned and reply_to:
-            reply_text = reply_to.text or reply_to.caption or ''
-            if len(reply_text) > 100:
-                reply_text = reply_text[:100] + '...'
-            return f'<div class="message-pinned">Pinned: {reply_text}</div><br>'
-        
+            quote = self._format_reply_quote(reply_to)
+            if quote:
+                return f'<div class="message-pinned">Pinned: {quote}</div><br>'
+            return f'<div class="message-pinned">Pinned message</div><br>'
+
         if reply_to:
-            reply_text = reply_to.text or reply_to.caption or ''
-            if len(reply_text) > 100:
-                reply_text = reply_text[:100] + '...'
-            
-            channel_username = getattr(reply_to.sender_chat, "username", None)
-            if channel_username:
-                reply_link = f'<a href="https://t.me/{channel_username}/{reply_to.id}">#{reply_to.id}</a>'
-                return f'<div class="message-reply">Reply to {reply_link}: {reply_text}</div><br>'
-            return f'<div class="message-reply">Reply to #{reply_to.id}: {reply_text}</div><br>'
-        
+            quote = self._format_reply_quote(reply_to)
+            label = html.escape(self._reply_author_label(reply_to))
+            url = self._reply_target_url(reply_to)
+            reply_id = getattr(reply_to, "id", None)
+            id_text = html.escape(f"#{reply_id}") if reply_id else ''
+            if url:
+                # On the linked path the id lives in the anchor tooltip instead of cluttering
+                # the visible link text (the sanitizer allowlist permits title on <a>).
+                title_attr = f' title="#{html.escape(str(reply_id), quote=True)}"' if reply_id else ''
+                target = f'<a href="{html.escape(url, quote=True)}"{title_attr}>{label}</a>'
+            else:
+                # No link to hang a tooltip on: keep the id visible, as the old block did.
+                # A comma form avoids double parentheses after a "Name (@user)" label, and the
+                # id is skipped when the label already IS the id fallback (no "#53, #53").
+                target = f'{label}, {id_text}' if id_text and label != id_text else label
+            if quote:
+                return f'<div class="message-reply">Reply to {target}:<br>{quote}</div><br>'
+            return f'<div class="message-reply">Reply to {target}</div><br>'
+
         return None
-    
+
     def _extract_reactions(self, message: Message) -> Union[Dict[str, int], None]:
         if reactions := getattr(message, 'reactions', None):
             result: Dict[str, int] = {}
@@ -667,6 +746,21 @@ class PostParser:
             message_body_html = self._generate_html_body(message)
         else:
             message_body_html = html_body
+        # Flags describe the POST's own content, never the quoted one: the reply/pinned
+        # blocks carry the author label (with its @username) and the full HTML of somebody
+        # else's message, which would otherwise leak into the mention / link / hid_channel /
+        # foreign_channel detection below and silently change public exclude_flags results.
+        # The block is removed as an EXACT fragment (re-rendered here; _format_reply_info is
+        # pure and does no RPC) rather than matched by a regex: pyrogram's .html leaves text
+        # outside entity ranges unescaped, so a literal </div> or <div class="message-reply">
+        # coming from user text would make any regex cut too little or far too much.
+        # INVARIANT: _generate_html_body emits this block BEFORE the post text and media, so
+        # replace(..., 1) always hits the generated block and never a look-alike copy planted
+        # in the post's own text. Revisit flag detection if that ordering ever changes.
+        # The stripped copy is local to flag detection — the rendered body stays untouched.
+        reply_block = self._format_reply_info(message)
+        if reply_block:
+            message_body_html = message_body_html.replace(reply_block, '', 1)
         flags = []
 
         # Add "fwd" flag for forwarded messages

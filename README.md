@@ -124,6 +124,8 @@ There are several flags:
 - mention - presence of @username mentions in the post
 - vebinar - words like "вебинар" and its variations
 
+Flags describe the post's own content: mentions and links inside a quoted (reply or pinned) message do not produce the `mention`, `link`, `hid_channel` or `foreign_channel` flags.
+
 You can use exclude_flags parameter in rss/html/json urls to exclude posts with certain flags. For example, to exclude all posts with the flags "video", "stream", "donat", "clown", you can use:
 
 ``` curl https://pgbridge.example.com/rss/DragorWW_space?exclude_flags=video,stream,donat,clown ```

@@ -15,11 +15,12 @@ a duck-typed CachedMessage is restored that is indistinguishable from a real Mes
 to the render pipeline (post_parser.py / rss_generator.py are NOT changed).
 """
 
+import html
 import json
 import logging
 from datetime import datetime
 from types import SimpleNamespace
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Union
 
 from pyrogram.enums import MessageMediaType
 
@@ -37,7 +38,11 @@ logger = logging.getLogger(__name__)
 # v4: added document.file_name (needed by the new generic-file render block); a v3 file
 # lacks it, so a cached document post would render a nameless file block — invalidate
 # v3 files (one-time refetch).
-SNAPSHOT_VERSION = 4
+# v5: reply targets now store the FULL text/caption as {'plain','html'} (was: plain text
+# truncated to 300 chars) plus from_user, so the reply block renders the complete quote
+# with its formatting and the author name on a cache hit — invalidate v4 files (one-time
+# refetch).
+SNAPSHOT_VERSION = 5
 
 
 class CachedStr(str):
@@ -82,15 +87,18 @@ def _snapshot_str(value: Any) -> Optional[dict]:
     """Snapshot a text/caption value: {'plain', 'html'} or None if absent.
 
     ``.html`` is computed at write time (live pyrogram Str exposes it); if unavailable the
-    html falls back to the plain text.
+    html falls back to the ESCAPED plain text. Escaping is what the renderers do for a
+    value without ``.html`` (post_parser._format_reply_quote), so storing the raw plain
+    text here would make a cache hit emit raw markup where a live fetch emits escaped
+    text — the restored and the live render must be byte-identical.
     """
     if value is None:
         return None
     plain = str(value)
-    html = getattr(value, "html", None)
-    if html is None:
-        html = plain
-    return {"plain": plain, "html": str(html)}
+    html_value = getattr(value, "html", None)
+    if html_value is None:
+        html_value = html.escape(plain)
+    return {"plain": plain, "html": str(html_value)}
 
 
 def _enum_name(value: Any) -> Any:
@@ -199,28 +207,26 @@ def _snapshot_web_page(wp: Any) -> Optional[dict]:
     }
 
 
-# Reply-target texts are truncated at snapshot time: the renderer
-# (_format_reply_info) truncates to 100 chars anyway, so 300 keeps headroom for a
-# future render change while bounding cache growth for channels with long posts.
-_REPLY_TEXT_MAX_CHARS = 300
+# Reply-target texts are stored IN FULL (and with their .html rendering): the renderer
+# (_format_reply_info) shows the complete quote, so any truncation here would silently
+# shorten the quote on a cache hit and diverge from the live-fetch render path.
 
 
 def _snapshot_reply(reply: Any) -> Optional[dict]:
     """DEPTH-1 snapshot of a resolved reply target (message.reply_to_message).
 
     Stores ONLY the fields _format_reply_info (post_parser.py) reads: id, text,
-    caption, sender_chat(id/title/username). The reply's own nested
-    reply_to_message is deliberately NOT snapshotted (no recursion).
+    caption, sender_chat(id/title/username), from_user(id/first_name/last_name/username).
+    The reply's own nested reply_to_message is deliberately NOT snapshotted (no recursion).
     """
     if reply is None:
         return None
-    text = _unwrap_text(getattr(reply, "text", None))
-    caption = _unwrap_text(getattr(reply, "caption", None))
     return {
         "id": getattr(reply, "id", None),
-        "text": text[:_REPLY_TEXT_MAX_CHARS] if text is not None else None,
-        "caption": caption[:_REPLY_TEXT_MAX_CHARS] if caption is not None else None,
+        "text": _snapshot_str(getattr(reply, "text", None)),
+        "caption": _snapshot_str(getattr(reply, "caption", None)),
         "sender_chat": _snapshot_obj(getattr(reply, "sender_chat", None), ["id", "title", "username"]),
+        "from_user": _snapshot_obj(getattr(reply, "from_user", None), ["id", "first_name", "last_name", "username"]),
     }
 
 
@@ -469,9 +475,10 @@ def _restore_reply(d: Optional[dict]) -> Optional[SimpleNamespace]:
         return None
     return SimpleNamespace(
         id=d.get("id"),
-        text=d.get("text"),
-        caption=d.get("caption"),
+        text=_restore_str(d.get("text")),
+        caption=_restore_str(d.get("caption")),
         sender_chat=_ns(d.get("sender_chat"), ["id", "title", "username"]),
+        from_user=_ns(d.get("from_user"), ["id", "first_name", "last_name", "username"]),
     )
 
 
@@ -487,10 +494,20 @@ def _restore_media(name: Optional[str]) -> Optional[MessageMediaType]:
         return None
 
 
-def _restore_str(d: Optional[dict]) -> Optional[CachedStr]:
+def _restore_str(d: Optional[Union[dict, str]]) -> Optional[CachedStr]:
     if d is None:
         return None
-    return CachedStr.build(d.get("plain", ""), d.get("html", d.get("plain", "")))
+    # Defensive: a pre-v5 payload (or a hand-built one) may carry a bare string here. It is
+    # escaped for the same live-vs-cache parity reason as in _snapshot_str.
+    if isinstance(d, str):
+        return CachedStr.build(d, html.escape(d))
+    plain = d.get("plain", "")
+    # Uniform policy with _snapshot_str and the bare-string branch above: with no stored html
+    # the plain text is escaped. A stored empty string is honoured, but None is not — a
+    # CachedStr whose .html is None would crash _get_post_text_with_urls (text.html.replace).
+    stored = d.get("html")
+    html_value = stored if stored is not None else html.escape(plain)
+    return CachedStr.build(plain, html_value)
 
 
 # --------------------------------------------------------------------------- #

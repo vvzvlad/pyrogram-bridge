@@ -244,7 +244,8 @@ async def test_cached_get_chat_history_enriches_and_snapshots_replies(monkeypatc
     snap = snapshot_messages(saved["messages"])[0]
     assert snap["reply_to_message"] is not None, "reply target missing from the snapshot payload"
     assert snap["reply_to_message"]["id"] == 77 + 5000
-    assert snap["reply_to_message"]["text"] == f"TARGET_{CHAT}_77"
+    # Reply text is stored as {'plain','html'} since schema v5 (full quote + formatting).
+    assert snap["reply_to_message"]["text"]["plain"] == f"TARGET_{CHAT}_77"
 
 
 # --------------------------------------------------------------------------- #
