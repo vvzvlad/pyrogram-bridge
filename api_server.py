@@ -46,7 +46,7 @@ from kurigram_compat import (
     get_rich_part_seen_count,
 )
 from post_parser import PostParser
-from url_signer import verify_media_digest
+from url_signer import verify_media_digest, verify_bridge_link_digest
 from file_io import (DB_PATH, init_db_sync, get_all_media_file_ids_sync,
                      update_media_file_access_sync, update_media_file_access_bulk_sync,
                      remove_media_file_ids_sync, remove_media_file_ids_if_unchanged_sync,
@@ -1414,7 +1414,9 @@ def is_local_request(request: Request) -> bool:
     return client_ip in local_hosts
 
 
-def _enforce_token(request: Request, token: str | None, endpoint: str) -> None:
+def _enforce_token(request: Request, token: str | None, endpoint: str,
+                   bridge_link: tuple[str, int] | None = None,
+                   bridge_sig: str | None = None) -> None:
     """Authorize a request against the shared-secret token unless it is local.
 
     Security invariants (issue #56): never log the presented token or the expected
@@ -1423,17 +1425,34 @@ def _enforce_token(request: Request, token: str | None, endpoint: str) -> None:
     either secret. The comparison is constant-time (hmac.compare_digest over the
     UTF-8 bytes, which also tolerates a non-ASCII presented token without raising)
     to deny a timing side-channel on the token value.
+
+    Bridge-link digest (issue #66): the /html endpoint additionally passes
+    ``bridge_link=(channel, post_id)`` and the presented ``bridge_sig``. A digest that
+    verifies for exactly that (channel, post_id) authorizes read-only access to ONLY that
+    one post's html — it is scoped and never grants the master token, the API, or any
+    other endpoint. Every other caller leaves ``bridge_link`` None, so this path is
+    unreachable for them and the master-token contract there is byte-unchanged. The digest
+    is never logged (same #56 invariant as the token).
     """
     if not Config["token"]:
         return
     if is_local_request(request):
         logger.info("Local request, skipping token check for %s.", endpoint)
         return
-    if not hmac.compare_digest((token or "").encode("utf-8"), str(Config["token"]).encode("utf-8")):
-        presented_hash = hashlib.sha256((token or "").encode("utf-8")).hexdigest()[:8]
-        logger.error("invalid_token for %s (presented token sha256:%s)", endpoint, presented_hash)
-        raise HTTPException(status_code=403, detail="Invalid token")
-    logger.info("Valid token for %s", endpoint)
+    # Master-token path — unchanged behaviour: a matching token authorizes everything.
+    if hmac.compare_digest((token or "").encode("utf-8"), str(Config["token"]).encode("utf-8")):
+        logger.info("Valid token for %s", endpoint)
+        return
+    # Scoped bridge-link digest path: only reachable for the /html endpoint (the sole
+    # caller that passes bridge_link). Authorizes read of exactly the (channel, post_id)
+    # it is scoped to; useless for any other post or endpoint (message binding + domain
+    # separation from media digests, verified in url_signer).
+    if bridge_link is not None and verify_bridge_link_digest(bridge_link[0], bridge_link[1], bridge_sig):
+        logger.info("Valid bridge-link digest for %s", endpoint)
+        return
+    presented_hash = hashlib.sha256((token or "").encode("utf-8")).hexdigest()[:8]
+    logger.error("invalid_token for %s (presented token sha256:%s)", endpoint, presented_hash)
+    raise HTTPException(status_code=403, detail="Invalid token")
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -1473,8 +1492,10 @@ async def index() -> HTMLResponse:
 @app.get("/post/html/{channel}/{post_id}", response_class=HTMLResponse)
 @app.get("/html/{channel}/{post_id}/{token}", response_class=HTMLResponse)  
 @app.get("/post/html/{channel}/{post_id}/{token}", response_class=HTMLResponse)
-async def get_post_html(channel: str, post_id: int, request: Request, token: str | None = None, debug: bool = False) -> HTMLResponse:
-    _enforce_token(request, token, "HTML post")
+async def get_post_html(channel: str, post_id: int, request: Request, token: str | None = None, sig: str | None = None, debug: bool = False) -> HTMLResponse:
+    # ``sig`` is the scoped bridge-link digest (issue #66); it authorizes ONLY this
+    # (channel, post_id) html read. The master-token path is unchanged.
+    _enforce_token(request, token, "HTML post", bridge_link=(channel, post_id), bridge_sig=sig)
         
     try:
         parser = PostParser(client.client)

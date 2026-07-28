@@ -22,6 +22,15 @@ SCOPE_PREFIX = "media:v2:"
 NEW_DIGEST_LEN = 32          # 128 bits of HMAC-SHA256, hex
 LEGACY_DIGEST_LEN = 8        # legacy: 32 bits of HMAC-SHA1, hex
 
+# --- bridge-link signing scheme (issue #66) ----------------------------------
+# The "Open in Bridge" link used to embed the raw master token in the URL, leaking it
+# via access-logs / Referer / browser history / feed sharing. Instead we sign a per-post
+# scoped digest that authorizes read-only access to ONLY that one post's /html/<ch>/<id>
+# (never the full API). A DISTINCT scope prefix domain-separates it from media digests so
+# a bridge-link digest can NEVER be replayed as a media digest and vice-versa.
+BRIDGE_LINK_SCOPE_PREFIX = "bridge-link:v1:"
+BRIDGE_LINK_DIGEST_LEN = 32  # 128 bits of HMAC-SHA256, hex
+
 # HKDF (RFC 5869) parameters used to derive the actual signing key from the source secret.
 _HKDF_INFO = b"pyrogram-bridge media url signing v2"
 _HKDF_SALT = b""             # empty -> HKDF-Extract uses an all-zero salt block
@@ -229,3 +238,39 @@ def verify_media_digest(url: str, digest: str | None, exp: int | None = None) ->
             return False
 
     return True
+
+
+# --- bridge-link digest (issue #66) ------------------------------------------
+def generate_bridge_link_digest(channel: str, message_id) -> str:
+    """Generate the bridge-link digest: HMAC-SHA256 over the scoped (channel, message_id)
+    tuple, 32 hex chars.
+
+    The signed message is f"bridge-link:v1:{channel}/{message_id}" (domain-separated from
+    media digests via the distinct scope prefix). The digest is STABLE (no TTL): being
+    scoped to one post already limits any leak to that ONE post's read-only html — never
+    the API — which matches the stateless media-digest design. Same HKDF-derived signing
+    key as media signing (single-source; no new secret is invented).
+    """
+    signing_key = KeyManager.get_or_create_signing_key()
+    message = f"{BRIDGE_LINK_SCOPE_PREFIX}{channel}/{message_id}"
+    signature = hmac.new(signing_key.encode('utf-8'), message.encode('utf-8'), hashlib.sha256)
+    return signature.hexdigest()[:BRIDGE_LINK_DIGEST_LEN]
+
+
+def verify_bridge_link_digest(channel: str, message_id, digest: str | None) -> bool:
+    """Verify a bridge-link digest for exactly this (channel, message_id). Constant-time.
+
+    Returns True only when ``digest`` is the correct signature for THIS specific post; a
+    digest minted for a different post, or a media digest (different scope prefix), will not
+    verify (message binding + domain separation). Never logs the digest or the secret.
+    """
+    if not digest:
+        return False
+    # A well-formed digest is exactly BRIDGE_LINK_DIGEST_LEN lowercase-hex chars (the truncated
+    # HMAC hexdigest). Reject anything else BEFORE hmac.compare_digest: that raises TypeError on a
+    # non-ASCII str, which would surface as an uncaught HTTP 500 (cheap DoS) instead of a clean
+    # 403. A malformed/hostile `sig` is simply "unauthorized".
+    if len(digest) != BRIDGE_LINK_DIGEST_LEN or any(c not in "0123456789abcdef" for c in digest):
+        return False
+    expected = generate_bridge_link_digest(channel, message_id)
+    return hmac.compare_digest(expected, digest)

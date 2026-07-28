@@ -22,7 +22,7 @@ from pyrogram.enums import MessageMediaType
 from sanitizer import sanitize_html
 from config import get_settings
 from file_io import upsert_media_file_ids_bulk_sync, DB_PATH
-from url_signer import generate_media_digest, media_url_expiry
+from url_signer import generate_media_digest, media_url_expiry, generate_bridge_link_digest
 
 Config = get_settings()
 
@@ -1410,8 +1410,13 @@ class PostParser:
                     links.append(f'<a href="tg://resolve?domain={channel_identifier}&post={message.id}">Open in Telegram</a>')
                     links.append(f'<a href="https://t.me/{channel_identifier}/{message.id}">Open in Web</a>')
                 if Config['show_bridge_link']:
-                    token = Config['token']
-                    links.append(f'<a href="{base_url}/html/{channel_identifier}/{message.id}?token={token}&debug=true">Open in Bridge</a>')
+                    # Sign a per-post scoped digest instead of embedding the raw master
+                    # token in the URL (issue #66): the digest authorizes read-only /html
+                    # of THIS post only — never the API — so a leaked link (access-logs /
+                    # Referer / history / shared feed) can't expose the admin token or open
+                    # any other endpoint.
+                    sig = generate_bridge_link_digest(channel_identifier, message.id)
+                    links.append(f'<a href="{base_url}/html/{channel_identifier}/{message.id}?sig={sig}&debug=true">Open in Bridge</a>')
                 
                 if links:
                     parts.append('&nbsp;|&nbsp;'.join(links))

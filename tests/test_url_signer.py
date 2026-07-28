@@ -18,9 +18,13 @@ from url_signer import (
     verify_media_digest,
     media_url_expiry,
     _generate_legacy_digest,
+    generate_bridge_link_digest,
+    verify_bridge_link_digest,
     NEW_DIGEST_LEN,
     LEGACY_DIGEST_LEN,
     SCOPE_PREFIX,
+    BRIDGE_LINK_SCOPE_PREFIX,
+    BRIDGE_LINK_DIGEST_LEN,
 )
 
 
@@ -212,3 +216,67 @@ def test_expiry_url_shape_unchanged_when_off(monkeypatch):
     url = "durov/12/AgADnoexp"
     digest = generate_media_digest(url)  # exp=None
     assert verify_media_digest(url, digest, None) is True
+
+
+# --------------------------------------------------------------------------- #
+# Bridge-link digest (issue #66) — scoped, stable, read-only-one-post
+# --------------------------------------------------------------------------- #
+def test_bridge_link_roundtrip(monkeypatch):
+    _use_secret(monkeypatch)
+    digest = generate_bridge_link_digest("durov", 42)
+    assert len(digest) == BRIDGE_LINK_DIGEST_LEN == 32
+    assert all(c in "0123456789abcdef" for c in digest)
+    assert verify_bridge_link_digest("durov", 42, digest) is True
+
+
+def test_bridge_link_uses_sha256_and_scope(monkeypatch):
+    _use_secret(monkeypatch)
+    key = KeyManager.get_or_create_signing_key()
+    expected = hmac.new(key.encode(), f"{BRIDGE_LINK_SCOPE_PREFIX}durov/42".encode(),
+                        hashlib.sha256).hexdigest()[:32]
+    assert generate_bridge_link_digest("durov", 42) == expected
+    # A bare-body (unscoped) digest must NOT verify -- proves the scope prefix is applied.
+    unscoped = hmac.new(key.encode(), b"durov/42", hashlib.sha256).hexdigest()[:32]
+    assert verify_bridge_link_digest("durov", 42, unscoped) is False
+
+
+def test_bridge_link_binds_post(monkeypatch):
+    """A digest scoped to post A must never authorize post B (message binding)."""
+    _use_secret(monkeypatch)
+    digest_a = generate_bridge_link_digest("chanA", 1)
+    assert verify_bridge_link_digest("chanA", 1, digest_a) is True
+    assert verify_bridge_link_digest("chanA", 2, digest_a) is False   # other post id
+    assert verify_bridge_link_digest("chanB", 1, digest_a) is False   # other channel
+    assert verify_bridge_link_digest("chanA", 1, None) is False
+    assert verify_bridge_link_digest("chanA", 1, "") is False
+
+
+def test_bridge_link_tamper_rejected(monkeypatch):
+    _use_secret(monkeypatch)
+    digest = generate_bridge_link_digest("chanA", 1)
+    tampered = ("0" if digest[0] != "0" else "1") + digest[1:]
+    assert verify_bridge_link_digest("chanA", 1, tampered) is False
+
+
+def test_bridge_link_domain_separation_from_media(monkeypatch):
+    """Domain separation: a media digest must NOT verify as a bridge-link digest and
+    vice-versa, EVEN when both sign the identical body "chan/1".
+
+    This is the non-vacuous scope-prefix guard: generate_media_digest("chan/1") signs
+    ``media:v2:chan/1`` while generate_bridge_link_digest("chan", 1) signs
+    ``bridge-link:v1:chan/1`` -- same body, different scope prefix. If either prefix were
+    neutered (set to ""), both would reduce to HMAC over the bare "chan/1" and the two
+    cross-verifications below would start PASSING, reddening this test.
+    """
+    _use_secret(monkeypatch)
+    media_dig = generate_media_digest("chan/1")           # body "chan/1", media scope
+    bridge_dig = generate_bridge_link_digest("chan", 1)   # body "chan/1", bridge scope
+
+    # Sanity: each verifies under its OWN scheme.
+    assert verify_media_digest("chan/1", media_dig) is True
+    assert verify_bridge_link_digest("chan", 1, bridge_dig) is True
+
+    # Cross-verification must fail in BOTH directions -- the scope prefix is the only thing
+    # that separates the otherwise-identical signed bodies.
+    assert verify_bridge_link_digest("chan", 1, media_dig) is False
+    assert verify_media_digest("chan/1", bridge_dig) is False
