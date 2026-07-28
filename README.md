@@ -67,6 +67,16 @@ docker restart pyrogram-bridge
 
 Session file will be saved in your data directory, in docker compose case — /var/lib/docker/volumes/pyrogram_bridge/_data/pyro_bridge.session.  
 
+## Upgrading
+
+The container runs the service as a non-root user (uid 1000). On start it briefly runs as root only to `chown -R 1000:1000` its data volume (`/app/data`), so upgrading an old install whose volume still holds root-owned files just works — no manual action needed.
+
+The one exception: if you pin `user:` in your compose (e.g. `user: "1000:1000"`), the container never starts as root and cannot fix ownership. In that case, do a one-time manual chown of your volume before starting the new image:
+
+```bash
+docker run --rm -v pyrogram_bridge:/data busybox chown -R 1000:1000 /data
+```
+
 ## ENV Settings 
 
 TG_API_ID - telegram api id  
