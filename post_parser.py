@@ -611,6 +611,11 @@ class PostParser:
         title = None
         title = self._service_message_title(message)
         if title is None: title = self._generate_base_title(message)
+        # Rich posts (Kurigram 2.2.24, #83/#84): fall back to a rich-specific title only
+        # when the base title is empty (a rich post may carry no plain text). If the dump
+        # shows non-empty text the base title wins and this branch is a no-op. Gated on the
+        # attribute so older objects/mocks are unaffected.
+        if title is None and getattr(message, 'rich_message', None) is not None: title = "📰 Rich post"
         if title is None: title = self._media_message_title(message)
         if title is None: title = "❓ Unknown Post"
         if message.forward_origin: title = f"FWD: {title}"
@@ -766,6 +771,11 @@ class PostParser:
         # Add "fwd" flag for forwarded messages
         if message.forward_origin:
             flags.append("fwd")
+
+        # Add "rich" flag for Rich Messages posts (Kurigram 2.2.24, layer 227, #83/#84).
+        # Gated on the attribute so older objects/mocks (which lack it) are unaffected.
+        if getattr(message, 'rich_message', None) is not None:
+            flags.append("rich")
 
         # Add flag "video" if the message media is VIDEO or ANIMATION and the body text is up to 200 characters.
         # LIVE_PHOTO (Kurigram 2.2.23) renders as a video element, so it counts too.
@@ -1458,7 +1468,16 @@ class PostParser:
             media = getattr(message, 'media', None)
             block = None
 
-            if media == MessageMediaType.GIVEAWAY and (giveaway := getattr(message, 'giveaway', None)):
+            # Rich posts (Kurigram 2.2.24, layer 227): message.rich_message is populated,
+            # but there is no renderer yet (phase 1 of #83/#84) — show an honest placeholder
+            # instead of an empty post. Gated on the attribute (older objects/mocks lack it),
+            # independent of message.media: a rich post reports media=None, no longer
+            # UNSUPPORTED. Checked before the UNSUPPORTED branch. (Phase 2 replaces this
+            # with the real rich_tree render.)
+            if getattr(message, 'rich_message', None) is not None:
+                block = "📰 This post uses Telegram's new rich format — full rendering is coming; open it in Telegram."
+
+            elif media == MessageMediaType.GIVEAWAY and (giveaway := getattr(message, 'giveaway', None)):
                 quantity = getattr(giveaway, 'quantity', None)
                 months = getattr(giveaway, 'months', None)
                 stars = getattr(giveaway, 'stars', None)

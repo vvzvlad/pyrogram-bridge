@@ -21,6 +21,12 @@ from pyrogram import Client
 from pyrogram.handlers import DisconnectHandler
 from config import get_settings
 
+import kurigram_compat
+# Install the defensive Rich* parse wrappers BEFORE any Client is created / any message is
+# parsed (phase 1 of the Rich Messages epic, #83/#84). No-op on a Kurigram without Rich*
+# classes, so a rollback to 2.2.23 does not crash-loop the container.
+kurigram_compat.install()
+
 logger = logging.getLogger(__name__)
 settings = get_settings()
 

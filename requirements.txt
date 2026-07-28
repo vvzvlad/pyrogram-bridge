@@ -4,8 +4,16 @@ fastapi==0.115.8
 starlette==0.45.3
 uvicorn==0.34.0
 python-multipart==0.0.20
-Kurigram==2.2.23
-#git+https://github.com/KurimuzonAkuma/pyrogram.git@dev#egg=Kurigram
+# Kurigram 2.2.24 = MTProto layer 227: the server now sends message.rich_message
+# (Rich Messages, #83/#84). Defensive parse wrappers live in kurigram_compat.py.
+# When bumping this pin in the future:
+#   - run the full suite + golden_replay (python -m pytest -q) on the new wheel;
+#   - diff the Rich* modules (pyrogram/types/messages_and_media/rich_message.py,
+#     rich_block.py, rich_text.py) against this version — the wrappers rely on their
+#     exact _parse shapes;
+#   - confirm pyrogram.types.Object did NOT gain __slots__ (the wrappers attach `part`
+#     and `parse_failed` via setattr, and Object.default serialises them into /raw_json).
+Kurigram==2.2.24
 TgCrypto==1.2.5
 uvloop==0.22.1
 pillow==11.1.0
