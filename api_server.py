@@ -40,6 +40,11 @@ from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from telegram_client import TelegramClient
 from config import get_settings, setup_logging
 from rss_generator import generate_channel_rss, generate_channel_html, get_render_failed_count
+from kurigram_compat import (
+    get_rich_msg_parse_failed_count,
+    get_rich_block_parse_failed_count,
+    get_rich_part_seen_count,
+)
 from post_parser import PostParser
 from url_signer import verify_media_digest
 from file_io import (DB_PATH, init_db_sync, get_all_media_file_ids_sync,
@@ -1601,6 +1606,12 @@ async def health_check(request: Request, token: str | None = None) -> Response:
             # instead of being silently dropped (issue #60). A non-zero, growing value
             # flags a render regression that would otherwise be invisible.
             "render_failed": get_render_failed_count(),
+            # Rich Messages parse-degradation counters (Kurigram 2.2.24, #83/#84), same
+            # pattern as render_failed. A non-zero/growing value flags total rich
+            # degradation invisible to the reader; rich_part_seen signals phase-3 activation.
+            "rich_msg_parse_failed": get_rich_msg_parse_failed_count(),
+            "rich_block_parse_failed": get_rich_block_parse_failed_count(),
+            "rich_part_seen": get_rich_part_seen_count(),
             "config": config_info,
             **cache_stats
         }
