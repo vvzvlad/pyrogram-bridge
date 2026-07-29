@@ -40,10 +40,12 @@ from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from telegram_client import TelegramClient
 from config import get_settings, setup_logging
 from rss_generator import generate_channel_rss, generate_channel_html, get_render_failed_count
+import rich_tree
 from kurigram_compat import (
     get_rich_msg_parse_failed_count,
     get_rich_block_parse_failed_count,
     get_rich_part_seen_count,
+    has_parse_failures,
 )
 from post_parser import PostParser
 from url_signer import verify_media_digest
@@ -527,6 +529,16 @@ if __name__ == "__main__":
 
 async def find_file_id_in_message(message: Message, file_unique_id: str) -> Union[str, None]:
     """Find file_id by checking all possible media types in message"""
+    # Rich media (Kurigram 2.2.24, #85): a rich post carries its media inside rich blocks,
+    # not on message.<type>. Resolved from the LIVE Kurigram objects (file_id is ephemeral
+    # and never stored in the tree). Checked BEFORE the general loop (same precedent as the
+    # poll branch below); mutually exclusive with a POLL message.
+    rich_message = getattr(message, 'rich_message', None)
+    if rich_message is not None:
+        for media_obj in rich_tree.iter_media_objects(rich_message):
+            if getattr(media_obj, 'file_unique_id', None) == file_unique_id:
+                return getattr(media_obj, 'file_id', None)
+
     if message.media == MessageMediaType.POLL:
         # Kurigram 2.2.23: polls may carry media in description_media and
         # explanation_media (MessageContent objects). This branch is now LIVE:
@@ -605,6 +617,27 @@ async def find_file_id_in_message(message: Message, file_unique_id: str) -> Unio
     # If we reached here, the file_unique_id was not found
     channel_id_log = message.chat.id if message.chat else 'unknown_chat'
     logger.warning(f"Could not find media with file_unique_id '{file_unique_id}' in message {message.id} (channel: {channel_id_log}). Found media: {', '.join(media_found) or 'None'}")
+    return None
+
+
+def _rich_large_video_size(message: Message, file_unique_id: str) -> Union[int, None]:
+    """Return the file_size of a rich VIDEO block matching file_unique_id, if it is >100MB.
+
+    Used by download_media_file to route a >100MB video embedded in a rich post through the
+    temp_ (non-cached) large-video path. Only genuine Video objects qualify (mirrors the
+    message.video large-video rule); animations/audio are downloaded normally.
+    """
+    rich_message = getattr(message, 'rich_message', None)
+    if rich_message is None:
+        return None
+    for media_obj in rich_tree.iter_media_objects(rich_message):
+        if getattr(media_obj, 'file_unique_id', None) != file_unique_id:
+            continue
+        if type(media_obj).__name__ != 'Video':
+            continue
+        file_size = getattr(media_obj, 'file_size', None)
+        if isinstance(file_size, int) and file_size > 100 * 1024 * 1024:
+            return file_size
     return None
 
 
@@ -951,13 +984,24 @@ async def download_media_file(channel: Union[str, int], post_id: int, file_uniqu
 
     # Check if it is a video and if its size exceeds 100 MB
     is_large_video = False
+    large_video_size = 0
     if message.video:
         try:
             if message.video.file_size > 100 * 1024 * 1024:
                 is_large_video = True
+                large_video_size = int(message.video.file_size or 0)
         except Exception as e:
             logger.error(f"Failed to get video file size for message {post_id}: {str(e)}")
-    
+
+    # Rich video (Kurigram 2.2.24, #85): a rich post has message.video=None but may embed a
+    # >100MB video in a rich block. Route it through the same temp_ (non-cached) large-video
+    # path, sized from the live rich object rather than message.video.
+    if not is_large_video and message.video is None:
+        rich_size = _rich_large_video_size(message, file_unique_id)
+        if rich_size is not None:
+            is_large_video = True
+            large_video_size = rich_size
+
     if is_large_video:
         # For large video, download without permanent caching; use a temporary file.
         temp_file_path = os.path.join(post_dir, f"temp_{file_unique_id}")
@@ -973,11 +1017,9 @@ async def download_media_file(channel: Union[str, int], post_id: int, file_uniqu
             logger.error(f"Media with file_unique_id {file_unique_id} not found in message {post_id}")
             raise HTTPException(status_code=404, detail="File not found in message")
         # Scale the timeout with size (≈256 KB/s floor) so slow big-video downloads aren't
-        # cut short at the fixed 120s used for regular files.
-        try:
-            file_size = int(message.video.file_size or 0)
-        except Exception:
-            file_size = 0
+        # cut short at the fixed 120s used for regular files. large_video_size is sized from
+        # message.video for a regular large video, or from the rich video object (#85).
+        file_size = large_video_size
         timeout = _media_download_timeout(file_size)
         logger.info(f"Downloading large video file {file_unique_id} to temporary path {temp_file_path} (timeout={timeout:.0f}s)")
         try:
@@ -1011,6 +1053,17 @@ async def download_media_file(channel: Union[str, int], post_id: int, file_uniqu
 
     file_id = await find_file_id_in_message(message, file_unique_id)
     if not file_id:
+        # Rich media (Kurigram 2.2.24, #85): if the post's rich parse degraded (sentinel or
+        # a parse_failed block), a missing fid is "parse could not resolve it", NOT "the
+        # media is gone". Raise a TRANSIENT error (not HTTPException(404), not RPCError) so
+        # the _runner classifier marks it transient (503 + Retry-After) and the SQLite row
+        # is NOT deleted — the media may resolve once upstream parsing is fixed. (Phase 3
+        # will add a GetRichMessage cascade + a part=False condition here.)
+        if has_parse_failures(getattr(message, 'rich_message', None)):
+            logger.warning(f"rich_media_unresolved_transient: {channel}/{post_id}/{file_unique_id} "
+                           f"not found but rich parse failed — keeping SQLite row, 503 transient")
+            raise HTTPException(status_code=503, detail="Rich media temporarily unresolved (parse failed)")
+
         error_message = f"Media with file_unique_id {file_unique_id} not found in message {post_id} for channel {channel}"
         logger.error(error_message)
 
@@ -1611,6 +1664,8 @@ async def health_check(request: Request, token: str | None = None) -> Response:
             # degradation invisible to the reader; rich_part_seen signals phase-3 activation.
             "rich_msg_parse_failed": get_rich_msg_parse_failed_count(),
             "rich_block_parse_failed": get_rich_block_parse_failed_count(),
+            # Adapter (tree-build) per-block failures (Rich Messages phase 2, #85).
+            "rich_block_adapt_failed": rich_tree.get_rich_block_adapt_failed_count(),
             "rich_part_seen": get_rich_part_seen_count(),
             "config": config_info,
             **cache_stats

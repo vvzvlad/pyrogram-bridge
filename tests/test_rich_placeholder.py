@@ -5,16 +5,18 @@
 # pylint: disable=protected-access, wrong-import-position
 # pylance: disable=reportMissingImports, reportMissingModuleSource
 
-"""Phase-1 Rich Messages tests (#83/#84).
+"""Rich Messages title/flag/special-block gates + defensive parse contours (#84/#85).
 
-Covers the three placeholder gates in post_parser, the snapshot v3 rich_present
-roundtrip, and the two defensive parse contours in kurigram_compat.
+Covers the three post_parser gates (now routed through rich_tree.tree_of in phase 2),
+the snapshot v7 rich_tree roundtrip, and the two defensive parse contours in
+kurigram_compat. The rich RENDER pipeline itself is covered by test_rich_tree.py /
+test_rich_pipeline.py; here we only assert the gates fire for an EMPTY rich tree (the
+fallback-placard path a sentinel/failed parse takes).
 
-Note on mocks: MagicMock(spec=Message) does NOT expose `rich_message` (it is an
-instance attribute set in Message.__init__, absent from dir(Message)), so
-`getattr(message, 'rich_message', None)` returns None unless a test sets it
-explicitly. This is exactly the production gate, and makes the "no rich" tests
-non-vacuous.
+Note on mocks: MagicMock(spec=Message) does NOT expose `rich_message`/`rich_tree` (both
+are instance attributes absent from dir(Message)), so `getattr(message, 'rich_message',
+None)` returns None unless a test sets it explicitly. This is exactly the production gate,
+and makes the "no rich" tests non-vacuous.
 """
 
 from types import SimpleNamespace
@@ -29,7 +31,9 @@ from post_parser import PostParser
 import message_snapshot as ms
 import kurigram_compat as kc
 
-RICH_PLACEHOLDER_TEXT = "📰 This post uses Telegram's new rich format"
+# Phase-2 fallback placard (empty tree = a sentinel / failed parse / genuinely empty rich
+# message). Owned solely by _format_special_media.
+RICH_PLACEHOLDER_TEXT = "📰 This post's rich content could not be rendered"
 RICH_TITLE = "📰 Rich post"
 
 
@@ -123,33 +127,37 @@ class TestNoRich:
 
 
 # --------------------------------------------------------------------------------------
-# Task 7(b): snapshot v3 rich_present roundtrip (parity of the placeholder from cache)
+# Task 7(b): snapshot v7 rich_tree roundtrip (parity of the placard from cache)
 # --------------------------------------------------------------------------------------
 class TestSnapshotRoundtrip:
     def test_version_is_current(self):
-        # v6 = main's v5 (reply full-quote) + this branch's rich_present marker.
-        assert ms.SNAPSHOT_VERSION == 6
+        # v7 = v6 (rich_present) replaced by the serialised rich_tree (#85).
+        assert ms.SNAPSHOT_VERSION == 7
 
-    def test_rich_present_true_for_rich_post(self):
+    def test_rich_tree_stored_for_rich_post(self):
         msg = SimpleNamespace(rich_message=SimpleNamespace(blocks=[]))
         snap = ms.snapshot_message(msg)
-        assert snap["rich_present"] is True
+        # An empty-blocks rich message still yields a (non-None) tree.
+        assert snap["rich_tree"] is not None
+        assert snap["rich_tree"]["blocks"] == []
 
-    def test_rich_present_false_for_plain_post(self):
-        # SimpleNamespace without rich_message → getattr returns None → False.
+    def test_rich_tree_none_for_plain_post(self):
+        # SimpleNamespace without rich_message → tree_of returns None.
         snap = ms.snapshot_message(SimpleNamespace())
-        assert snap["rich_present"] is False
+        assert snap["rich_tree"] is None
 
     def test_restored_message_is_rich(self):
         snap = ms.snapshot_message(SimpleNamespace(rich_message=SimpleNamespace(blocks=[])))
         restored = ms.restore_message(snap)
-        assert restored.rich_message is not None
+        # rich_message is NOT snapshotted (only the tree is); the tree is restored.
+        assert restored.rich_message is None
+        assert restored.rich_tree is not None
 
-    def test_roundtrip_placeholder_parity(self):
+    def test_roundtrip_placard_parity(self):
         parser = PostParser(MagicMock())
         snap = ms.snapshot_message(SimpleNamespace(rich_message=SimpleNamespace(blocks=[])))
         restored = ms.restore_message(snap)
-        # The restored (cache-hit) message renders the same placeholder as a live one.
+        # The restored (cache-hit) message renders the same placard as a live one.
         assert parser._generate_title(restored) == RICH_TITLE
         assert "rich" in parser._extract_flags(restored, html_body="")
         assert RICH_PLACEHOLDER_TEXT in parser._format_special_media(restored)
@@ -158,6 +166,7 @@ class TestSnapshotRoundtrip:
         snap = ms.snapshot_message(SimpleNamespace())
         restored = ms.restore_message(snap)
         assert restored.rich_message is None
+        assert ms.restore_message(snap).rich_tree is None
 
 
 # --------------------------------------------------------------------------------------

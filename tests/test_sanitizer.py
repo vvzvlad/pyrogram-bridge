@@ -212,6 +212,53 @@ def test_generic_lang_title_stripped_but_title_kept_on_a():
     assert 'title="t"' in out_a
 
 
+# --------------------------------------------------------------------------- #
+# Rich-content allowlist (#85): structural tags survive, and the `id` attribute is
+# range-restricted to `rich-…` anchors (single-point DOM-clobbering guard).
+# --------------------------------------------------------------------------- #
+def test_rich_structural_tags_survive():
+    frag = ('<h3>H</h3><pre><code>c</code></pre><blockquote>q</blockquote><hr>'
+            '<mark>m</mark><sub>s</sub><sup>p</sup><u>u</u>'
+            '<details open><summary>s</summary><p>b</p></details>')
+    out = sanitize_html(frag)
+    for tag in ('<h3>', '<pre>', '<code>', '<blockquote>', '<hr>', '<mark>', '<sub>',
+                '<sup>', '<u>', '<details', '<summary>'):
+        assert tag in out, tag
+
+
+def test_table_colspan_rowspan_survive():
+    out = sanitize_html('<table><caption>t</caption><tr><th colspan="2">h</th>'
+                        '<td rowspan="3">c</td></tr></table>')
+    assert 'colspan="2"' in out and 'rowspan="3"' in out
+    assert '<caption>t</caption>' in out
+
+
+def test_rich_anchor_id_survives():
+    # A `rich-…` id is a legitimate rich-content anchor and must survive on <span>.
+    out = sanitize_html('<span id="rich-fn1">x</span>')
+    assert 'id="rich-fn1"' in out
+
+
+def test_non_rich_id_is_dropped():
+    # DOM-clobbering guard: any id that is NOT `rich-…` is dropped (single-point filter).
+    out = sanitize_html('<span id="evil">x</span>')
+    assert 'id=' not in out
+    assert '>x</span>' in out
+
+
+def test_fragment_href_rich_anchor_survives():
+    # A `#rich-…` fragment link (RichTextReferenceLink) passes the url_schemes filter.
+    out = sanitize_html('<a href="#rich-fn1">jump</a>')
+    assert 'href="#rich-fn1"' in out
+
+
+def test_id_filter_rejects_rich_prefixed_breakout():
+    # `rich-` followed by a char outside [A-Za-z0-9_-] does NOT match the anchor pattern
+    # and is dropped (the pattern anchors ^…$).
+    out = sanitize_html('<span id="rich-a b">x</span>')
+    assert 'id=' not in out
+
+
 def test_style_filter_exception_fails_closed_drops_attribute(monkeypatch):
     # nh3/PyO3 SWALLOWS an exception raised inside attribute_filter and would then
     # insert the RAW style. The try/except in _attribute_filter must FAIL-CLOSED:
