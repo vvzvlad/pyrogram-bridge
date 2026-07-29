@@ -147,6 +147,33 @@ class TestAdapterGuards:
         tree = rich_tree.from_pyrogram(rm(table))
         assert tree["blocks"][-1] == {"t": "truncated"}
 
+    def test_wide_richtext_list_trips_truncation(self):
+        # DoS cap (review F1.1): a SINGLE paragraph carrying a huge RichText list (TextConcat)
+        # must charge the node budget per element and trip truncation, not silently balloon.
+        wide = para([str(i) for i in range(5000)])  # 5000 >> MAX_RICH_NODES (2000)
+        tree = rich_tree.from_pyrogram(rm(wide))
+        # The top-level truncated marker is appended.
+        assert tree["blocks"][-1] == {"t": "truncated"}
+        # Non-vacuity: the paragraph's text list was CUT to at most the budget. Without the
+        # per-element budget.take() in _adapt_rt all 5000 elements would survive here.
+        adapted = tree["blocks"][0]["text"]
+        assert isinstance(adapted, list)
+        assert len(adapted) < 5000
+        assert len(adapted) <= rich_tree.MAX_RICH_NODES
+
+    def test_sparse_empty_table_rows_trip_truncation(self):
+        # DoS cap (review F1.2): rows with NO cells (cells=[[],[],…]) never enter the inner
+        # cell loop, so without a per-ROW budget charge millions of empty rows would pass
+        # with truncated=False. 5000 empty rows must trip truncation.
+        table = node("RichBlockTable", cells=[[] for _ in range(5000)],
+                     is_bordered=False, is_striped=False, caption=None)
+        tree = rich_tree.from_pyrogram(rm(table))
+        assert tree["blocks"][-1] == {"t": "truncated"}
+        # Non-vacuity: rows were capped (< 5000). Without the per-row take() all 5000 empty
+        # rows would be appended and no truncation would occur.
+        assert len(tree["blocks"][0]["rows"]) < 5000
+        assert len(tree["blocks"][0]["rows"]) <= rich_tree.MAX_RICH_NODES
+
 
 class TestLists:
     def _list(self, *items):

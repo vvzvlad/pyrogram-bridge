@@ -197,21 +197,21 @@ def _adapt_block(obj: Any, depth: int, budget: _Budget) -> Optional[dict]:
 def _adapt_heading(obj, depth, budget):
     size = getattr(obj, "size", 1)
     return {"t": "heading", "size": int(size) if isinstance(size, int) else 1,
-            "text": _adapt_rt(getattr(obj, "text", None))}
+            "text": _adapt_rt(getattr(obj, "text", None), budget)}
 
 
 def _adapt_paragraph(obj, depth, budget):
-    return {"t": "paragraph", "text": _adapt_rt(getattr(obj, "text", None))}
+    return {"t": "paragraph", "text": _adapt_rt(getattr(obj, "text", None), budget)}
 
 
 def _adapt_pre(obj, depth, budget):
     lang = getattr(obj, "language", None)
     return {"t": "pre", "language": lang if isinstance(lang, str) else None,
-            "text": _adapt_rt(getattr(obj, "text", None))}
+            "text": _adapt_rt(getattr(obj, "text", None), budget)}
 
 
 def _adapt_footer(obj, depth, budget):
-    return {"t": "footer", "text": _adapt_rt(getattr(obj, "text", None))}
+    return {"t": "footer", "text": _adapt_rt(getattr(obj, "text", None), budget)}
 
 
 def _adapt_divider(obj, depth, budget):
@@ -251,36 +251,41 @@ def _adapt_list(obj, depth, budget):
 def _adapt_blockquote(obj, depth, budget):
     return {"t": "blockquote",
             "blocks": _adapt_blocks(getattr(obj, "blocks", None), depth + 1, budget),
-            "credit": _adapt_rt(getattr(obj, "credit", None))}
+            "credit": _adapt_rt(getattr(obj, "credit", None), budget)}
 
 
 def _adapt_pullquote(obj, depth, budget):
     return {"t": "pullquote",
-            "text": _adapt_rt(getattr(obj, "text", None)),
-            "credit": _adapt_rt(getattr(obj, "credit", None))}
+            "text": _adapt_rt(getattr(obj, "text", None), budget),
+            "credit": _adapt_rt(getattr(obj, "credit", None), budget)}
 
 
 def _adapt_collage(obj, depth, budget):
     node = {"t": "collage", "blocks": _adapt_blocks(getattr(obj, "blocks", None), depth + 1, budget)}
-    _attach_caption(node, getattr(obj, "caption", None))
+    _attach_caption(node, getattr(obj, "caption", None), budget)
     return node
 
 
 def _adapt_slideshow(obj, depth, budget):
     node = {"t": "slideshow", "blocks": _adapt_blocks(getattr(obj, "blocks", None), depth + 1, budget)}
-    _attach_caption(node, getattr(obj, "caption", None))
+    _attach_caption(node, getattr(obj, "caption", None), budget)
     return node
 
 
 def _adapt_table(obj, depth, budget):
     rows = []
     for raw_row in (getattr(obj, "cells", None) or []):
+        # Charge one slot PER ROW (not only per cell): sparse rows (cells=[[],[],…]) would
+        # otherwise run the inner loop zero times, never call budget.take(), and let millions
+        # of empty rows through with truncated=False (DoS cap, review F1).
+        if budget.take():
+            break
         row = []
         for raw_cell in (raw_row or []):
             if budget.take():
                 break
             row.append({
-                "text": _adapt_rt(getattr(raw_cell, "text", None)),
+                "text": _adapt_rt(getattr(raw_cell, "text", None), budget),
                 "header": bool(getattr(raw_cell, "is_header", False)),
                 "colspan": getattr(raw_cell, "colspan", None),
                 "rowspan": getattr(raw_cell, "rowspan", None),
@@ -291,7 +296,7 @@ def _adapt_table(obj, depth, budget):
     # TRAP: RichBlockTable.caption is annotated RichBlockCaption but _parse stores the
     # RichText from the raw `title` there (rich_block.py:788-792) — map it as the table title.
     return {"t": "table",
-            "title": _adapt_rt(getattr(obj, "caption", None)),
+            "title": _adapt_rt(getattr(obj, "caption", None), budget),
             "bordered": bool(getattr(obj, "is_bordered", False)),
             "striped": bool(getattr(obj, "is_striped", False)),
             "rows": rows}
@@ -299,7 +304,7 @@ def _adapt_table(obj, depth, budget):
 
 def _adapt_details(obj, depth, budget):
     return {"t": "details",
-            "summary": _adapt_rt(getattr(obj, "summary", None)),
+            "summary": _adapt_rt(getattr(obj, "summary", None), budget),
             "blocks": _adapt_blocks(getattr(obj, "blocks", None), depth + 1, budget),
             "open": bool(getattr(obj, "is_open", False))}
 
@@ -309,11 +314,11 @@ def _adapt_map(obj, depth, budget):
     node = {"t": "map",
             "lat": getattr(loc, "latitude", None),
             "lon": getattr(loc, "longitude", None)}
-    _attach_caption(node, getattr(obj, "caption", None))
+    _attach_caption(node, getattr(obj, "caption", None), budget)
     return node
 
 
-def _adapt_media(block, attr, kind):
+def _adapt_media(block, attr, kind, budget):
     media = getattr(block, attr, None)
     fid = getattr(media, "file_unique_id", None) if media is not None else None
     # A media node without a non-empty str file_unique_id cannot be served through /media
@@ -323,15 +328,15 @@ def _adapt_media(block, attr, kind):
     node = {"t": kind, "fid": fid, "size": getattr(media, "file_size", None)}
     if kind in ("audio", "voice"):
         node["mime"] = getattr(media, "mime_type", None)
-    _attach_caption(node, getattr(block, "caption", None))
+    _attach_caption(node, getattr(block, "caption", None), budget)
     return node
 
 
-def _attach_caption(node: dict, caption: Any) -> None:
+def _attach_caption(node: dict, caption: Any, budget: _Budget) -> None:
     if caption is None:
         return
-    node["caption"] = {"text": _adapt_rt(getattr(caption, "text", None)),
-                       "credit": _adapt_rt(getattr(caption, "credit", None))}
+    node["caption"] = {"text": _adapt_rt(getattr(caption, "text", None), budget),
+                       "credit": _adapt_rt(getattr(caption, "credit", None), budget)}
 
 
 _BLOCK_DISPATCH: dict = {
@@ -350,11 +355,11 @@ _BLOCK_DISPATCH: dict = {
     "RichBlockTable": _adapt_table,
     "RichBlockDetails": _adapt_details,
     "RichBlockMap": _adapt_map,
-    "RichBlockPhoto": lambda o, d, b: _adapt_media(o, "photo", "photo"),
-    "RichBlockVideo": lambda o, d, b: _adapt_media(o, "video", "video"),
-    "RichBlockAnimation": lambda o, d, b: _adapt_media(o, "animation", "animation"),
-    "RichBlockAudio": lambda o, d, b: _adapt_media(o, "audio", "audio"),
-    "RichBlockVoiceNote": lambda o, d, b: _adapt_media(o, "voice_note", "voice"),
+    "RichBlockPhoto": lambda o, d, b: _adapt_media(o, "photo", "photo", b),
+    "RichBlockVideo": lambda o, d, b: _adapt_media(o, "video", "video", b),
+    "RichBlockAnimation": lambda o, d, b: _adapt_media(o, "animation", "animation", b),
+    "RichBlockAudio": lambda o, d, b: _adapt_media(o, "audio", "audio", b),
+    "RichBlockVoiceNote": lambda o, d, b: _adapt_media(o, "voice_note", "voice", b),
 }
 
 
@@ -382,31 +387,43 @@ _RT_PLAIN = {
 }
 
 
-def _adapt_rt(rt: Any, depth: int = 0) -> Any:
+def _adapt_rt(rt: Any, budget: _Budget, depth: int = 0) -> Any:
     if rt is None:
         return None
     if depth > MAX_RICH_DEPTH:
         return ""
     # Normalise Str (a str subclass) and pyrogram's List to plain JSON types.
     if isinstance(rt, str):
+        # A scalar leaf is NOT charged a node slot (only list ELEMENTS are — see below).
         return str(rt)
     if isinstance(rt, (list, tuple)):
-        return [_adapt_rt(x, depth + 1) for x in rt]
+        # RichText lists (TextConcat) are unbounded upstream, so each element is charged a
+        # node slot. Without this a single paragraph/heading/cell carrying a huge RichText
+        # list would balloon the tree past MAX_RICH_NODES with truncated=False, and that
+        # bloated tree would persist in the snapshot and be re-rendered/re-sanitised on
+        # every feed request (DoS cap, review F1). Once the budget is exhausted the list is
+        # cut and from_pyrogram appends the single top-level truncated marker.
+        out = []
+        for x in rt:
+            if budget.take():
+                break
+            out.append(_adapt_rt(x, budget, depth + 1))
+        return out
 
     name = type(rt).__name__
     if name in _RT_SIMPLE:
-        return {"t": _RT_SIMPLE[name], "text": _adapt_rt(getattr(rt, "text", None), depth + 1)}
+        return {"t": _RT_SIMPLE[name], "text": _adapt_rt(getattr(rt, "text", None), budget, depth + 1)}
     if name in _RT_PLAIN:
-        return _adapt_rt(getattr(rt, "text", None), depth + 1)
+        return _adapt_rt(getattr(rt, "text", None), budget, depth + 1)
     if name == "RichTextUrl":
         # TRAP: TextAutoUrl stores a parsed RichText in .url (rich_text.py:159-164); only a
         # genuine str becomes a link. Str is a str subclass, so the common case passes.
         url = getattr(rt, "url", None)
-        return {"t": "url", "text": _adapt_rt(getattr(rt, "text", None), depth + 1),
+        return {"t": "url", "text": _adapt_rt(getattr(rt, "text", None), budget, depth + 1),
                 "url": url if isinstance(url, str) else None}
     if name == "RichTextTextMention":
         user = getattr(rt, "user", None)
-        return {"t": "text_mention", "text": _adapt_rt(getattr(rt, "text", None), depth + 1),
+        return {"t": "text_mention", "text": _adapt_rt(getattr(rt, "text", None), budget, depth + 1),
                 "username": getattr(user, "username", None)}
     if name == "RichTextCustomEmoji":
         # Rendered as its alternative (alt) text — no image.
@@ -414,24 +431,24 @@ def _adapt_rt(rt: Any, depth: int = 0) -> Any:
     if name == "RichTextDateTime":
         date = getattr(rt, "date", None)
         iso = date.isoformat() if hasattr(date, "isoformat") else None
-        return {"t": "datetime", "text": _adapt_rt(getattr(rt, "text", None), depth + 1), "date": iso}
+        return {"t": "datetime", "text": _adapt_rt(getattr(rt, "text", None), budget, depth + 1), "date": iso}
     if name == "RichTextMathematicalExpression":
         return {"t": "math", "expr": str(getattr(rt, "expression", "") or "")}
     if name == "RichTextAnchor":
         return {"t": "anchor", "name": str(getattr(rt, "name", "") or "")}
     if name == "RichTextReference":
         return {"t": "reference", "name": str(getattr(rt, "name", "") or ""),
-                "text": _adapt_rt(getattr(rt, "text", None), depth + 1)}
+                "text": _adapt_rt(getattr(rt, "text", None), budget, depth + 1)}
     if name == "RichTextAnchorLink":
         return {"t": "anchor_link", "name": str(getattr(rt, "anchor_name", "") or ""),
-                "text": _adapt_rt(getattr(rt, "text", None), depth + 1)}
+                "text": _adapt_rt(getattr(rt, "text", None), budget, depth + 1)}
     if name == "RichTextReferenceLink":
         return {"t": "reference_link", "name": str(getattr(rt, "reference_name", "") or ""),
-                "text": _adapt_rt(getattr(rt, "text", None), depth + 1)}
+                "text": _adapt_rt(getattr(rt, "text", None), budget, depth + 1)}
     # Unknown RichText type: recurse into .text if present, else empty.
     logger.debug(f"rich_block_unknown_type: {name}")
     inner = getattr(rt, "text", None)
-    return _adapt_rt(inner, depth + 1) if inner is not None else ""
+    return _adapt_rt(inner, budget, depth + 1) if inner is not None else ""
 
 
 # ======================================================================================

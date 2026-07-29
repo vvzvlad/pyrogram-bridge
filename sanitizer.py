@@ -71,7 +71,9 @@ ALLOWED_ATTRIBUTES = {
 # id — a page-element id an attacker planted in post text to clobber window.<name> /
 # document.getElementById — is dropped. Enforced in the config (not only the renderer)
 # so this invariant holds at the single sanitiser boundary.
-_ALLOWED_ID_RE = re.compile(r'^rich-[A-Za-z0-9_-]+$')
+# `\Z` (end of string), NOT `$` — `$` also matches just before a trailing newline, so an
+# id like "rich-ok\n" would slip through; `\Z` is strict end-of-string (defense-in-depth).
+_ALLOWED_ID_RE = re.compile(r'^rich-[A-Za-z0-9_-]+\Z')
 
 # These 5 props SIZE media in readers; dropping `style` outright would change
 # rendering, so `style` is kept but its content is filtered down to exactly these.

@@ -254,9 +254,17 @@ def test_fragment_href_rich_anchor_survives():
 
 def test_id_filter_rejects_rich_prefixed_breakout():
     # `rich-` followed by a char outside [A-Za-z0-9_-] does NOT match the anchor pattern
-    # and is dropped (the pattern anchors ^…$).
+    # and is dropped (the pattern anchors ^…\Z).
     out = sanitize_html('<span id="rich-a b">x</span>')
     assert 'id=' not in out
+
+
+def test_id_filter_rejects_trailing_newline():
+    # `\Z` (not `$`) is strict end-of-string: an id with a trailing newline is dropped
+    # (with `$` the newline would slip through — defense-in-depth, review nit).
+    out = sanitize_html('<span id="rich-ok\n">x</span>')
+    assert 'id="rich-ok' not in out
+    assert '>x</span>' in out
 
 
 def test_style_filter_exception_fails_closed_drops_attribute(monkeypatch):
