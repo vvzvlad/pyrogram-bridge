@@ -20,6 +20,7 @@ from typing import Union, Dict, Any, List, Optional, Callable, Tuple
 from pyrogram.types import Message
 from pyrogram.enums import MessageMediaType
 from sanitizer import sanitize_html
+import rich_tree
 from config import get_settings
 from file_io import upsert_media_file_ids_bulk_sync, DB_PATH
 from url_signer import generate_media_digest, media_url_expiry
@@ -642,11 +643,15 @@ class PostParser:
         title = None
         title = self._service_message_title(message)
         if title is None: title = self._generate_base_title(message)
-        # Rich posts (Kurigram 2.2.24, #83/#84): fall back to a rich-specific title only
-        # when the base title is empty (a rich post may carry no plain text). If the dump
-        # shows non-empty text the base title wins and this branch is a no-op. Gated on the
-        # attribute so older objects/mocks are unaffected.
-        if title is None and getattr(message, 'rich_message', None) is not None: title = "📰 Rich post"
+        # Rich posts (Kurigram 2.2.24, #85): derive the title from the rich tree only when
+        # the base title is empty (a rich post may carry no plain text). Prefer the first
+        # heading / first non-empty paragraph (truncated like any title); fall back to a
+        # generic label. Gated via tree_of so a v7 cache hit behaves identically to live.
+        if title is None:
+            tree = rich_tree.tree_of(message)
+            if tree is not None:
+                rich_title = rich_tree.extract_title(tree)
+                title = self._truncate_title(rich_title) if rich_title else "📰 Rich post"
         if title is None: title = self._media_message_title(message)
         if title is None: title = "❓ Unknown Post"
         if message.forward_origin: title = f"FWD: {title}"
@@ -865,10 +870,14 @@ class PostParser:
         if message.forward_origin:
             flags.append("fwd")
 
-        # Add "rich" flag for Rich Messages posts (Kurigram 2.2.24, layer 227, #83/#84).
-        # Gated on the attribute so older objects/mocks (which lack it) are unaffected.
-        if getattr(message, 'rich_message', None) is not None:
+        # Add "rich" flag for Rich Messages posts (Kurigram 2.2.24, layer 227, #85).
+        # Gated via tree_of so a v7 cache hit (rich_message=None, rich_tree set) matches live.
+        rich_tree_obj = rich_tree.tree_of(message)
+        if rich_tree_obj is not None:
             flags.append("rich")
+        # A rich post carries its media inside the tree (message.media is None), so no_image
+        # must be decided by the tree's media nodes, not by message.media.
+        rich_has_media = rich_tree_obj is not None and any(rich_tree.iter_tree_media(rich_tree_obj))
 
         # Add flag "video" if the message media is VIDEO or ANIMATION and the body text is up to 200 characters.
         # LIVE_PHOTO (Kurigram 2.2.23) renders as a video element, so it counts too.
@@ -885,7 +894,11 @@ class PostParser:
         # Add flag for posts without images: no media at all, an info-block-only media
         # type (see NO_IMAGE_MEDIA_TYPES), or a poll without renderable description_media.
         # A poll WITH description_media renders an image/video, so it is NOT flagged.
-        if (not message.media
+        # A rich post WITH media nodes renders images/videos, so it is NOT flagged either
+        # (checked first — a rich post reports message.media=None which would else qualify).
+        if rich_has_media:
+            pass
+        elif (not message.media
                 or message.media in NO_IMAGE_MEDIA_TYPES
                 or (message.media == MessageMediaType.POLL and _poll_media_object(message)[0] is None)):
             flags.append("no_image")
@@ -1205,7 +1218,20 @@ class PostParser:
         forward_html = self._format_forward_info(message)
         reply_html = self._format_reply_info(message)
         media_html = self._generate_html_media(message)
-        
+
+        # Rich content (Kurigram 2.2.24, #85). tree_of is the single entry (works for a
+        # live Message via rich_message and for a v7 CachedMessage via its stored rich_tree).
+        # A non-rich post has tree=None -> rich_html='' and the block below is a no-op, so
+        # golden output stays byte-identical.
+        tree = rich_tree.tree_of(message)
+        rich_html = ''
+        if tree is not None and tree.get("blocks"):
+            rich_html = rich_tree.render_html(tree, self._rich_url_builder(message))
+            # Rich blocks are the authoritative content — suppress the plain text_html to
+            # avoid duplicating it (rich posts carry their body in the blocks; see the #84
+            # stand dump). media_html is empty for rich posts (media arrives via blocks).
+            text_html = None
+
         content_body.append(f'<div class="post">')
         if forward_html:
             content_body.append(forward_html) # Forward info
@@ -1213,7 +1239,7 @@ class PostParser:
         if reply_html:
             content_body.append(reply_html) # Reply info
             content_body.append("<br>")
-        
+
         show_caption_above = getattr(message, 'show_caption_above_media', False)
 
         if show_caption_above:
@@ -1231,6 +1257,16 @@ class PostParser:
                 content_body.append(text_html)
                 content_body.append("<br>")
 
+        # Rich content div in the media position; only emitted for a non-empty tree so an
+        # empty/failed tree does not pollute parity/golden bytes (its placard is owned by
+        # _format_special_media). The `part` placard renders AFTER the rich content,
+        # independently of phase 3 (an honest "partial post" hint if part ever arrives).
+        if rich_html:
+            content_body.append(f'<div class="rich-content">{rich_html}</div>')
+            content_body.append("<br>")
+        if tree is not None and tree.get("part"):
+            content_body.append('<div class="message-special">⚠️ Only part of this post is shown — open it in Telegram.</div>')
+            content_body.append("<br>")
 
         if poll_html: content_body.append(poll_html) # Poll
         if special_html := self._format_special_media(message): content_body.append(special_html) # Special media info blocks
@@ -1243,12 +1279,35 @@ class PostParser:
         html_body = '\n'.join(content_body)
         return html_body
 
+    def _build_media_url(self, channel_username: str, post_id: int, file_unique_id: str) -> Optional[str]:
+        """Build a signed /media URL for a media object, or None if the channel is unknown.
+
+        Single source of truth for the media URL shape: used both by the regular media
+        renderer (below) and as the ``url_builder`` handed to rich_tree.render_html so a
+        rich photo/video/audio resolves through the exact same /media pipeline.
+        """
+        if not channel_username:
+            return None
+        base_url = Config['pyrogram_bridge_url']
+        file = f"{channel_username}/{post_id}/{file_unique_id}"
+        exp = media_url_expiry()
+        digest = generate_media_digest(file, exp)
+        url = f"{base_url}/media/{file}/{digest}"
+        if exp is not None:
+            url = f"{url}?exp={exp}"
+        return url
+
+    def _rich_url_builder(self, message: Message) -> Callable[[str], Optional[str]]:
+        """A url_builder closure bound to this message for rich_tree.render_html."""
+        channel_username = self.get_channel_username(message)
+        post_id = message.id
+        return lambda fid: self._build_media_url(channel_username, post_id, fid)
+
     def _generate_html_media(self, message: Message) -> str:
         self._save_media_file_ids(message) # Save media file_ids for caching
 
 
         content_media = []
-        base_url = Config['pyrogram_bridge_url']
         # Poll media (Kurigram 2.2.23): a poll may carry description_media which IS
         # renderable through the regular /media pipeline.
         poll_media_obj, poll_media_kind = _poll_media_object(message)
@@ -1281,12 +1340,7 @@ class PostParser:
                 if not channel_username:
                     logger.warning(f"Could not generate media URL for message {message.id}: channel username is missing.")
                 else:
-                    file = f"{channel_username}/{message.id}/{file_unique_id}"
-                    exp = media_url_expiry()
-                    digest = generate_media_digest(file, exp)
-                    url = f"{base_url}/media/{file}/{digest}"
-                    if exp is not None:
-                        url = f"{url}?exp={exp}"
+                    url = self._build_media_url(channel_username, message.id, file_unique_id)
 
                     logger.debug(f"Collected media file: {channel_username}/{message.id}/{file_unique_id}")
 
@@ -1561,14 +1615,14 @@ class PostParser:
             media = getattr(message, 'media', None)
             block = None
 
-            # Rich posts (Kurigram 2.2.24, layer 227): message.rich_message is populated,
-            # but there is no renderer yet (phase 1 of #83/#84) — show an honest placeholder
-            # instead of an empty post. Gated on the attribute (older objects/mocks lack it),
-            # independent of message.media: a rich post reports media=None, no longer
-            # UNSUPPORTED. Checked before the UNSUPPORTED branch. (Phase 2 replaces this
-            # with the real rich_tree render.)
-            if getattr(message, 'rich_message', None) is not None:
-                block = "📰 This post uses Telegram's new rich format — full rendering is coming; open it in Telegram."
+            # Rich posts (Kurigram 2.2.24, #85): the rich content is rendered inline in
+            # _generate_html_body. This branch is the SINGLE owner of the fallback placard,
+            # shown ONLY for an EMPTY tree (a failed/sentinel parse or a genuinely empty rich
+            # message) so the reader sees an honest note instead of a blank post. A non-empty
+            # tree renders its blocks and produces no special block here.
+            rich_tree_obj = rich_tree.tree_of(message)
+            if rich_tree_obj is not None and not rich_tree_obj.get("blocks"):
+                block = "📰 This post's rich content could not be rendered — open it in Telegram."
 
             elif media == MessageMediaType.GIVEAWAY and (giveaway := getattr(message, 'giveaway', None)):
                 quantity = getattr(giveaway, 'quantity', None)
@@ -1713,6 +1767,20 @@ class PostParser:
                     added_ts = datetime.now().timestamp()
                     # Thread-safe: just append; the caller persists the batch.
                     self._pending_media_ids.append((channel_username, message.id, file_unique_id, added_ts))
+
+            # Rich media (Kurigram 2.2.24, #85): photos/videos/audio embedded in rich blocks.
+            # Collected via the tree (works for both live and v7 CachedMessage). The >100MB
+            # skip rule (registry §3.13) is applied per media node, mirroring the block above.
+            tree = rich_tree.tree_of(message)
+            if tree is not None:
+                for media in rich_tree.iter_tree_media(tree):
+                    size = media.get("size")
+                    if isinstance(size, int) and size > 100 * 1024 * 1024:
+                        continue
+                    fid = media.get("fid")
+                    if fid:
+                        self._pending_media_ids.append(
+                            (channel_username, message.id, fid, datetime.now().timestamp()))
 
         except Exception as e:
             logger.error(f"file_id_collection_error: message_id {message.id}, error {str(e)}")

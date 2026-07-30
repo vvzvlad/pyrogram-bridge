@@ -24,6 +24,8 @@ from typing import Any, List, Optional, Union
 
 from pyrogram.enums import MessageMediaType
 
+import rich_tree
+
 logger = logging.getLogger(__name__)
 
 # Bump when the snapshot schema changes in a backwards-incompatible way; a mismatch
@@ -45,7 +47,13 @@ logger = logging.getLogger(__name__)
 # v6: added the `rich_present` marker (Rich Messages, Kurigram 2.2.24, #83/#84). A v5 file
 # lacks it, so a cached rich post would restore with rich_message=None and lose its
 # placeholder title/flag/block — invalidate v5 files (one-off refetch per feed).
-SNAPSHOT_VERSION = 6
+# v7: replaced the `rich_present` boolean (v6) with the serialised `rich_tree` (the full
+# canonical rich-content tree, JSON-safe by construction — Rich Messages phase 2, #85). A
+# v6 file has only the boolean and would restore with an empty rich body — invalidate v6
+# files (one-off refetch per feed). INVARIANT: this bump is REQUIRED by rich_tree.SCHEMA_V
+# (any SCHEMA_V bump must bump SNAPSHOT_VERSION so a stored tree with an older `v` is
+# invalidated here rather than mis-rendered).
+SNAPSHOT_VERSION = 7
 
 
 class CachedStr(str):
@@ -390,11 +398,11 @@ def snapshot_message(message: Any) -> dict:
             getattr(message, "giveaway_winners", None), ["winner_count", "quantity", "prize_description"]),
         "checklist": _snapshot_checklist(getattr(message, "checklist", None)),
         "paid_media": _snapshot_paid_media(getattr(message, "paid_media", None)),
-        # Rich Messages presence marker (Kurigram 2.2.24, #83/#84). Phase 1 stores only a
-        # boolean; phase 2 replaces it with the serialised rich_tree (v6). Restored into a
-        # truthy stand-in in CachedMessage so the placeholder title/flag/block render on a
-        # cache hit exactly as for a live rich post.
-        "rich_present": getattr(message, "rich_message", None) is not None,
+        # Rich Messages (Kurigram 2.2.24, #85). Store the canonical tree VERBATIM (JSON-safe
+        # by construction). Obtained through rich_tree.tree_of — NOT from_pyrogram directly —
+        # so the snapshot and the live render share ONE memoised tree per object (parity).
+        # None for a non-rich post; restored into CachedMessage.rich_tree.
+        "rich_tree": rich_tree.tree_of(message),
     }
 
 
@@ -636,11 +644,12 @@ class CachedMessage:
             data.get("giveaway_winners"), ["winner_count", "quantity", "prize_description"])
         self.checklist = _restore_checklist(data.get("checklist"))
         self.paid_media = _restore_paid_media(data.get("paid_media"))
-        # Rich Messages (Kurigram 2.2.24, #83/#84): a truthy stand-in so the phase-1
-        # placeholder gates (_format_special_media / _generate_title / _extract_flags, all
-        # `getattr(message, 'rich_message', None) is not None`) fire on a cache hit. Phase 2
-        # replaces this boolean marker with the restored rich_tree.
-        self.rich_message = SimpleNamespace(blocks=[]) if data.get("rich_present") else None
+        # Rich Messages (Kurigram 2.2.24, #85): restore the canonical tree directly. All
+        # consumers reach it through rich_tree.tree_of, which reads this `rich_tree`
+        # attribute on a CachedMessage (and rich_message stays None — the live objects are
+        # not snapshotted). This makes the cache-hit render byte-identical to the live one.
+        self.rich_tree = data.get("rich_tree")
+        self.rich_message = None
 
     def __str__(self) -> str:
         return json.dumps(self._snapshot, default=str)

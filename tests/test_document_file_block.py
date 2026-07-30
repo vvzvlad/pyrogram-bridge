@@ -289,8 +289,8 @@ async def test_get_post_html_album_debug_includes_raw_message():
 # ---------------------------------------------------------------------------
 
 def test_snapshot_version_is_current():
-    # v6: added the `rich_present` marker (Rich Messages, Kurigram 2.2.24, #83/#84).
-    assert SNAPSHOT_VERSION == 6
+    # v7: replaced the v6 `rich_present` boolean with the serialised rich_tree (#85).
+    assert SNAPSHOT_VERSION == 7
 
 
 def test_document_file_name_survives_roundtrip():
