@@ -34,11 +34,20 @@ logger = logging.getLogger(__name__)
 
 # Union of the three former copies. `s`/`del` (strikethrough) were previously
 # allowed only in the single-post path; registry §3.1 makes them survive in feeds too.
+# The structural tags (u, pre, code, blockquote, hr, h3-h6, table*, details, summary,
+# sub, sup, mark) were added for the rich-content renderer (rich_tree.render_html, #85).
+# Old (non-rich) posts never emit them, so golden output stays byte-identical.
 ALLOWED_TAGS = ['p', 'a', 'b', 'i', 'strong', 'em', 's', 'del',
                 'ul', 'ol', 'li', 'br', 'div', 'span',
-                'img', 'video', 'audio', 'source']
+                'img', 'video', 'audio', 'source',
+                'u', 'pre', 'code', 'blockquote', 'hr',
+                'h3', 'h4', 'h5', 'h6',
+                'table', 'caption', 'thead', 'tbody', 'tr', 'th', 'td',
+                'details', 'summary', 'sub', 'sup', 'mark']
 
 # Identical in all three former copies — moved here as-is. nh3 wants per-tag sets.
+# The td/th colspan/rowspan, details 'open' and span 'id' entries were added for the
+# rich renderer (#85); `id` is additionally range-restricted by _attribute_filter below.
 ALLOWED_ATTRIBUTES = {
     # '*' = attributes allowed on EVERY tag. Empty by design: nh3/ammonia otherwise
     # defaults generic attributes to {lang, title}, but bleach did NOT allow them
@@ -51,8 +60,20 @@ ALLOWED_ATTRIBUTES = {
     'audio': {'controls', 'style'},
     'source': {'src', 'type'},
     'div': {'class', 'style'},
-    'span': {'class'},
+    'span': {'class', 'id'},
+    'td': {'colspan', 'rowspan'},
+    'th': {'colspan', 'rowspan'},
+    'details': {'open'},
 }
+
+# DOM-clobbering guard (#85): the ONLY `id` values allowed are rich-content anchors
+# (rich_tree emits ``id="rich-…"`` for RichBlockAnchor / RichTextReference). Any other
+# id — a page-element id an attacker planted in post text to clobber window.<name> /
+# document.getElementById — is dropped. Enforced in the config (not only the renderer)
+# so this invariant holds at the single sanitiser boundary.
+# `\Z` (end of string), NOT `$` — `$` also matches just before a trailing newline, so an
+# id like "rich-ok\n" would slip through; `\Z` is strict end-of-string (defense-in-depth).
+_ALLOWED_ID_RE = re.compile(r'^rich-[A-Za-z0-9_-]+\Z')
 
 # These 5 props SIZE media in readers; dropping `style` outright would change
 # rendering, so `style` is kept but its content is filtered down to exactly these.
@@ -122,6 +143,9 @@ def _attribute_filter(tag: str, attr: str, value: str):
             # inside this callback and would then insert the RAW style value. Dropping
             # the attribute instead keeps the fail-closed guarantee on the style path.
             return None
+    if attr == 'id':
+        # DOM-clobbering guard (#85): keep only `rich-…` anchor ids, drop everything else.
+        return value if _ALLOWED_ID_RE.match(value or '') else None
     return value
 
 
