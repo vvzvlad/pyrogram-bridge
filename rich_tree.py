@@ -109,6 +109,32 @@ def tree_of(message: Any) -> Optional[dict]:
     return tree
 
 
+def invalidate_tree_memo(message: Any) -> None:
+    """Clear the memoised rich tree on a message (phase 3, #86).
+
+    ``enrich_rich_parts`` / the /media re-fetch cascade replace ``message.rich_message`` with
+    the fully-fetched object. Without clearing the memo, :func:`tree_of` would keep returning
+    the stale partial tree computed earlier, so the snapshot and every render would never see
+    the enriched content. If ``delattr`` is rejected (e.g. a slotted mock), the "computed" flag
+    is instead forced back to False so tree_of recomputes and overwrites the stale value —
+    never returns it. Only a message that rejects BOTH delattr and setattr keeps the stale tree
+    (no such object exists on the real fetch/render path).
+    """
+    if message is None:
+        return
+    for attr in (_MEMO_VALUE, _MEMO_DONE):
+        try:
+            if hasattr(message, attr):
+                delattr(message, attr)
+        except Exception:
+            # delattr rejected: force a recompute by clearing the "computed" flag instead, so
+            # tree_of does not hand back the stale memoised tree.
+            try:
+                setattr(message, _MEMO_DONE, False)
+            except Exception:
+                pass
+
+
 def _compute_tree(message: Any) -> Optional[dict]:
     # CachedMessage path: the tree was serialised at snapshot time.
     stored = getattr(message, "rich_tree", None)

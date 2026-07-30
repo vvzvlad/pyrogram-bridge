@@ -13,11 +13,13 @@ import os
 import asyncio
 import sys
 import signal
+import threading
 import uvloop
 import time
+from typing import Any, NamedTuple, Optional
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
-from pyrogram import Client
+from pyrogram import Client, raw, errors, types
 from pyrogram.handlers import DisconnectHandler
 from config import get_settings
 
@@ -29,6 +31,133 @@ kurigram_compat.install()
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+# --------------------------------------------------------------------------- #
+# Rich Messages phase 3 (#83 / #86): part=True full-content re-fetch.
+# --------------------------------------------------------------------------- #
+# Per-call timeout (seconds) for the raw messages.GetRichMessage re-fetch. Deliberately
+# short and well under Config["tg_rpc_timeout"]: a partial rich message is a cheap-to-degrade
+# enrichment, so a slow DC must NOT hold the global RPC gate — the feed breaker trips on the
+# first timeout and the render proceeds with the partial tree + part plaque (fixed on the
+# next re-fetch after the history TTL). Justified by #83: enrichment must never starve feeds.
+RICH_ENRICH_RPC_TIMEOUT = 5
+
+# Re-fetch attempt / failure counters, surfaced read-only to /health (same pattern as the
+# #84 kurigram_compat degradation counters). Process-wide, lock-guarded: feeds may re-fetch
+# concurrently. A growing failed/attempt ratio flags a DC or throttle problem otherwise
+# invisible to the reader (part plaques would just silently persist).
+_rich_fetch_lock = threading.Lock()
+_rich_part_fetch_attempts = 0
+_rich_part_fetch_failed = 0
+
+
+def _incr_rich_fetch_attempt() -> None:
+    global _rich_part_fetch_attempts
+    with _rich_fetch_lock:
+        _rich_part_fetch_attempts += 1
+
+
+def _incr_rich_fetch_failed() -> None:
+    global _rich_part_fetch_failed
+    with _rich_fetch_lock:
+        _rich_part_fetch_failed += 1
+
+
+def get_rich_part_fetch_attempt_count() -> int:
+    """Total GetRichMessage re-fetch attempts (feed + /media cascade) since process start."""
+    with _rich_fetch_lock:
+        return _rich_part_fetch_attempts
+
+
+def get_rich_part_fetch_failed_count() -> int:
+    """Re-fetch attempts that did not return a rich message (FloodWait/timeout/RPC/parse)."""
+    with _rich_fetch_lock:
+        return _rich_part_fetch_failed
+
+
+def reset_rich_fetch_counters() -> None:
+    """Reset the re-fetch counters. Test isolation only — not used in production."""
+    global _rich_part_fetch_attempts, _rich_part_fetch_failed
+    with _rich_fetch_lock:
+        _rich_part_fetch_attempts = 0
+        _rich_part_fetch_failed = 0
+
+
+class RichFetchResult(NamedTuple):
+    """Typed outcome of a single ``safe_get_rich_message`` re-fetch.
+
+    ``rich_message`` is the parsed high-level object on success (possibly a #84 parse_failed
+    SENTINEL — a part post whose fuller vectors still crashed), else None. ``outcome`` makes
+    a FloodWait DISTINGUISHABLE from a plain timeout DISTINGUISHABLE from a generic error, so
+    the feed breaker can react correctly (a global throttle and a slow DC both stop enrichment
+    for the whole render; a one-off RPC error only skips the current post):
+
+        "ok"         -> a RichMessage (or sentinel) was returned
+        "floodwait"  -> Telegram FLOOD_WAIT (global throttle)  -> breaker
+        "timeout"    -> the RPC exceeded ``timeout`` (slow DC)  -> breaker
+        "error"      -> any other RPC / empty / parse failure   -> skip this post only
+    """
+    rich_message: Optional[Any]
+    outcome: str
+
+
+async def safe_get_rich_message(client: Client, chat_id, msg_id,
+                                timeout: float = RICH_ENRICH_RPC_TIMEOUT) -> RichFetchResult:
+    """Fetch the FULL rich content of a part=True post via raw ``messages.GetRichMessage``.
+
+    ``client`` is a LIVE (raw) pyrogram Client — the transport is passed explicitly (mirroring
+    ``tg_cache._reply_enrichment(client, ...)``) because both call sites hold the raw client:
+    feed enrichment in tg_cache and the /media cascade in api_server (via ``client.client``).
+    Like ``safe_get_messages`` this helper owns NO RPC gate: the CALLER decides whether to run
+    under ``tg_rpc_bounded`` (feed path: yes, serialise with other feed RPCs; reader /media
+    path: no, a media request must not queue behind feed enrichment).
+
+    NEVER raises: every failure degrades to a typed ``RichFetchResult(None, ...)`` + a WARNING
+    ``rich_part_fetch_failed``. This is load-bearing on the /media path — a BARE invoke there
+    must not surface an ``RPCError(CODE==400)`` (e.g. MSG_ID_INVALID from a transient blip),
+    which the download classifier would blacken into a PERMANENT 404 with row deletion.
+
+    Pipeline: resolve_peer(chat_id) -> invoke(GetRichMessage(peer, id)) -> messages.Messages ->
+    ``.messages[0].rich_message`` -> the #84-patched ``types.RichMessage._parse`` (recovers the
+    ``part`` flag; a parse crash degrades to a sentinel).
+    """
+    _incr_rich_fetch_attempt()
+    try:
+        peer = await client.resolve_peer(chat_id)
+        result = await asyncio.wait_for(
+            client.invoke(raw.functions.messages.GetRichMessage(peer=peer, id=msg_id)),
+            timeout=timeout,
+        )
+        msgs = getattr(result, "messages", None) or []
+        if not msgs:
+            _incr_rich_fetch_failed()
+            logger.warning(f"rich_part_fetch_failed: empty Messages for {chat_id}/{msg_id}")
+            return RichFetchResult(None, "error")
+        raw_rich = getattr(msgs[0], "rich_message", None)
+        if raw_rich is None:
+            _incr_rich_fetch_failed()
+            logger.warning(f"rich_part_fetch_failed: no rich_message on {chat_id}/{msg_id}")
+            return RichFetchResult(None, "error")
+        # The #84 message-contour wrapper never raises (crash -> sentinel), but guard anyway.
+        parsed = await types.RichMessage._parse(client, raw_rich)
+        if parsed is None:
+            _incr_rich_fetch_failed()
+            logger.warning(f"rich_part_fetch_failed: parse returned None for {chat_id}/{msg_id}")
+            return RichFetchResult(None, "error")
+        return RichFetchResult(parsed, "ok")
+    except errors.FloodWait as e:
+        _incr_rich_fetch_failed()
+        logger.warning(f"rich_part_fetch_failed: FloodWait {getattr(e, 'value', None)}s for {chat_id}/{msg_id}")
+        return RichFetchResult(None, "floodwait")
+    except asyncio.TimeoutError:
+        _incr_rich_fetch_failed()
+        logger.warning(f"rich_part_fetch_failed: timeout after {timeout}s for {chat_id}/{msg_id}")
+        return RichFetchResult(None, "timeout")
+    except Exception as e:
+        _incr_rich_fetch_failed()
+        logger.warning(f"rich_part_fetch_failed: {type(e).__name__}: {e} for {chat_id}/{msg_id}")
+        return RichFetchResult(None, "error")
+
 
 class TelegramClient:
     def __init__(self):
