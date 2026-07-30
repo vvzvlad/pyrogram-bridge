@@ -404,6 +404,16 @@ class PostParser:
                 logger.error(f"post_not_found_or_empty: channel {prepared_channel_id}, post_id {post_id}")
                 return None
 
+            # Rich part=True enrichment (#86): if this single post is a partial rich message,
+            # re-fetch its full content via GetRichMessage before rendering (one post -> at
+            # most one re-fetch). INTENTIONALLY applied to BOTH output types: /json exposes the
+            # rich tree just like /html, so both consumers must see the full content. Neither is
+            # cached (single-post live fetch), so an eternally-partial post costs one bounded
+            # (5s, breaker-guarded) re-fetch per request on either path — acceptable for an
+            # on-demand single-post endpoint. Imported lazily to keep the import graph acyclic.
+            from tg_cache import enrich_rich_parts
+            await enrich_rich_parts(self.client, [message])
+
             # HTML single-post page only: a message that is part of a media group
             # (album) is rendered together with its siblings, so e.g. all files of a
             # 3-document album show up on any of the three /html/<chan>/<id> pages.
