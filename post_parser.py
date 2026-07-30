@@ -45,6 +45,37 @@ NO_IMAGE_MEDIA_TYPES = {
 }
 
 
+# Single source of the fallback label text _reply_author_label returns when nothing identifies
+# the reply target (the branch DECISION lives in _reply_author_source, not in this string).
+UNKNOWN_REPLY_AUTHOR = 'Unknown author'
+
+# Marker lines that fence the quoted message in the reply/pinned block, in the style of the
+# forward block ('--- Forwarded from X ---' / '--- Forwarded post end ---'). They are plain
+# TEXT because a visual delimiter cannot be done with CSS here: sanitizer.py scrubs `style`
+# down to 5 sizing properties (no border-left / padding / color) and the project ships no
+# stylesheet for class names, so the fence has to survive both the sanitizer and a reader's
+# HTML→text conversion. Without it the quote and the post's own text read as one post.
+# ACCEPTED LIMITATION: a quoted message can itself contain a marker-looking line (exactly as
+# it can contain '--- Forwarded post end ---' today); the consequence is cosmetic attribution
+# ambiguity only — it never reaches flag detection (_extract_flags removes the whole block as
+# an exact fragment) and never affects sanitizing.
+MARKER_REPLY_OPEN = '--- Reply to '
+MARKER_PINNED_OPEN = '--- Pinned message'
+MARKER_QUOTE_END = '--- End of quote ---'
+# A blank line between a fence and the quote reads as sloppy rendering, so both ends are
+# trimmed in _format_reply_quote. Case-insensitive with optional slash/space because nh3
+# normalizes '<BR>', '<br/>' and '<br >' to real line breaks all the same.
+# The '^' pattern is cheap: the regex engine only tries position 0. The '$' one is NOT — it
+# gets no start-position optimization and rescans the whole string on every attempt, which made
+# the trailing loop quadratic (235 ms for a 4096-char quote, 3.6 s at 20 k). It is therefore
+# searched only inside a fixed window at the very end (see _TRAILING_BR_WINDOW).
+_LEADING_BR_RE = re.compile(r'^<br\s*/?>', re.IGNORECASE)
+_TRAILING_BR_RE = re.compile(r'<br\s*/?>$', re.IGNORECASE)
+# Longest form the pattern can match ('<br' + padding + '/>'); a longer run of spaces inside
+# the tag simply stays untrimmed, which is a cosmetic non-issue.
+_TRAILING_BR_WINDOW = 16
+
+
 def _poll_media_object(message):
     """Return (media_obj, kind) attached to a poll's description_media, or (None, None).
 
@@ -658,7 +689,24 @@ class PostParser:
         reply_id = getattr(reply_to, "id", None)
         if reply_id is not None:
             return f"#{reply_id}"
-        return "Unknown author"
+        return UNKNOWN_REPLY_AUTHOR
+
+    def _reply_author_source(self, reply_to: Any) -> str:
+        """Where _reply_author_label's string comes from: 'name', 'id' or 'none'.
+
+        Callers branch on THIS instead of comparing the rendered label with the fallback text:
+        a channel actually titled "Unknown author", or a message whose id makes the label read
+        like the id fallback, must not be mistaken for the fallback cases. The fields checked
+        here are exactly the ones _reply_author_label reads, in the same order.
+        """
+        for holder, fields in ((getattr(reply_to, "sender_chat", None), ("title", "username")),
+                               (getattr(reply_to, "from_user", None),
+                                ("first_name", "last_name", "username"))):
+            if holder is None:
+                continue
+            if any((getattr(holder, field, None) or '').strip() for field in fields):
+                return 'name'
+        return 'id' if getattr(reply_to, "id", None) is not None else 'none'
 
     def _reply_target_url(self, reply_to: Any) -> Optional[str]:
         """Public t.me link to the reply target, or None when it cannot be built."""
@@ -681,46 +729,91 @@ class PostParser:
         return None
 
     def _format_reply_quote(self, reply_to: Any) -> str:
-        """Full (never truncated) HTML-safe quote of a reply target."""
+        """Full (never truncated) HTML-safe quote of a reply target.
+
+        Returns '' when the target quotes no text at all (media-only, or only blank lines): the
+        caller then emits the opening marker alone instead of an empty frame.
+        """
         value = getattr(reply_to, "text", None) or getattr(reply_to, "caption", None) or ''
-        if not value:
+        # Emptiness is decided on the PLAIN value, never on the html: .html is derived from this
+        # same text, and for a message WITHOUT entities pyrogram returns it unescaped, so a quote
+        # whose whole text is '<без комментариев>' or '<3>' looks like markup and a tag-stripped
+        # view would erase a real quote (nh3 escapes it later and the reader sees it fine).
+        if not str(value).strip():
             return ''
         # Live pyrogram Str and the cached CachedStr both expose .html with the entity
         # formatting preserved; a plain string must be escaped before entering the markup.
         raw_html = getattr(value, "html", None)
         quote = str(raw_html) if raw_html is not None else html.escape(str(value))
         quote = quote.replace('\n', '<br>')
+        # Trim the blank run at BOTH ends so neither fence gets an empty line against it. Only
+        # ' \t\r\n' is stripped: the whitespace HTML actually RENDERS (NBSP and the other
+        # non-ASCII spaces) is kept, because a leading NBSP is a common hand-made indent. A quote
+        # of ONLY such spaces is still dropped by the emptiness check above (str.strip() there
+        # takes no argument) — deliberate: a blank-only quote adds nothing between the fences.
+        # KNOWN REMAINDER: both patterns need the tag at the very edge, so a <br> tucked inside
+        # an entity span ('<b>bold<br></b>', '<b><br>bold</b>') or carrying attributes
+        # ('<br class=x>') still pads a fence. Not worth tag-aware trimming; pinned by tests.
+        quote = quote.strip(' \t\r\n')
+        while (trimmed := _LEADING_BR_RE.sub('', quote)) != quote:
+            quote = trimmed.lstrip(' \t\r\n')
+        while (match := _TRAILING_BR_RE.search(quote, max(0, len(quote) - _TRAILING_BR_WINDOW))) is not None:
+            quote = quote[:match.start()].rstrip(' \t\r\n')
         # Same treatment as the post body: bare URLs inside the quote become clickable.
         return self._add_hyperlinks_to_raw_urls(quote)
+
+    def _format_reply_target(self, reply_to: Any, label_raw: str) -> str:
+        """Marker text naming the reply/pinned target: a linked label or "label, #id".
+
+        `label_raw` is passed in (not recomputed) so a caller that BRANCHES on the label
+        provably renders the same value it decided on.
+        """
+        label = html.escape(label_raw)
+        url = self._reply_target_url(reply_to)
+        reply_id = getattr(reply_to, "id", None)
+        id_text = html.escape(f"#{reply_id}") if reply_id else ''
+        if url:
+            # On the linked path the id lives in the anchor tooltip instead of cluttering
+            # the visible link text (the sanitizer allowlist permits title on <a>).
+            title_attr = f' title="#{html.escape(str(reply_id), quote=True)}"' if reply_id else ''
+            return f'<a href="{html.escape(url, quote=True)}"{title_attr}>{label}</a>'
+        # No link to hang a tooltip on: keep the id visible, as the old block did.
+        # A comma form avoids double parentheses after a "Name (@user)" label, and the
+        # id is skipped when the label already IS the id fallback (no "#53, #53").
+        return f'{label}, {id_text}' if id_text and label != id_text else label
 
     def _format_reply_info(self, message: Message) -> Union[str, None]:
         is_pinned = (getattr(message, "service", None) and 'PINNED_MESSAGE' in str(message.service))
         reply_to = getattr(message, "reply_to_message", None)
         if is_pinned and reply_to:
             quote = self._format_reply_quote(reply_to)
+            # The pinned block has the full target in hand, so it names it too instead of
+            # repeating the bare post title. The wording is chosen from the label's SOURCE, not
+            # from its text, and the label itself is computed ONCE for the markup.
+            label_raw = self._reply_author_label(reply_to)
+            source = self._reply_author_source(reply_to)
+            if source == 'none':
+                # Nothing identifies the target: "from Unknown author" would add nothing.
+                head = f'{MARKER_PINNED_OPEN} ---'
+            elif source == 'id':
+                # Only the id is known. "from #69" would read as "from author #69" while #69
+                # IS the pinned message's own id, so the id goes in without the "from".
+                head = f'{MARKER_PINNED_OPEN} {self._format_reply_target(reply_to, label_raw)} ---'
+            else:
+                head = f'{MARKER_PINNED_OPEN} from {self._format_reply_target(reply_to, label_raw)} ---'
             if quote:
-                return f'<div class="message-pinned">Pinned: {quote}</div><br>'
-            return f'<div class="message-pinned">Pinned message</div><br>'
+                return f'<div class="message-pinned">{head}<br>{quote}<br>{MARKER_QUOTE_END}</div><br>'
+            # Nothing quoted (media-only target): the opening marker alone, so no end marker
+            # dangles under an empty quote.
+            return f'<div class="message-pinned">{head}</div><br>'
 
         if reply_to:
             quote = self._format_reply_quote(reply_to)
-            label = html.escape(self._reply_author_label(reply_to))
-            url = self._reply_target_url(reply_to)
-            reply_id = getattr(reply_to, "id", None)
-            id_text = html.escape(f"#{reply_id}") if reply_id else ''
-            if url:
-                # On the linked path the id lives in the anchor tooltip instead of cluttering
-                # the visible link text (the sanitizer allowlist permits title on <a>).
-                title_attr = f' title="#{html.escape(str(reply_id), quote=True)}"' if reply_id else ''
-                target = f'<a href="{html.escape(url, quote=True)}"{title_attr}>{label}</a>'
-            else:
-                # No link to hang a tooltip on: keep the id visible, as the old block did.
-                # A comma form avoids double parentheses after a "Name (@user)" label, and the
-                # id is skipped when the label already IS the id fallback (no "#53, #53").
-                target = f'{label}, {id_text}' if id_text and label != id_text else label
+            target = self._format_reply_target(reply_to, self._reply_author_label(reply_to))
             if quote:
-                return f'<div class="message-reply">Reply to {target}:<br>{quote}</div><br>'
-            return f'<div class="message-reply">Reply to {target}</div><br>'
+                return (f'<div class="message-reply">{MARKER_REPLY_OPEN}{target} ---<br>{quote}'
+                        f'<br>{MARKER_QUOTE_END}</div><br>')
+            return f'<div class="message-reply">{MARKER_REPLY_OPEN}{target} ---</div><br>'
 
         return None
 
