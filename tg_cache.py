@@ -21,6 +21,8 @@ from typing import Any, Optional, Union, List
 from pyrogram import Client
 from pyrogram.types import Message
 from tg_throttle import tg_rpc_bounded
+from telegram_client import safe_get_rich_message
+import rich_tree
 from config import get_settings
 from message_snapshot import (
     SNAPSHOT_VERSION,
@@ -227,6 +229,88 @@ async def _reply_enrichment(client: Client, messages: list[Message]) -> list[Mes
     return messages
 
 
+# Total wall-clock budget (seconds) for part-message enrichment PER feed render (#83 / #86).
+# The RPC gate is global and serialised, so unbounded per-render enrichment could starve every
+# other feed poll; and the whole history snapshot must be written before the reader's ~20s HTTP
+# timeout. 15s leaves ample margin. When the budget is spent the remaining part posts are still
+# snapshotted with their partial tree + part plaque (fixed on the next re-fetch after TTL).
+RICH_ENRICH_TIME_BUDGET = 15
+
+
+def _needs_rich_enrichment(message: Message) -> bool:
+    """True for a partial (part=True) rich message — INCLUDING a #84 parse_failed sentinel.
+
+    A part=True post whose parse crashed is ALSO re-fetched: the fuller GetRichMessage vectors
+    may parse cleanly. A part=False (complete) rich post and a non-rich post are skipped.
+    """
+    rm = getattr(message, 'rich_message', None)
+    if rm is None:
+        return False
+    return bool(getattr(rm, 'part', False))
+
+
+async def enrich_rich_parts(client: Client, messages: List[Message]) -> List[Message]:
+    """Re-fetch the FULL content of part=True rich posts and splice it in before snapshot.
+
+    Modelled on :func:`_reply_enrichment`: runs at FETCH time (cached_get_chat_history live
+    path / PostParser.get_post) so the enriched tree lands in the history snapshot and every
+    feed render reads the full rich content from cache instead of re-fetching per poll.
+
+    Each partial post is re-fetched via ``safe_get_rich_message`` UNDER the global RPC gate
+    (``tg_rpc_bounded``, like _reply_enrichment). On success ``message.rich_message`` is
+    replaced with the full object and the memoised rich tree is INVALIDATED so the snapshot
+    and render observe the enriched tree (else the stale partial tree persists).
+
+    Breaker + budget — both STOP enrichment for the REST of this render but never abort it
+    (the snapshot is ALWAYS written; un-enriched posts keep their partial tree + part plaque
+    until the history TTL, then the next re-fetch fixes them):
+      * the FIRST FloodWait (global throttle) OR the FIRST timeout (slow DC) trips the breaker;
+      * exceeding ``RICH_ENRICH_TIME_BUDGET`` seconds stops enrichment.
+    A one-off generic RPC error on a single post only skips THAT post and keeps going.
+    """
+    targets = [m for m in messages if _needs_rich_enrichment(m)]
+    if not targets:
+        return messages
+
+    start = time.monotonic()
+    enriched_count = 0
+    for message in targets:
+        if time.monotonic() - start > RICH_ENRICH_TIME_BUDGET:
+            logger.warning(
+                f"rich_enrich_budget_exhausted: stopped after {enriched_count} enriched "
+                f"({RICH_ENRICH_TIME_BUDGET}s budget); remaining part posts keep the plaque"
+            )
+            break
+        chat = getattr(message, 'chat', None)
+        chat_id = getattr(chat, 'id', None)
+        if chat_id is None:
+            continue
+        try:
+            # Gate outside, timeout inside — the shared tg_rpc_bounded. safe_get_rich_message
+            # bounds the RPC body itself (RICH_ENRICH_RPC_TIMEOUT) and never raises; a gate
+            # timeout (if tg_rpc_timeout is shorter) surfaces here and is treated as a breaker.
+            async with tg_rpc_bounded(Config["tg_rpc_timeout"]):
+                result = await safe_get_rich_message(client, chat_id, message.id)
+        except Exception as e:
+            logger.warning(f"rich_enrich_gate_error: {type(e).__name__}: {e} — stopping enrichment")
+            break
+
+        if result.outcome == "ok" and result.rich_message is not None:
+            message.rich_message = result.rich_message
+            rich_tree.invalidate_tree_memo(message)
+            enriched_count += 1
+        elif result.outcome in ("floodwait", "timeout"):
+            logger.warning(
+                f"rich_enrich_breaker: {result.outcome} on {chat_id}/{message.id} — stopping "
+                f"enrichment for this render (enriched {enriched_count} before the breaker)"
+            )
+            break
+        # "error": skip this one post, keep enriching the rest.
+
+    logger.debug(f"rich_enrich_done: enriched {enriched_count}/{len(targets)} part posts this render")
+    return messages
+
+
 async def cached_get_chat_history(client: Client, channel_id: Union[str, int], limit: int = 20) -> List[Message]:
     """
     Gets chat message history with caching.
@@ -257,6 +341,9 @@ async def cached_get_chat_history(client: Client, channel_id: Union[str, int], l
         # history snapshot below — feed renders (RSS and HTML) then read the quote
         # from cache instead of re-fetching it on every poll.
         messages = await _reply_enrichment(client, messages)
+        # Re-fetch the full content of any part=True rich posts before the snapshot, so the
+        # enriched rich tree (not the partial one) is what gets cached (#86).
+        messages = await enrich_rich_parts(client, messages)
         await asyncio.to_thread(_save_history_to_cache, channel_id, messages, limit)
 
         return messages

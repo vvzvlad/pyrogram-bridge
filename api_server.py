@@ -37,7 +37,12 @@ from pyrogram.types import Message
 from pyrogram.enums import MessageMediaType
 from fastapi import FastAPI, HTTPException, Response, Request
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
-from telegram_client import TelegramClient
+from telegram_client import (
+    TelegramClient,
+    safe_get_rich_message,
+    get_rich_part_fetch_attempt_count,
+    get_rich_part_fetch_failed_count,
+)
 from config import get_settings, setup_logging
 from rss_generator import generate_channel_rss, generate_channel_html, get_render_failed_count
 import rich_tree
@@ -311,6 +316,70 @@ def _clear_all_download_failures() -> None:
     _download_failures.clear()
     if n:
         logger.warning(f"download_backoff_cleared_all: dropped {n} entries after verified self-heal restart")
+
+# --------------------------------------------------------------------------- #
+# Rich part=True re-fetch memo for the /media download cascade (#86).
+# --------------------------------------------------------------------------- #
+# A reader burst over ONE part post carrying N media must not fire N identical GetRichMessage
+# RPCs. The re-fetch result (the enriched rich message, or None on failure) is cached per
+# (channel, post_id) for a short TTL. Bounded OrderedDict with LRU eviction (mirrors
+# _download_failures). None is cached too, so a failing re-fetch also collapses N calls into 1.
+_RICH_REFETCH_TTL = 60.0          # seconds — short: a flood blip freezes plaques only until here
+_RICH_REFETCH_MEMO_MAX = 1024     # bounded to keep the process footprint flat
+_rich_refetch_memo: "OrderedDict[tuple[str, int], tuple[float, Any]]" = OrderedDict()
+# In-flight coalescing (mirrors _inflight in _download_deduped): the download dedup key is
+# (channel, post_id, file_unique_id), so N media of ONE part post download CONCURRENTLY and
+# would each fire their own GetRichMessage. This map keys by (channel, post_id) only, so the
+# first concurrent re-fetch owns the RPC and the rest await its shared Future — "N media on a
+# post = 1 RPC" holds for a PARALLEL page load, not only for sequential retries (the TTL memo).
+_rich_refetch_inflight: "dict[tuple[str, int], asyncio.Future]" = {}
+
+
+async def _rich_refetch_for_download(channel: Union[str, int], post_id: int) -> Any:
+    """ONE bare, memoised + coalesced GetRichMessage re-fetch for the /media cascade (#86).
+
+    BARE — no ``tg_rpc_bounded``: a reader /media request must NOT queue behind feed
+    enrichment, and a FloodWait is already mapped to a retryable 429 by get_media's handler.
+    ``safe_get_rich_message`` never raises (it returns a typed result), so a transient blip
+    can never propagate as an ``RPCError(CODE==400)`` that the _runner classifier would blacken
+    into a permanent 404. Returns the enriched high-level rich message (possibly a #84 sentinel)
+    or None on any fetch failure; the value is memoised for _RICH_REFETCH_TTL seconds AND
+    coalesced across concurrent callers for the same (channel, post_id).
+    """
+    key = (str(channel), post_id)
+    now = time.monotonic()
+    entry = _rich_refetch_memo.get(key)
+    if entry is not None and entry[0] > now:
+        _rich_refetch_memo.move_to_end(key)
+        return entry[1]
+
+    # Concurrent re-fetch for the same post already in flight -> await its result instead of
+    # issuing a duplicate RPC. shield() so a cancelled waiter never cancels the shared Future
+    # the owner (and other waiters) depend on. The dict check/insert below has no await between
+    # the .get() miss and the assignment, so there is no race on the map itself (single loop).
+    inflight = _rich_refetch_inflight.get(key)
+    if inflight is not None:
+        return await asyncio.shield(inflight)
+
+    fut: asyncio.Future = asyncio.get_event_loop().create_future()
+    _rich_refetch_inflight[key] = fut
+    try:
+        result = await safe_get_rich_message(client.client, channel, post_id)
+        enriched = result.rich_message  # None on any failure; object/sentinel on success
+        _rich_refetch_memo[key] = (time.monotonic() + _RICH_REFETCH_TTL, enriched)
+        _rich_refetch_memo.move_to_end(key)
+        while len(_rich_refetch_memo) > _RICH_REFETCH_MEMO_MAX:
+            _rich_refetch_memo.popitem(last=False)
+        if not fut.done():
+            fut.set_result(enriched)
+        return enriched
+    except BaseException as e:  # noqa: BLE001 — forward ANY failure (incl. cancel) to waiters
+        if not fut.done():
+            fut.set_exception(e)
+        raise
+    finally:
+        _rich_refetch_inflight.pop(key, None)
+
 # How stale a temp_* file's mtime must be before a serve refreshes it (keeps the 1h
 # sweeper from deleting an actively-viewed video). Well below 1h so the file stays alive,
 # but large enough that the mtime — and thus FileResponse's ETag — is stable within any
@@ -1053,17 +1122,39 @@ async def download_media_file(channel: Union[str, int], post_id: int, file_uniqu
 
     file_id = await find_file_id_in_message(message, file_unique_id)
     if not file_id:
-        # Rich media (Kurigram 2.2.24, #85): if the post's rich parse degraded (sentinel or
-        # a parse_failed block), a missing fid is "parse could not resolve it", NOT "the
-        # media is gone". Raise a TRANSIENT error (not HTTPException(404), not RPCError) so
-        # the _runner classifier marks it transient (503 + Retry-After) and the SQLite row
-        # is NOT deleted — the media may resolve once upstream parsing is fixed. (Phase 3
-        # will add a GetRichMessage cascade + a part=False condition here.)
-        if has_parse_failures(getattr(message, 'rich_message', None)):
-            logger.warning(f"rich_media_unresolved_transient: {channel}/{post_id}/{file_unique_id} "
-                           f"not found but rich parse failed — keeping SQLite row, 503 transient")
-            raise HTTPException(status_code=503, detail="Rich media temporarily unresolved (parse failed)")
+        # Rich media download cascade (Kurigram 2.2.24, #86). The fid was not resolvable from
+        # the live (possibly partial / parse-degraded) rich object. Do ONE bare, memoised
+        # GetRichMessage re-fetch and re-resolve the fid against the fuller object.
+        rich_message = getattr(message, 'rich_message', None)
+        if rich_message is not None:
+            enriched = await _rich_refetch_for_download(channel_id, post_id)
+            if enriched is not None:
+                message.rich_message = enriched
+                rich_tree.invalidate_tree_memo(message)
+                file_id = await find_file_id_in_message(message, file_unique_id)
+            if not file_id:
+                # STRICT classification: delete the SQLite row + serve a permanent 404 ONLY
+                # when the re-fetch produced a COMPLETE, cleanly-parsed object that definitively
+                # lacks the media (re-fetch succeeded AND no parse_failed nodes AND part==False).
+                # ANY other outcome (re-fetch failure, sentinel, still part=True) is TRANSIENT:
+                # the media may still resolve later, so keep the row and serve 503. Else a flood
+                # blip would convert live media into a permanent 404 with row deletion — the
+                # exact defect this cascade fixes.
+                complete = (
+                    enriched is not None
+                    and not has_parse_failures(enriched)
+                    and not bool(getattr(enriched, 'part', False))
+                )
+                if not complete:
+                    logger.warning(f"rich_media_unresolved_transient: {channel}/{post_id}/{file_unique_id} "
+                                   f"unresolved after rich re-fetch (fetched={enriched is not None}) — "
+                                   f"keeping SQLite row, 503 transient")
+                    raise HTTPException(status_code=503, detail="Rich media temporarily unresolved")
+                logger.warning(f"rich_media_absent_permanent: {channel}/{post_id}/{file_unique_id} "
+                               f"absent in fully-enriched (part=False, clean) rich message — 404, removing row")
+                # fall through to the permanent 404 + row deletion below.
 
+    if not file_id:
         error_message = f"Media with file_unique_id {file_unique_id} not found in message {post_id} for channel {channel}"
         logger.error(error_message)
 
@@ -1667,6 +1758,11 @@ async def health_check(request: Request, token: str | None = None) -> Response:
             # Adapter (tree-build) per-block failures (Rich Messages phase 2, #85).
             "rich_block_adapt_failed": rich_tree.get_rich_block_adapt_failed_count(),
             "rich_part_seen": get_rich_part_seen_count(),
+            # Rich Messages phase 3 (#86): part=True GetRichMessage re-fetch attempts and
+            # failures (feed enrichment + /media cascade). A growing failed/attempt ratio flags
+            # a DC/throttle problem that would otherwise only show as silently-persistent plaques.
+            "rich_part_fetch_attempts": get_rich_part_fetch_attempt_count(),
+            "rich_part_fetch_failed": get_rich_part_fetch_failed_count(),
             "config": config_info,
             **cache_stats
         }
