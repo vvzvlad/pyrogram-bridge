@@ -52,8 +52,15 @@ logger = logging.getLogger(__name__)
 # v6 file has only the boolean and would restore with an empty rich body — invalidate v6
 # files (one-off refetch per feed). INVARIANT: this bump is REQUIRED by rich_tree.SCHEMA_V
 # (any SCHEMA_V bump must bump SNAPSHOT_VERSION so a stored tree with an older `v` is
-# invalidated here rather than mis-rendered).
-SNAPSHOT_VERSION = 7
+# invalidated here rather than mis-rendered). The dependency is one-way: a SNAPSHOT_VERSION
+# bump on its own (like v8 below) does NOT require touching SCHEMA_V.
+# v8: added `chat.id` to the reply target plus `chat.type` (as its enum NAME) to the message's
+# own chat. Both feed _reply_is_near_own_channel: chat.id is the primary "same channel" signal
+# (a channel that signs posts with the authors' profiles fills from_user and leaves sender_chat
+# None, so without it a cache hit would decide "foreign chat" and print a full quote where a
+# live render truncates), and chat.type keeps the shortening to CHANNEL feeds instead of also
+# hitting replies to people in a group — invalidate v7 files (one-off refetch per feed).
+SNAPSHOT_VERSION = 8
 
 
 class CachedStr(str):
@@ -140,6 +147,10 @@ def _snapshot_chat(chat: Any) -> Optional[dict]:
         "id": getattr(chat, "id", None),
         "username": getattr(chat, "username", None),
         "title": getattr(chat, "title", None),
+        # ChatType enum -> its name, like `media`/`service` in snapshot_message: an enum is not
+        # JSON-serialisable. _reply_is_near_own_channel needs it to tell a channel feed (where a
+        # neighbouring post really is the entry above) from a group/discussion feed.
+        "type": _enum_name(getattr(chat, "type", None)),
         "usernames": snap_usernames,
     }
 
@@ -218,17 +229,23 @@ def _snapshot_web_page(wp: Any) -> Optional[dict]:
     }
 
 
-# Reply-target texts are stored IN FULL (and with their .html rendering): the renderer
-# (_format_reply_info) shows the complete quote, so any truncation here would silently
-# shorten the quote on a cache hit and diverge from the live-fetch render path.
+# Reply-target texts are stored IN FULL (and with their .html rendering) precisely BECAUSE the
+# renderer (_format_reply_info) is the one that may shorten a quote: keeping the whole text here
+# makes a cache hit render byte-identically to a live fetch and lets REPLY_QUOTE_TRUNCATE_* be
+# retuned without invalidating the cache. Truncating at snapshot time would do neither.
 
 
 def _snapshot_reply(reply: Any) -> Optional[dict]:
     """DEPTH-1 snapshot of a resolved reply target (message.reply_to_message).
 
     Stores ONLY the fields _format_reply_info (post_parser.py) reads: id, text,
-    caption, sender_chat(id/title/username), from_user(id/first_name/last_name/username).
+    caption, chat(id), sender_chat(id/title/username), from_user(id/first_name/last_name/username).
     The reply's own nested reply_to_message is deliberately NOT snapshotted (no recursion).
+
+    `chat` carries the id alone: it exists solely so _reply_is_near_own_channel can tell "same
+    channel" from "another chat" on a cache hit. pyrogram parses `chat` on every Message
+    independently of sender_chat/from_user, which is why it works where sender_chat does not
+    (a channel signing posts with the authors' profiles has from_user set and sender_chat None).
     """
     if reply is None:
         return None
@@ -236,6 +253,7 @@ def _snapshot_reply(reply: Any) -> Optional[dict]:
         "id": getattr(reply, "id", None),
         "text": _snapshot_str(getattr(reply, "text", None)),
         "caption": _snapshot_str(getattr(reply, "caption", None)),
+        "chat": _snapshot_obj(getattr(reply, "chat", None), ["id"]),
         "sender_chat": _snapshot_obj(getattr(reply, "sender_chat", None), ["id", "title", "username"]),
         "from_user": _snapshot_obj(getattr(reply, "from_user", None), ["id", "first_name", "last_name", "username"]),
     }
@@ -433,6 +451,9 @@ def _restore_chat(d: Optional[dict]) -> Optional[SimpleNamespace]:
         id=d.get("id"),
         username=d.get("username"),
         title=d.get("title"),
+        # Restored as the NAME string, not the enum: readers must compare by name
+        # (_reply_is_near_own_channel does), never by enum identity.
+        type=d.get("type"),
         usernames=restored_usernames,
     )
 
@@ -493,6 +514,7 @@ def _restore_reply(d: Optional[dict]) -> Optional[SimpleNamespace]:
         id=d.get("id"),
         text=_restore_str(d.get("text")),
         caption=_restore_str(d.get("caption")),
+        chat=_ns(d.get("chat"), ["id"]),
         sender_chat=_ns(d.get("sender_chat"), ["id", "title", "username"]),
         from_user=_ns(d.get("from_user"), ["id", "first_name", "last_name", "username"]),
     )

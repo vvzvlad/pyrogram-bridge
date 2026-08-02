@@ -34,6 +34,8 @@ services:
       # MEDIA_SIGNING_SECRET: XXX            # Secret for signing media URLs (HMAC-SHA256 v2, HKDF-derived). If unset, falls back to TOKEN, then to an auto-generated key file. Set this or TOKEN so media URLs survive data-volume recreation (the key file is wiped with the volume)
       # MEDIA_ALLOW_LEGACY_DIGEST: "true"    # Also accept old pre-v2 (SHA-1/8-char) media digests so already-delivered URLs keep working after upgrade. Set false once all feeds have been re-polled (default: true)
       # MEDIA_URL_TTL_DAYS: 0                # Optional signed expiry (days) on media URLs. Unset/0 = no expiry (default) — RSS readers fetch late, a hard expiry would break them
+      # REPLY_QUOTE_TRUNCATE_CHARS: 200      # Visible characters kept from a quoted post when a reply answers a neighbouring post of the same channel; 0 = never truncate (default: 200)
+      # REPLY_QUOTE_TRUNCATE_DISTANCE: 2     # Max id distance between a post and its reply target for the quote to be shortened; 0 = disable truncation (default: 2)
       PYROGRAM_BRIDGE_URL: https://pgbridge.example.com
       API_PORT: 80
       TOKEN: ХХХ

@@ -1,7 +1,7 @@
 # flake8: noqa
 # pylint: disable=missing-function-docstring, missing-class-docstring, redefined-outer-name, line-too-long
 # pylint: disable=protected-access
-"""End-to-end rich pipeline tests (#85): process_message body/title/flags/fids, the v7
+"""End-to-end rich pipeline tests (#85): process_message body/title/flags/fids, the
 cache-path restore parity (+ v6 miss), and the /media fid resolution / transient
 classification on the download path.
 """
@@ -128,7 +128,7 @@ class TestProcessMessageRich:
 
 
 # --------------------------------------------------------------------------------------
-# v7 cache-path parity + v6 miss.
+# Cache-path parity + an outdated-version miss.
 # --------------------------------------------------------------------------------------
 class TestCachePathParity:
     def test_live_vs_restored_render_identical(self, parser):
@@ -153,12 +153,12 @@ class TestCachePathParity:
         fids = [t[2] for t in p._pending_media_ids]
         assert "smallph" in fids and "bigvid" not in fids
 
-    def test_v6_file_is_a_miss_v7_is_a_hit(self, tmp_path):
+    def test_v6_file_is_a_miss_and_the_current_version_is_a_hit(self, tmp_path):
         import tg_cache
         path = os.path.join(tmp_path, "history.json")
         payload = {"limit": 5, "messages": []}
 
-        # A current (v7) entry is a hit.
+        # An entry written with the current SNAPSHOT_VERSION is a hit.
         tg_cache._store_entry(path, payload)
         assert tg_cache._load_entry(path, max_age_hours=999) is not None
 

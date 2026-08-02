@@ -307,6 +307,34 @@ def test_reply_from_user_roundtrip():
     assert restored.reply_to_message.from_user.username == "johndoe"
 
 
+def test_reply_chat_id_roundtrip():
+    # Schema v8: the target's own chat.id is what _reply_is_near_own_channel compares against
+    # message.chat.id. It must survive the round trip, otherwise a cache hit decides "foreign
+    # chat" and prints a full quote where a live render truncates it.
+    reply = SimpleNamespace(
+        id=73,
+        text="signed channel post",
+        caption=None,
+        chat=SimpleNamespace(id=-1001287848294, title="Univelis", username="univelis"),
+        sender_chat=None,
+        from_user=SimpleNamespace(id=5, first_name="Admin", last_name=None, username="admin"),
+    )
+    restored, snap = _roundtrip(SimpleNamespace(id=81, reply_to_message=reply))
+
+    # Only the id is stored: the title/username of the target's chat are never rendered.
+    assert snap["reply_to_message"]["chat"] == {"id": -1001287848294}
+    assert restored.reply_to_message.chat.id == -1001287848294
+
+
+def test_reply_without_chat_restores_none():
+    # Old fixtures (and any pre-v8 shape reaching this code) have no `chat` at all.
+    reply = SimpleNamespace(id=74, text="x", caption=None, sender_chat=None)
+    restored, snap = _roundtrip(SimpleNamespace(id=82, reply_to_message=reply))
+
+    assert snap["reply_to_message"]["chat"] is None
+    assert restored.reply_to_message.chat is None
+
+
 def test_message_without_reply_restores_none():
     restored, snap = _roundtrip(SimpleNamespace(id=1))
     assert snap["reply_to_message"] is None

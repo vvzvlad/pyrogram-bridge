@@ -8,7 +8,7 @@
 """Rich Messages title/flag/special-block gates + defensive parse contours (#84/#85).
 
 Covers the three post_parser gates (now routed through rich_tree.tree_of in phase 2),
-the snapshot v7 rich_tree roundtrip, and the two defensive parse contours in
+the snapshot rich_tree roundtrip, and the two defensive parse contours in
 kurigram_compat. The rich RENDER pipeline itself is covered by test_rich_tree.py /
 test_rich_pipeline.py; here we only assert the gates fire for an EMPTY rich tree (the
 fallback-placard path a sentinel/failed parse takes).
@@ -127,12 +127,12 @@ class TestNoRich:
 
 
 # --------------------------------------------------------------------------------------
-# Task 7(b): snapshot v7 rich_tree roundtrip (parity of the placard from cache)
+# Task 7(b): snapshot rich_tree roundtrip (parity of the placard from cache)
 # --------------------------------------------------------------------------------------
 class TestSnapshotRoundtrip:
     def test_version_is_current(self):
-        # v7 = v6 (rich_present) replaced by the serialised rich_tree (#85).
-        assert ms.SNAPSHOT_VERSION == 7
+        # v8 = rich_tree (v7) plus the reply target's chat.id and the chat type.
+        assert ms.SNAPSHOT_VERSION == 8
 
     def test_rich_tree_stored_for_rich_post(self):
         msg = SimpleNamespace(rich_message=SimpleNamespace(blocks=[]))

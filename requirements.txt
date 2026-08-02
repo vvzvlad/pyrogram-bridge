@@ -13,6 +13,11 @@ python-multipart==0.0.20
 #     exact _parse shapes;
 #   - confirm pyrogram.types.Object did NOT gain __slots__ (the wrappers attach `part`
 #     and `parse_failed` via setattr, and Object.default serialises them into /raw_json).
+#   - re-check pyrogram/parser/html.py::unparse for new VALUELESS attributes: today
+#     ' expandable' on <blockquote> is the only one, and post_parser._QUOTE_TAG_TAIL_RE
+#     hardcodes that name (a bare word cannot be told from prose like '<Word here>'). A
+#     second such attribute would make the reply-quote truncator charge a real tag to the
+#     visible budget and possibly cut it in half.
 Kurigram==2.2.24
 TgCrypto==1.2.5
 uvloop==0.22.1

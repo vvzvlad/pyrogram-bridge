@@ -41,4 +41,6 @@ def get_settings():
         "tg_max_concurrent_transmissions": 3,
         "media_timeout_restart_threshold": 5,
         "cache_sweep_interval": 900,
+        "reply_quote_truncate_chars": 200,
+        "reply_quote_truncate_distance": 2,
     }

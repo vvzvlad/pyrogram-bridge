@@ -161,4 +161,12 @@ def get_settings() -> dict[str, Any]:
         # resets the streak, so this only fires on a genuine death loop, not on the odd
         # slow large-video timeout. The watchdog cannot catch this — it probes the main DC.
         "media_timeout_restart_threshold": _parse_int_env("MEDIA_TIMEOUT_RESTART_THRESHOLD", 5),
+        # A post replying to a NEIGHBOURING post of its own channel quotes it in full, so two
+        # adjacent feed entries read as half the same text — Telegram itself only shows a short
+        # preview there. Such a quote is cut to this many VISIBLE characters (200 ≈ the preview
+        # Telegram renders); the distance is measured in message ids, and 2 covers the common
+        # "reply to the post right above" while leaving genuine replies to older posts alone.
+        # Either value at 0 disables the truncation entirely (quotes stay full, as before).
+        "reply_quote_truncate_chars": _parse_int_env("REPLY_QUOTE_TRUNCATE_CHARS", 200, minimum=0),
+        "reply_quote_truncate_distance": _parse_int_env("REPLY_QUOTE_TRUNCATE_DISTANCE", 2, minimum=0),
     }

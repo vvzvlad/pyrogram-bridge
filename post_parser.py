@@ -76,6 +76,171 @@ _TRAILING_BR_RE = re.compile(r'<br\s*/?>$', re.IGNORECASE)
 # the tag simply stays untrimmed, which is a cosmetic non-issue.
 _TRAILING_BR_WINDOW = 16
 
+# Pieces of _truncate_quote_html. A quote is pyrogram's `.html`: entity tags, <br> breaks and
+# HTML entities, so the cut has to be counted in what a READER sees, not in string length.
+# A '<' opens a TAG only when a letter follows it and a '>' closes it: pyrogram leaves text
+# outside entity ranges unescaped, so '<без комментариев>', '<3>' and 'if x < 5 ... y > 3'
+# arrive here verbatim (the same reason _format_reply_quote decides emptiness on the plain
+# text). Treating those as free markup zeroed the visible counter — a bare '<' swallowed the
+# rest of the line — and silently disabled truncation on exactly the quotes it exists for.
+# The hyphen belongs in the name class: pyrogram prints '<tg-emoji emoji-id="...">' for custom
+# emoji and '<tg-time unix="...">' for dates, and closing those as '</tg>' would hand BROKEN
+# markup to _extract_flags, which matches the reply block on unsanitized html.
+_QUOTE_TAG_NAME_RE = re.compile(r'<(/?)([A-Za-z][A-Za-z0-9-]*)')
+# What may follow the name inside a real tag: nothing (optionally a self-closing '/'), an
+# attribute with a value, or the ONE valueless attribute pyrogram emits — ' expandable' on
+# <blockquote> (pyrogram/parser/html.py: every other tag it prints uses name="value").
+# That last alternative is spelled out instead of accepting any bare word because
+# '<blockquote expandable>' and prose like '<Word here>' are syntactically IDENTICAL; a
+# generic rule would put 'word' on the open-tag stack and emit a '</word>' the input never
+# contained, while rejecting 'expandable' would cut inside a real tag. Only the FIRST
+# attribute is checked — enough to tell markup from prose, and it keeps the scan linear
+# (no backtracking over a whole attribute list).
+_QUOTE_TAG_TAIL_RE = re.compile(r'\s*/?\Z|\s+[A-Za-z_:][-A-Za-z0-9_.:]*\s*=|\s+expandable\s*/?\Z')
+_QUOTE_ENTITY_RE = re.compile(r'&(?:#[0-9]{1,7}|#[xX][0-9a-fA-F]{1,6}|[A-Za-z][A-Za-z0-9]{0,31});')
+# Void elements never go on the open-tag stack: '</br>' is not a thing, so pushing one would
+# make the tag finaliser emit garbage instead of repairing the cut.
+_QUOTE_VOID_TAGS = frozenset({'br', 'img', 'hr', 'source'})
+# A cut mid-word is ugly, so the cut point may back off to the previous word boundary — but no
+# further than this share of the limit, otherwise a long unbroken run would eat a whole line.
+_QUOTE_WORD_BOUNDARY_SHARE = 0.2
+# Separators dropped before the ellipsis ('foo, …' reads worse than 'foo…'). Matched against one
+# visible CHARACTER at a time, never as a tail-anchored regex over the html: an entity ends with
+# ';', which this class contains, and a regex would chop '&amp;' into a broken '&amp'.
+_QUOTE_TAIL_TRIM_RE = re.compile(r'[\s.,;:!?-]')
+
+
+def _truncate_quote_html(quote_html: str, max_chars: int) -> str:
+    """Cut an entity-formatted quote down to `max_chars` VISIBLE characters, keeping html valid.
+
+    Only what the reader sees is counted: tag markup is free, an HTML entity ('&amp;', '&#1234;')
+    is ONE character and is never split in half, and a <br> is one character (the line break it
+    renders). The cut therefore never lands inside a tag or inside an entity.
+
+    A quote already within the limit is returned UNCHANGED (no ellipsis). Otherwise the cut backs
+    off to the last word boundary (space or <br>) within the final _QUOTE_WORD_BOUNDARY_SHARE of
+    the limit, trailing separators are dropped down to that same floor, and a single '…' is
+    appended. Scanning stops at the (max_chars + 1)-th VISIBLE character; markup in between is
+    still walked, so a pathological all-tags input ('<b></b>' * 300000) is read to the end —
+    harmless here because a quote is a Telegram message and cannot exceed its length limit.
+
+    Tags left open by the cut are closed in reverse order, so the fragment is well-formed BEFORE
+    the sanitizer: _extract_flags removes the rendered reply block from the html body as an exact
+    fragment, i.e. it works on unsanitized markup and nh3 never gets to repair anything here.
+
+    `max_chars <= 0` means "do not truncate". Never raises: an unparsable quote is returned as-is
+    rather than lost, because a rendering detail must not break the post.
+    """
+    try:
+        # Inside the try so the "never raises" promise covers the guard too (a non-int
+        # max_chars from a hand-edited config would otherwise blow up the comparison).
+        if max_chars <= 0 or not quote_html:
+            return quote_html
+        # State AFTER the i-th visible token; index 0 is "nothing consumed yet", which is what a
+        # cut that trims away everything falls back to.
+        end_offsets = [0]
+        open_stacks: List[Tuple[str, ...]] = [()]
+        is_boundary = [False]
+        is_trimmable = [False]
+        stack: List[str] = []
+        pos, length = 0, len(quote_html)
+        # Nearest '>' at or after `pos`, -1 once none is left. Cached rather than searched from
+        # every '<' because that is quadratic — the same trap already recorded for
+        # _TRAILING_BR_RE above: a quote of '<'*100000 costs ~200 ms with a find() per bracket.
+        gt_pos = quote_html.find('>')
+        while pos < length:
+            if len(end_offsets) > max_chars + 1:
+                # One visible token past the limit is all the cut ever needs, and it already
+                # proves the quote does NOT fit — so stop instead of tokenising a 40 KB quote
+                # into four parallel lists plus a stack snapshot per character. The
+                # "fits, return the input byte-for-byte" branch below stays correct: an early
+                # break always leaves exactly max_chars + 1 tokens, i.e. one over the limit.
+                break
+            char = quote_html[pos]
+            if char == '<':
+                if gt_pos != -1 and gt_pos < pos:
+                    gt_pos = quote_html.find('>', pos)
+                name_match = _QUOTE_TAG_NAME_RE.match(quote_html, pos, gt_pos) if gt_pos > pos else None
+                if name_match is not None and _QUOTE_TAG_TAIL_RE.match(quote_html, name_match.end(), gt_pos) is not None:
+                    # A real tag: markup, worth zero visible characters. Sliced only now that it
+                    # is accepted, so rejected prose never pays for a copy.
+                    attrs = quote_html[name_match.end():gt_pos]
+                    pos = gt_pos + 1
+                    name = name_match.group(2).lower()
+                    if name_match.group(1):
+                        if name in stack:
+                            # Unwind to the matching opener; a stray '</b>' is ignored.
+                            del stack[len(stack) - 1 - stack[::-1].index(name):]
+                    elif name not in _QUOTE_VOID_TAGS and not attrs.rstrip().endswith('/'):
+                        stack.append(name)
+                    if name == 'br':
+                        end_offsets.append(pos)
+                        open_stacks.append(tuple(stack))
+                        is_boundary.append(True)
+                        is_trimmable.append(True)
+                    continue
+            elif char == '&':
+                entity_match = _QUOTE_ENTITY_RE.match(quote_html, pos)
+                if entity_match is not None:
+                    pos = entity_match.end()
+                    end_offsets.append(pos)
+                    open_stacks.append(tuple(stack))
+                    is_boundary.append(False)
+                    is_trimmable.append(False)
+                    continue
+            # Everything else — including a '<' or '&' that starts no tag/entity (prose in angle
+            # brackets, truncated markup, a bare ampersand in unescaped text) — is one visible
+            # character, exactly as the reader sees it once nh3 escapes it.
+            pos += 1
+            end_offsets.append(pos)
+            open_stacks.append(tuple(stack))
+            is_boundary.append(char.isspace())
+            is_trimmable.append(_QUOTE_TAIL_TRIM_RE.fullmatch(char) is not None)
+
+        if len(end_offsets) - 1 <= max_chars:
+            return quote_html
+
+        cut = max_chars
+        earliest = max(1, max_chars - max(1, int(max_chars * _QUOTE_WORD_BOUNDARY_SHARE)))
+        for index in range(max_chars, earliest - 1, -1):
+            if is_boundary[index]:
+                # Cut BEFORE the boundary itself, so the ellipsis follows the last whole word.
+                # index == 1 leaves nothing to keep and the quote becomes a bare '…' — reachable
+                # only for a max_chars of 1-2, where a lone leading space plus '…' reads no better.
+                cut = max(0, index - 1)
+                break
+        # Trailing separators are dropped down to the SAME floor the word-boundary search uses.
+        # Unbounded, this walk hands the whole budget back on a quote that opens with a long run
+        # of [\s.,;:!?-]: a hand-made NBSP indent (_format_reply_quote strips only ' \t\r\n', so
+        # those reach here on purpose) or an ASCII rule would collapse the quote to a bare '…'.
+        floor = earliest - 1
+        while cut > floor and is_trimmable[cut]:
+            cut -= 1
+        closing = ''.join(f'</{name}>' for name in reversed(open_stacks[cut]))
+        return f'{quote_html[:end_offsets[cut]]}…{closing}'
+    except Exception as e:
+        logger.error(f"reply_quote_truncate_error: max_chars {max_chars}, error {str(e)}")
+        return quote_html
+
+
+def _is_channel_chat(chat: Any) -> bool:
+    """True only when `chat` is PROVABLY a broadcast channel.
+
+    The type arrives as a pyrogram ChatType enum on a live Message and as its bare NAME string
+    on a restored snapshot, so the comparison is by name — never by enum identity, which would
+    silently be False for every cache hit. An unknown type (None: an old fixture, a mock) is
+    "not proven", i.e. not a channel: callers use this to ENABLE a narrowing, so the
+    conservative answer must be the one that keeps the previous behaviour.
+    """
+    chat_type = getattr(chat, 'type', None)
+    if chat_type is None:
+        return False
+    # str() around the whole thing: a Mock's `.name` is another Mock, and calling .rsplit on it
+    # would raise straight through _format_reply_info into process_message.
+    name = str(getattr(chat_type, 'name', None) or chat_type)
+    # str(ChatType.CHANNEL) is 'ChatType.CHANNEL'; the name alone is 'CHANNEL'.
+    return name.rsplit('.', 1)[-1].upper() == 'CHANNEL'
+
 
 def _poll_media_object(message):
     """Return (media_obj, kind) attached to a poll's description_media, or (None, None).
@@ -646,7 +811,7 @@ class PostParser:
         # Rich posts (Kurigram 2.2.24, #85): derive the title from the rich tree only when
         # the base title is empty (a rich post may carry no plain text). Prefer the first
         # heading / first non-empty paragraph (truncated like any title); fall back to a
-        # generic label. Gated via tree_of so a v7 cache hit behaves identically to live.
+        # generic label. Gated via tree_of so a cache hit behaves identically to live.
         if title is None:
             tree = rich_tree.tree_of(message)
             if tree is not None:
@@ -733,8 +898,47 @@ class PostParser:
                 return f"https://t.me/c/{chat_id_str[4:]}/{reply_id}"
         return None
 
-    def _format_reply_quote(self, reply_to: Any) -> str:
-        """Full (never truncated) HTML-safe quote of a reply target.
+    def _own_chat_message_url(self, message: Any, reply_id: Any) -> Optional[str]:
+        """t.me link to message `reply_id` of the POST'S OWN chat, or None.
+
+        Used for every near-own-channel reply block, where _reply_target_url is not enough: it
+        builds the link from reply_to.sender_chat, and the very shapes that make a target count
+        as near-own-channel are the ones without a usable sender_chat — a channel signing posts
+        with the authors' profiles has sender_chat None (pyrogram sets it only when from_user is
+        None), and a "send as channel" target has a sender_chat pointing at a DIFFERENT chat. A
+        shortened quote with no way back to the original leaves the reader worse off than the
+        full quote did, so the link is taken from the chat the near-own-channel decision has
+        already proven the target lives in.
+
+        The channel name comes from get_channel_username, NOT from chat.username directly: only
+        that path prefers an ACTIVE entry of chat.usernames, and pyrogram fills chat.username
+        with `channel.username or channel.usernames[0].username` without checking `active` — so
+        reading the attribute would build a dead link for a channel whose primary username was
+        released while its first collectible one is inactive. Same conventions as the post
+        footer, which is exactly the point: two links to the same channel must not disagree.
+        """
+        if not reply_id:
+            # id 0 is not a real message id — it would build a link to nothing.
+            return None
+        # get_channel_username reads chat.id unguarded; without it there is nothing to build a
+        # link from anyway, so a chat-less mock stops here instead of raising through the render.
+        if not hasattr(getattr(message, 'chat', None), 'id'):
+            return None
+        name = self.get_channel_username(message)
+        if not name:
+            return None
+        # get_channel_username returns either a username or str(chat.id) for a '-100…' chat; a
+        # real username can never start with '-', so the numeric form is unambiguous.
+        if name.startswith('-100'):
+            # Private-channel web link convention.
+            return f"https://t.me/c/{name[4:]}/{reply_id}"
+        return f"https://t.me/{name}/{reply_id}"
+
+    def _format_reply_quote(self, reply_to: Any, max_chars: int = 0) -> str:
+        """HTML-safe quote of a reply target, full unless `max_chars` caps it.
+
+        `max_chars` is the number of VISIBLE characters to keep (0 = the default full quote);
+        WHEN to cap is decided by the caller, which is the only place holding both messages.
 
         Returns '' when the target quotes no text at all (media-only, or only blank lines): the
         caller then emits the opening marker alone instead of an empty frame.
@@ -765,16 +969,24 @@ class PostParser:
         while (match := _TRAILING_BR_RE.search(quote, max(0, len(quote) - _TRAILING_BR_WINDOW))) is not None:
             quote = quote[:match.start()].rstrip(' \t\r\n')
         # Same treatment as the post body: bare URLs inside the quote become clickable.
-        return self._add_hyperlinks_to_raw_urls(quote)
+        quote = self._add_hyperlinks_to_raw_urls(quote)
+        # Truncation comes LAST, after the raw URLs are already wrapped in anchors: a URL sitting
+        # on the cut then keeps its full href and only its visible text is shortened, instead of
+        # being linkified from a half-eaten address.
+        return _truncate_quote_html(quote, max_chars)
 
-    def _format_reply_target(self, reply_to: Any, label_raw: str) -> str:
+    def _format_reply_target(self, reply_to: Any, label_raw: str, url_override: Optional[str] = None) -> str:
         """Marker text naming the reply/pinned target: a linked label or "label, #id".
 
         `label_raw` is passed in (not recomputed) so a caller that BRANCHES on the label
         provably renders the same value it decided on.
+
+        `url_override` is the link a caller that KNOWS better already built (the near-own-channel
+        path, see _own_chat_message_url); it wins over the sender_chat-derived one, which stays
+        the fallback. Passing None keeps the rendering byte-identical to the old behaviour.
         """
         label = html.escape(label_raw)
-        url = self._reply_target_url(reply_to)
+        url = url_override or self._reply_target_url(reply_to)
         reply_id = getattr(reply_to, "id", None)
         id_text = html.escape(f"#{reply_id}") if reply_id else ''
         if url:
@@ -786,6 +998,71 @@ class PostParser:
         # A comma form avoids double parentheses after a "Name (@user)" label, and the
         # id is skipped when the label already IS the id fallback (no "#53, #53").
         return f'{label}, {id_text}' if id_text and label != id_text else label
+
+    def _reply_is_near_own_channel(self, message: Any, reply_to: Any) -> bool:
+        """True when the target is a post of the SAME channel, at most N ids above `message`.
+
+        This is the ONLY case whose quote gets shortened: the reply then reprints a post the
+        reader has just seen one entry earlier, so two neighbouring feed entries read as half the
+        same text — while Telegram itself shows only a short preview there. A reply in a group or
+        discussion feed, to a foreign channel, to a user, or to an older post of the same channel
+        keeps the full quote, since there the quoted text is the only place the reader can see
+        what is being answered. The CHANNEL check is what keeps "to a user" true: in a group the
+        neighbouring message carries the same chat.id and would otherwise qualify.
+
+        Every attribute is read via getattr: reply targets arrive both as live pyrogram Messages
+        and as restored snapshots (SimpleNamespace), and neither is guaranteed to carry a field.
+        Non-int ids (mocks, malformed snapshots) are treated as "cannot tell" — full quote.
+
+        ACCEPTED APPROXIMATION: an album occupies several ids, so a reply to the post right above
+        can measure as a distance of 2-3; that is what makes the threshold configurable. Looking
+        at the actual neighbouring messages would need feed/API access, which this renderer must
+        not have — _format_reply_info is pure and _extract_flags re-renders it to strip the block.
+        """
+        distance = Config['reply_quote_truncate_distance']
+        if distance <= 0:
+            return False
+        if not _is_channel_chat(getattr(message, 'chat', None)):
+            # CHANNELS only. In a group/discussion feed the neighbouring message is somebody's
+            # remark, not "the entry the reader just scrolled past", and shortening it would
+            # contradict what README and this docstring promise about replies to people.
+            return False
+        msg_id = getattr(message, 'id', None)
+        target_id = getattr(reply_to, 'id', None)
+        if not isinstance(msg_id, int) or not isinstance(target_id, int) or not msg_id or not target_id:
+            return False
+        if not 0 < msg_id - target_id <= distance:
+            return False
+        sender_chat = getattr(reply_to, 'sender_chat', None)
+        sender_chat_id = getattr(sender_chat, 'id', None)
+        chat_id = getattr(getattr(message, 'chat', None), 'id', None)
+        # The target's OWN chat is the primary signal: pyrogram parses `chat` on every Message
+        # (Chat._parse(..., is_chat=True)) regardless of sender_chat/from_user. sender_chat alone
+        # is not enough — a channel with "Sign messages -> Show authors' profiles" gives every
+        # post a from_id, and pyrogram then sets from_user and leaves sender_chat None
+        # (message.py: `sender_chat = ... if not from_user else None`), which used to switch the
+        # whole feature off for such channels with no diagnostic at all.
+        target_chat_id = getattr(getattr(reply_to, 'chat', None), 'id', None)
+        if target_chat_id is not None and chat_id is not None:
+            return target_chat_id == chat_id
+        # Fallback for targets carrying no chat (older snapshots, mocks): a channel post's
+        # sender_chat is the channel itself.
+        if sender_chat_id is not None and chat_id is not None:
+            return sender_chat_id == chat_id
+        if sender_chat is None and getattr(reply_to, 'from_user', None) is None:
+            # Last line, reached only when the target's chat cannot be identified at ALL (no
+            # chat.id, no sender_chat.id, no from_user). There is NO guarantee the target lives
+            # in the same chat: pyrogram resolves a reply through message.reply_to.reply_to_peer_id
+            # when present, which points at a DIFFERENT chat (message.py ~1862). This branch is a
+            # heuristic — an anonymous, chat-less target looks like an ordinary channel post
+            # rather than a user's message in the linked discussion group. Worst case it shortens
+            # a quote from elsewhere; the block header still links to `id` in THIS channel
+            # (_own_chat_message_url), which is the best guess available when the target names
+            # no chat at all.
+            return True
+        # A from_user target with no chat is somebody's own message, and a sender_chat whose id
+        # cannot be compared proves nothing: stay conservative and leave the quote full.
+        return False
 
     def _format_reply_info(self, message: Message) -> Union[str, None]:
         is_pinned = (getattr(message, "service", None) and 'PINNED_MESSAGE' in str(message.service))
@@ -813,8 +1090,22 @@ class PostParser:
             return f'<div class="message-pinned">{head}</div><br>'
 
         if reply_to:
-            quote = self._format_reply_quote(reply_to)
-            target = self._format_reply_target(reply_to, self._reply_author_label(reply_to))
+            # Telegram itself shows only a short preview of the quoted post; printing the whole
+            # neighbouring post makes two adjacent feed entries look half-identical (issue:
+            # t.me/univelis/1472 quoted in full inside t.me/univelis/1473).
+            max_chars = Config['reply_quote_truncate_chars'] if self._reply_is_near_own_channel(message, reply_to) else 0
+            quote = self._format_reply_quote(reply_to, max_chars)
+            # A shortened quote MUST stay one click from the original, otherwise the reader ends
+            # up with less than the full quote gave them — and on the signed-post shape this
+            # feature targets, the sender_chat _reply_target_url needs is None, so the block had
+            # no link at all. The override applies to EVERY near-own-channel block, not only to
+            # the ones actually cut short (a quote inside the budget, or a media-only target with
+            # no quote, take it too): for those the target's origin is equally proven, so a link
+            # into this chat is correct and strictly better than the sender_chat guess. Blocks
+            # that are NOT near-own-channel (foreign channel, a user, an older post, pinned,
+            # REPLY_QUOTE_TRUNCATE_CHARS=0) keep max_chars == 0 and render byte-identically.
+            url_override = self._own_chat_message_url(message, getattr(reply_to, 'id', None)) if max_chars > 0 else None
+            target = self._format_reply_target(reply_to, self._reply_author_label(reply_to), url_override)
             if quote:
                 return (f'<div class="message-reply">{MARKER_REPLY_OPEN}{target} ---<br>{quote}'
                         f'<br>{MARKER_QUOTE_END}</div><br>')
@@ -871,7 +1162,7 @@ class PostParser:
             flags.append("fwd")
 
         # Add "rich" flag for Rich Messages posts (Kurigram 2.2.24, layer 227, #85).
-        # Gated via tree_of so a v7 cache hit (rich_message=None, rich_tree set) matches live.
+        # Gated via tree_of so a cache hit (rich_message=None, rich_tree set) matches live.
         rich_tree_obj = rich_tree.tree_of(message)
         if rich_tree_obj is not None:
             flags.append("rich")
@@ -1220,7 +1511,7 @@ class PostParser:
         media_html = self._generate_html_media(message)
 
         # Rich content (Kurigram 2.2.24, #85). tree_of is the single entry (works for a
-        # live Message via rich_message and for a v7 CachedMessage via its stored rich_tree).
+        # live Message via rich_message and for a restored CachedMessage via its stored rich_tree).
         # A non-rich post has tree=None -> rich_html='' and the block below is a no-op, so
         # golden output stays byte-identical.
         tree = rich_tree.tree_of(message)
@@ -1769,7 +2060,7 @@ class PostParser:
                     self._pending_media_ids.append((channel_username, message.id, file_unique_id, added_ts))
 
             # Rich media (Kurigram 2.2.24, #85): photos/videos/audio embedded in rich blocks.
-            # Collected via the tree (works for both live and v7 CachedMessage). The >100MB
+            # Collected via the tree (works for both live and restored CachedMessage). The >100MB
             # skip rule (registry §3.13) is applied per media node, mirroring the block above.
             tree = rich_tree.tree_of(message)
             if tree is not None:
