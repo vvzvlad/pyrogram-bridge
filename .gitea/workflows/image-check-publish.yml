@@ -33,17 +33,19 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    - name: Log in to GitHub Container Registry
+    - name: Log in to the Gitea container registry
       uses: docker/login-action@v2
       with:
-        registry: ghcr.io
-        username: ${{ github.actor }}
-        password: ${{ secrets.GHCR_PAT }}
+        registry: gitea.vvzvlad.xyz
+        username: ${{ github.repository_owner }}
+        # Org-level secret on `projects`; the built-in GITEA_TOKEN has no
+        # package scope and cannot push images.
+        password: ${{ secrets.REGISTRY_TOKEN }}
 
     - name: Build the Docker image
-      run: docker build . --file Dockerfile --tag ghcr.io/${{ github.repository }}:latest --tag ghcr.io/${{ github.repository }}:${{ github.sha }}
+      run: docker build . --file Dockerfile --tag gitea.vvzvlad.xyz/${{ github.repository }}:latest --tag gitea.vvzvlad.xyz/${{ github.repository }}:${{ github.sha }}
       
     - name: Push Docker images
       run: |
-        docker push ghcr.io/${{ github.repository }}:latest
-        docker push ghcr.io/${{ github.repository }}:${{ github.sha }}
+        docker push gitea.vvzvlad.xyz/${{ github.repository }}:latest
+        docker push gitea.vvzvlad.xyz/${{ github.repository }}:${{ github.sha }}
