@@ -12,7 +12,7 @@ volumes:
   
 services:
   pyrogram_bridge:
-    image: ghcr.io/vvzvlad/pyrogram-bridge:latest
+    image: gitea.vvzvlad.xyz/projects/pyrogram-bridge:latest
     container_name: pyrogram-bridge
     environment:
       TG_API_ID: 290389758

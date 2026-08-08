@@ -4,17 +4,33 @@ on:
   workflow_dispatch:
   push:
     branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
+
+# No `packages: write` here: that scope is GitHub-specific and has no effect on Gitea
+# Actions — the built-in GITEA_TOKEN carries no package scope at all. The registry push
+# below authenticates with the REGISTRY_TOKEN PAT from the org secrets instead.
+permissions:
+  contents: read   # checkout
+
+# Two pushes to the same branch in a row must not race: the runs are independent
+# and the older one may finish last, leaving its :latest on the registry — a
+# watchtower deploy would then ship the previous commit to prod.
+# The group alone already fixes that: runs are serialised, so the newest commit's
+# :latest is written last. Cancelling is deliberately OFF — it would kill the
+# older run together with its :<sha> image, and on two quick pushes the
+# intermediate commit would never be built, leaving holes in the tag history
+# exactly where a rollback is most likely to be needed.
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
 
     - name: Set up Python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v6
       with:
         python-version: "3.11"
 
@@ -24,28 +40,122 @@ jobs:
     - name: Install dependencies
       run: pip install -r requirements.txt
 
+    # No `env:` block: tests/conftest.py swaps the real `config` module for
+    # tests/mock_config.py before any application code is imported, so the suite
+    # needs no TG_API_ID/TG_API_HASH/TOKEN and must keep passing in a bare
+    # environment. Do not "helpfully" add credentials here.
     - name: Run tests
       run: pytest --tb=short -q
 
   build:
-    needs: test
     runs-on: ubuntu-latest
+    needs: test                          # no green tests → no image is built
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
 
+    - name: Compute image tags
+      id: tags
+      # main -> :latest + :<sha> (watchtower deploys :latest); ANY other branch -> :<branch>.
+      # Do NOT hardcode a second production-ish tag in the else branch: a build off a side
+      # branch would then silently overwrite the tag production deploys from — one typo
+      # away from shipping unreviewed code.
+      env:
+        # Passed through the environment instead of being interpolated into the
+        # script text: git allows `$`, backticks, quotes and parentheses in branch
+        # names, so a branch like `feat/$(id)` would otherwise execute on the runner.
+        REF_NAME: ${{ github.ref_name }}
+        REPO: ${{ github.repository }}
+        SHA: ${{ github.sha }}
+      run: |
+        # Gitea allows uppercase letters in repository names, docker does not
+        # accept them in an image path — a repo like `Pyrogram-Bridge` would fail
+        # the build with `invalid reference format`, so lowercase it here.
+        IMAGE="gitea.vvzvlad.xyz/$(printf '%s' "$REPO" | tr 'A-Z' 'a-z')"
+        if [ "$REF_NAME" = "main" ]; then
+          # Tag ORDER matters and must not be "tidied up": the push step iterates
+          # over $TAGS left to right, so :latest is pushed LAST and acts as the
+          # commit of the whole publication. If :<sha> fails to push (network,
+          # registry quota, disk), the run stops before :latest moves and prod
+          # keeps running the previous image. The reverse order would publish a
+          # :latest that watchtower deploys within 2 minutes while its immutable
+          # :<sha> twin — the only rollback point — never made it to the registry.
+          echo "tags=$IMAGE:$SHA $IMAGE:latest" >> "$GITHUB_OUTPUT"
+        else
+          # Sanitise the branch name into a legal docker tag: everything outside
+          # [A-Za-z0-9_.-] (a `/` in feat/foo above all) becomes `-`, and the result
+          # is cut to 100 chars — branch names have no length limit, docker rejects
+          # tags over 128.
+          # The `sed` fixes the first character: docker requires a tag to match
+          # [a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}, so a branch like `-fix`, `(test)`
+          # or `+wip` would otherwise produce a leading `-` and fail the build
+          # with `invalid reference format`.
+          branch_tag=$(printf '%s' "$REF_NAME" | tr -c 'A-Za-z0-9_.-' '-' | sed 's/^[^A-Za-z0-9_]/_/' | cut -c1-100)
+          # The sanitiser passes a name through untouched when it already consists
+          # of legal characters, so a branch literally named `latest` would come
+          # out as the production tag and — one manual workflow_dispatch later —
+          # ship unreviewed code to every watchtower host. The `main` check above
+          # does not cover this: the branch is not `main`, it only borrows its tag.
+          # Reserved names are therefore prefixed instead of being used as-is.
+          if [ "$branch_tag" = "latest" ]; then
+            branch_tag="branch-latest"
+          fi
+          echo "tags=$IMAGE:${branch_tag}" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Build the Docker image
+      env:
+        # Through the environment, not interpolated into the script text: the
+        # only thing standing between a branch name and command execution on the
+        # runner is the `tr` filter in the step above. `$TAGS` below is
+        # intentionally unquoted — the tags are a space-separated list and word
+        # splitting is exactly what turns it into loop items.
+        TAGS: ${{ steps.tags.outputs.tags }}
+      run: |
+        tag_args=""
+        for tag in $TAGS; do tag_args="$tag_args --tag $tag"; done
+        # --pull is required here: unlike GitHub's ephemeral runners, our runner is
+        # self-hosted with a persistent docker daemon, so a once-pulled python:3.11-slim
+        # would sit in its cache for months and every build would inherit an
+        # unpatched base layer.
+        docker build --pull . --file Dockerfile $tag_args
+
+    # Deliberately AFTER the build, not before it: the build runs `docker build` over
+    # a Dockerfile and a tag list derived from a branch name, and nothing in it needs
+    # registry credentials (the base image comes from Docker Hub). Logging in only
+    # here keeps REGISTRY_TOKEN out of the daemon's config for the whole build.
     - name: Log in to the Gitea container registry
-      uses: docker/login-action@v2
+      uses: docker/login-action@v4
       with:
         registry: gitea.vvzvlad.xyz
         username: ${{ github.repository_owner }}
-        # Org-level secret on `projects`; the built-in GITEA_TOKEN has no
-        # package scope and cannot push images.
+        # PAT with the `write:package` scope, stored as an ORG secret on `projects`.
+        # A repo-level secret of the same name would shadow it — keep it at the org.
+        # The built-in GITEA_TOKEN cannot be used here: it carries no package scope.
         password: ${{ secrets.REGISTRY_TOKEN }}
 
-    - name: Build the Docker image
-      run: docker build . --file Dockerfile --tag gitea.vvzvlad.xyz/${{ github.repository }}:latest --tag gitea.vvzvlad.xyz/${{ github.repository }}:${{ github.sha }}
-      
     - name: Push Docker images
+      env:
+        # Same reasoning as in the build step: pass the tags through the
+        # environment, and leave `$TAGS` unquoted so it word-splits into items.
+        TAGS: ${{ steps.tags.outputs.tags }}
       run: |
-        docker push gitea.vvzvlad.xyz/${{ github.repository }}:latest
-        docker push gitea.vvzvlad.xyz/${{ github.repository }}:${{ github.sha }}
+        for tag in $TAGS; do docker push "$tag"; done
+
+    - name: Remove the built images from the runner
+      # The runner's docker daemon is persistent, so the images built here would
+      # otherwise pile up and grow the disk forever. This step removes ONLY the
+      # tags this run created — no `docker system prune`, which would also wipe
+      # images of other repos sharing the same daemon.
+      # It does NOT reclaim everything: `docker rmi <tag>` never touches the
+      # BuildKit cache (that lives in a separate builder store and is only freed
+      # by `docker builder prune`), and `--pull` above leaves the previous base
+      # image untagged as a dangling image whenever upstream updates it.
+      # Both need a separate periodic cleanup on the runner host.
+      # `always()` so the cleanup runs even when the push above fails.
+      if: always()
+      env:
+        # Same reasoning as in the build step: pass the tags through the
+        # environment, and leave `$TAGS` unquoted so it word-splits into items.
+        TAGS: ${{ steps.tags.outputs.tags }}
+      run: |
+        for tag in $TAGS; do docker rmi "$tag" || true; done

@@ -1,0 +1,50 @@
+name: Tests
+
+# Split out from image-check-publish.yml on purpose: that workflow must never
+# run on pull_request, because a PR build would push :latest and watchtower
+# would deploy it to prod within two minutes. Tests alone are safe here and are
+# what a PR actually needs — without this workflow a broken test only surfaces
+# after the merge into main.
+on:
+  # Manual re-run: without it a run that flaked on runner networking could only be
+  # retried by pushing an empty commit to the PR branch. Safe to expose here — this
+  # workflow touches no registry and no secrets, it only runs the test suite.
+  workflow_dispatch:
+  pull_request:
+    branches: [ "main" ]
+
+permissions:
+  contents: read   # checkout
+
+# Unlike the image workflow, cancelling is right here: this job produces no
+# artifacts, so a superseded test run is just wasted runner time.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+# Keep this job byte-identical to the `test` job in image-check-publish.yml:
+# the PR gate and the pre-build gate must be the same gate, or a PR goes green
+# on a weaker check than the one that guards the image.
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: "3.11"
+
+    - name: Install libmagic (python-magic system dependency)
+      run: sudo apt-get update && sudo apt-get install -y libmagic1
+
+    - name: Install dependencies
+      run: pip install -r requirements.txt
+
+    # No `env:` block: tests/conftest.py swaps the real `config` module for
+    # tests/mock_config.py before any application code is imported, so the suite
+    # needs no TG_API_ID/TG_API_HASH/TOKEN and must keep passing in a bare
+    # environment. Do not "helpfully" add credentials here.
+    - name: Run tests
+      run: pytest --tb=short -q
