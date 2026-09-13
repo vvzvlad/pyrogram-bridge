@@ -27,9 +27,10 @@ Design guarantees:
     snapshot see the exact same tree — live/cache render parity is structural.
   * :func:`from_pyrogram` is fail-soft PER BLOCK: a block that raises becomes a
     ``{"t": "unsupported"}`` node (+ a WARNING and a /health counter), never a crash.
-    The live ``parse_failed`` marker (block-contour, #84) is NOT written into the tree —
-    it too degrades to ``{"t": "unsupported"}`` — so :func:`render_html` reads ONLY the
-    tree and never a live object's attributes.
+    This is the ONLY per-block degradation left — the kurigram_compat block contour was
+    removed in the 2.2.26 bump — and it covers the adapt step, not the library's parse.
+    A live ``parse_failed`` marker is never written into the tree, so :func:`render_html`
+    reads ONLY the tree and never a live object's attributes.
   * :func:`render_html` is PURE: it reads the tree, html.escape()s every user string,
     and only ever emits ``href`` values from the url_builder, validated ``str`` URLs, or
     ``#rich-…`` fragments.
@@ -286,6 +287,35 @@ def _adapt_pullquote(obj, depth, budget):
             "credit": _adapt_rt(getattr(obj, "credit", None), budget)}
 
 
+def _adapt_expandable_blockquote(obj, depth, budget):
+    # TRAP (Kurigram 2.2.26 / layer 229): despite the name this is shaped like a PULLquote —
+    # it carries a `text` RichText, NOT a `blocks` list like RichBlockBlockQuotation.
+    return {"t": "expandable_blockquote",
+            "text": _adapt_rt(getattr(obj, "text", None), budget),
+            "credit": _adapt_rt(getattr(obj, "credit", None), budget)}
+
+
+def _adapt_buttons(obj, depth, budget):
+    buttons = []
+    for raw in (getattr(obj, "buttons", None) or []):
+        # A button row is unbounded upstream, so each button is charged a node slot (same
+        # reasoning as list items — an adversarial post must not balloon past MAX_RICH_NODES).
+        if budget.take():
+            break
+        buttons.append(_adapt_button(raw, budget))
+    # `align` is deliberately dropped: horizontal alignment carries no meaning in a feed.
+    return {"t": "buttons", "buttons": buttons}
+
+
+def _adapt_button(btn, budget):
+    """RichMessageButton -> {"text", "url"}. url is absent on callback/webapp/copy_text buttons."""
+    url = getattr(btn, "url", None)
+    # Same normalisation as the RichTextUrl branch: only a genuine str reaches the tree, so
+    # the snapshot can never round-trip a non-str into something that renders as a link.
+    return {"text": _adapt_rt(getattr(btn, "text", None), budget),
+            "url": url if isinstance(url, str) else None}
+
+
 def _adapt_collage(obj, depth, budget):
     node = {"t": "collage", "blocks": _adapt_blocks(getattr(obj, "blocks", None), depth + 1, budget)}
     _attach_caption(node, getattr(obj, "caption", None), budget)
@@ -344,6 +374,24 @@ def _adapt_map(obj, depth, budget):
     return node
 
 
+def _adapt_document(obj, depth, budget):
+    """RichBlockDocument -> an info node. Deliberately NOT a media node.
+
+    post_parser._select_document routes every non-image document (PDF included) to the
+    'file'/'pdf' info block with a t.me link — the bridge proxies image documents only.
+    A rich post must follow the same rule, so no ``fid`` is carried here: a document that
+    never reaches _MEDIA_TYPES is never registered for download and never served.
+    """
+    doc = getattr(obj, "document", None)
+    # Only the name: file_size has no consumer once the block is not servable (the render
+    # shows no size and neither media iterator sees this node), and an unread field in the
+    # tree is an unread field in every stored snapshot.
+    node = {"t": "document",
+            "name": getattr(doc, "file_name", None) if doc is not None else None}
+    _attach_caption(node, getattr(obj, "caption", None), budget)
+    return node
+
+
 def _adapt_media(block, attr, kind, budget):
     media = getattr(block, attr, None)
     fid = getattr(media, "file_unique_id", None) if media is not None else None
@@ -376,6 +424,8 @@ _BLOCK_DISPATCH: dict = {
     "RichBlockList": _adapt_list,
     "RichBlockBlockQuotation": _adapt_blockquote,
     "RichBlockPullQuotation": _adapt_pullquote,
+    "RichBlockExpandableBlockQuotation": _adapt_expandable_blockquote,
+    "RichBlockButtons": _adapt_buttons,
     "RichBlockCollage": _adapt_collage,
     "RichBlockSlideshow": _adapt_slideshow,
     "RichBlockTable": _adapt_table,
@@ -386,6 +436,7 @@ _BLOCK_DISPATCH: dict = {
     "RichBlockAnimation": lambda o, d, b: _adapt_media(o, "animation", "animation", b),
     "RichBlockAudio": lambda o, d, b: _adapt_media(o, "audio", "audio", b),
     "RichBlockVoiceNote": lambda o, d, b: _adapt_media(o, "voice_note", "voice", b),
+    "RichBlockDocument": _adapt_document,
 }
 
 
@@ -447,6 +498,12 @@ def _adapt_rt(rt: Any, budget: _Budget, depth: int = 0) -> Any:
         url = getattr(rt, "url", None)
         return {"t": "url", "text": _adapt_rt(getattr(rt, "text", None), budget, depth + 1),
                 "url": url if isinstance(url, str) else None}
+    if name == "RichTextButton":
+        # The button's own label is a RichText; .url is absent on callback/webapp/copy_text.
+        btn = getattr(rt, "button", None)
+        btn_url = getattr(btn, "url", None)
+        return {"t": "button", "text": _adapt_rt(getattr(btn, "text", None), budget, depth + 1),
+                "url": btn_url if isinstance(btn_url, str) else None}
     if name == "RichTextTextMention":
         user = getattr(rt, "user", None)
         return {"t": "text_mention", "text": _adapt_rt(getattr(rt, "text", None), budget, depth + 1),
@@ -538,8 +595,19 @@ def _render_block(node: Any, url_builder) -> str:
     if t == "blockquote":
         inner = "".join(_render_block(b, url_builder) for b in (node.get("blocks") or []))
         return f"<blockquote>{inner}{_render_credit(node.get('credit'))}</blockquote>"
-    if t == "pullquote":
+    if t in ("pullquote", "expandable_blockquote"):
+        # An `expandable` attribute would say "collapsed in Telegram", but sanitizer.py does
+        # not allow it on <blockquote> and would drop it — so the quote renders fully open.
         return f"<blockquote>{_render_rt(node.get('text'))}{_render_credit(node.get('credit'))}</blockquote>"
+    if t == "buttons":
+        buttons = node.get("buttons") or []
+        if not buttons:
+            return ""
+        rendered = " ".join(_render_button(_render_rt(b.get("text")), b.get("url"))
+                            for b in buttons if isinstance(b, dict))
+        # Bare <p>: sanitizer.py allows no attributes on it, so a class marker would be
+        # silently stripped on the way to the reader.
+        return f"<p>{rendered}</p>"
     if t in ("collage", "slideshow"):
         inner = "".join(_render_block(b, url_builder) for b in (node.get("blocks") or []))
         return inner + _render_caption(node.get("caption"))
@@ -551,6 +619,12 @@ def _render_block(node: Any, url_builder) -> str:
         return f"<details{open_attr}><summary>{_render_rt(node.get('summary'))}</summary>{inner}</details>"
     if t == "map":
         return _render_map(node)
+    if t == "document":
+        # Name only, no link: the file is not served through /media (see _adapt_document),
+        # and the feed item already points at the post.
+        name = _esc(node.get("name") or "Document")
+        body = f'<div class="rich-document">📎 {name} — open it in Telegram to download</div>'
+        return body + _render_caption(node.get("caption"))
     if t in _MEDIA_TYPES:
         return _render_media(node, url_builder)
     if t == "truncated":
@@ -565,6 +639,17 @@ def _render_credit(credit: Any) -> str:
         return ""
     rendered = _render_rt(credit)
     return f"<i>{rendered}</i>" if rendered else ""
+
+
+def _render_button(inner: str, url: Any) -> str:
+    """One button -> a link, or its bare label when it has no URL to open.
+
+    Shared by the block row and the inline RichTextButton; the URL rule is deliberately the
+    same as the ``url`` RichText node (a genuine non-empty str, nh3 filters the scheme).
+    """
+    if isinstance(url, str) and url:
+        return f'<a href="{_html.escape(url, quote=True)}">{inner or _html.escape(url)}</a>'
+    return inner
 
 
 def _render_caption(caption: Any) -> str:
@@ -695,6 +780,8 @@ def _render_rt(rt: Any) -> str:
             # Dangerous schemes (javascript:, data:) are filtered by nh3 at the boundary.
             return f'<a href="{_html.escape(url, quote=True)}">{inner or _html.escape(url)}</a>'
         return inner
+    if t == "button":
+        return _render_button(inner, rt.get("url"))
     if t == "text_mention":
         username = rt.get("username")
         if username:
