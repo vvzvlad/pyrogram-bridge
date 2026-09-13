@@ -4,21 +4,30 @@ fastapi==0.115.8
 starlette==0.45.3
 uvicorn==0.34.0
 python-multipart==0.0.20
-# Kurigram 2.2.24 = MTProto layer 227: the server now sends message.rich_message
-# (Rich Messages, #83/#84). Defensive parse wrappers live in kurigram_compat.py.
+# Kurigram 2.2.26 = MTProto layer 229: the server sends message.rich_message
+# (Rich Messages, #83/#84). kurigram_compat.py keeps ONE defensive wrapper over
+# RichMessage._parse — it recovers the `part` flag the high-level type drops.
 # When bumping this pin in the future:
 #   - run the full suite + golden_replay (python -m pytest -q) on the new wheel;
 #   - diff the Rich* modules (pyrogram/types/messages_and_media/rich_message.py,
-#     rich_block.py, rich_text.py) against this version — the wrappers rely on their
-#     exact _parse shapes;
-#   - confirm pyrogram.types.Object did NOT gain __slots__ (the wrappers attach `part`
-#     and `parse_failed` via setattr, and Object.default serialises them into /raw_json).
+#     rich_block.py, rich_text.py) against this version — the wrapper relies on the
+#     exact _parse shape, and rich_tree dispatches on Rich* CLASS NAMES, so a new
+#     block/text type renders as "Unsupported block" until it is mapped there;
+#   - confirm pyrogram.types.Object did NOT gain __slots__ (the wrapper attaches `part`
+#     and `parse_failed` via setattr, and Object.default serialises them into /raw_json);
+#   - expect the frozen pickled corpus (tests/test_data/recorded/, not re-recordable — there
+#     is no live Telegram here) to break on slotted or deleted classes: 2.2.26 gave `Str`
+#     (the str subclass in message.py, NOT Object) __slots__ and deleted several colour and
+#     keyboard-button types. tests/golden_replay._CorpusUnpickler absorbs both, but NOT the
+#     same way: a deleted class is stubbed automatically and silently (a blanket except), so
+#     it needs nothing from you, while a newly SLOTTED class needs its own __setstate__ shim
+#     there, like _CompatStr. Either way the fix goes in the loader, never in a golden.
 #   - re-check pyrogram/parser/html.py::unparse for new VALUELESS attributes: today
 #     ' expandable' on <blockquote> is the only one, and post_parser._QUOTE_TAG_TAIL_RE
 #     hardcodes that name (a bare word cannot be told from prose like '<Word here>'). A
 #     second such attribute would make the reply-quote truncator charge a real tag to the
 #     visible budget and possibly cut it in half.
-Kurigram==2.2.24
+Kurigram==2.2.26
 TgCrypto==1.2.5
 uvloop==0.22.1
 pillow==11.1.0

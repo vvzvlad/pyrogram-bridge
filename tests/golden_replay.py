@@ -21,6 +21,8 @@ import time
 import pickle
 from types import SimpleNamespace
 
+from pyrogram.types.messages_and_media.message import Str as _PyrogramStr
+
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(TESTS_DIR)
 RECORDED_DIR = os.path.join(TESTS_DIR, "test_data", "recorded")
@@ -43,15 +45,59 @@ GOLDEN_SIGNING_KEY = "stage0-golden-fixed-signing-key-0000000000000000"
 
 # --------------------------------------------------------------------------- #
 # Replay loader — the literal prod cache-hit path.
+#
+# The corpus is a FROZEN prod recording (no live Telegram to re-record it from), so a
+# library bump must be absorbed by the loader, never by the corpus or the goldens —
+# goldens matching byte-for-byte is exactly the evidence that the bump did not move the
+# render. Kurigram 2.2.26 breaks the plain `pickle.load` of a 2.2.24-era recording twice:
+#   * `Str` (a str subclass carrying .entities) gained ``__slots__ = ("entities",)``, so the
+#     recorded state — a plain ``__dict__`` — can no longer be restored onto it;
+#   * types dropped from the library (e.g. pyrogram.types.user_and_chats.chat_color) can no
+#     longer be imported at all.
+# Both are handled below, and ONLY on the read path.
 # --------------------------------------------------------------------------- #
+class _CompatStr(_PyrogramStr):
+    """`Str` that can still absorb a pre-2.2.26 pickled ``__dict__``.
+
+    A subclass without ``__slots__`` does have a ``__dict__``, but the inherited slot
+    DESCRIPTOR shadows it on every read of ``.entities`` — so the state has to be written
+    into the slot explicitly rather than dumped into the instance dict.
+    """
+
+    def __setstate__(self, state):
+        if isinstance(state, tuple):  # (dict-state, slots-state)
+            state = state[0] or state[1] or {}
+        self.entities = (state or {}).get("entities")
+
+
+class _CorpusUnpickler(pickle.Unpickler):
+    """Unpickler that maps the recorded classes onto what 2.2.26 still provides."""
+
+    def find_class(self, module, name):
+        if name == "Str" and module.endswith("messages_and_media.message"):
+            return _CompatStr
+        try:
+            return super().find_class(module, name)
+        except (ModuleNotFoundError, AttributeError):
+            # A type the library no longer ships. The feed never reads these attributes, so
+            # an inert object with a __dict__ restores the recorded state and nothing else.
+            # __init__ swallows arguments because a dropped ENUM (ReplyColor) is pickled by
+            # value and restored by CALLING the class.
+            return type(name, (), {"__module__": module,
+                                   "__init__": lambda self, *a, **kw: None})
+
+
+def _load_pickle(path):
+    with open(path, "rb") as f:
+        return _CorpusUnpickler(f).load()
+
+
 def load_recorded(channel):
     """Unpickle a recorded {channel}.cache / {channel}.chatinfo pair.
 
     Returns (messages: List[Message], chatinfo_data: dict). timestamp/limit ignored."""
-    with open(os.path.join(RECORDED_DIR, f"{channel}.cache"), "rb") as f:
-        cache = pickle.load(f)
-    with open(os.path.join(RECORDED_DIR, f"{channel}.chatinfo"), "rb") as f:
-        chatinfo = pickle.load(f)
+    cache = _load_pickle(os.path.join(RECORDED_DIR, f"{channel}.cache"))
+    chatinfo = _load_pickle(os.path.join(RECORDED_DIR, f"{channel}.chatinfo"))
     return cache["messages"], chatinfo["data"]
 
 
