@@ -48,7 +48,6 @@ from rss_generator import generate_channel_rss, generate_channel_html, get_rende
 import rich_tree
 from kurigram_compat import (
     get_rich_msg_parse_failed_count,
-    get_rich_block_parse_failed_count,
     get_rich_part_seen_count,
     has_parse_failures,
 )
@@ -1750,11 +1749,11 @@ async def health_check(request: Request, token: str | None = None) -> Response:
             # instead of being silently dropped (issue #60). A non-zero, growing value
             # flags a render regression that would otherwise be invisible.
             "render_failed": get_render_failed_count(),
-            # Rich Messages parse-degradation counters (Kurigram 2.2.24, #83/#84), same
+            # Rich Messages parse-degradation counter (Kurigram 2.2.26, #83/#84), same
             # pattern as render_failed. A non-zero/growing value flags total rich
             # degradation invisible to the reader; rich_part_seen signals phase-3 activation.
+            # (rich_block_parse_failed went with the block contour — see kurigram_compat.)
             "rich_msg_parse_failed": get_rich_msg_parse_failed_count(),
-            "rich_block_parse_failed": get_rich_block_parse_failed_count(),
             # Adapter (tree-build) per-block failures (Rich Messages phase 2, #85).
             "rich_block_adapt_failed": rich_tree.get_rich_block_adapt_failed_count(),
             "rich_part_seen": get_rich_part_seen_count(),

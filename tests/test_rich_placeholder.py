@@ -5,10 +5,10 @@
 # pylint: disable=protected-access, wrong-import-position
 # pylance: disable=reportMissingImports, reportMissingModuleSource
 
-"""Rich Messages title/flag/special-block gates + defensive parse contours (#84/#85).
+"""Rich Messages title/flag/special-block gates + the defensive parse contour (#84/#85).
 
 Covers the three post_parser gates (now routed through rich_tree.tree_of in phase 2),
-the snapshot rich_tree roundtrip, and the two defensive parse contours in
+the snapshot rich_tree roundtrip, and the message-level parse contour in
 kurigram_compat. The rich RENDER pipeline itself is covered by test_rich_tree.py /
 test_rich_pipeline.py; here we only assert the gates fire for an EMPTY rich tree (the
 fallback-placard path a sentinel/failed parse takes).
@@ -24,7 +24,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from pyrogram.types import Message, RichMessage, RichBlockUnsupported
+from pyrogram.types import Message, RichMessage
 from pyrogram.enums import MessageMediaType
 
 from post_parser import PostParser
@@ -170,7 +170,7 @@ class TestSnapshotRoundtrip:
 
 
 # --------------------------------------------------------------------------------------
-# Task 7(d): kurigram_compat defensive contours
+# Task 7(d): the kurigram_compat message contour
 # --------------------------------------------------------------------------------------
 @pytest.fixture(autouse=True)
 def _reset_rich_counters():
@@ -233,37 +233,6 @@ class TestMessageContour:
         assert kc.get_rich_msg_parse_failed_count() == 1
 
 
-class TestBlockContour:
-    async def test_exception_yields_unsupported_node(self, monkeypatch):
-        async def boom(*a, **k):
-            raise KeyError("bad block")
-
-        monkeypatch.setattr(kc, "_orig_richblock_parse", boom)
-        node = await kc._wrapped_richblock_parse(MagicMock(), object())
-        assert isinstance(node, RichBlockUnsupported)
-        assert getattr(node, "parse_failed") is True
-        assert kc.get_rich_block_parse_failed_count() == 1
-
-    async def test_siblings_survive_one_bad_block(self, monkeypatch):
-        good_a, good_b = object(), object()
-
-        async def selective(client, block, *a, **k):
-            if block == "BAD":
-                raise ValueError("bad")
-            return block  # echo the (good) block back
-
-        monkeypatch.setattr(kc, "_orig_richblock_parse", selective)
-        results = [
-            await kc._wrapped_richblock_parse(MagicMock(), b)
-            for b in (good_a, "BAD", good_b)
-        ]
-        assert results[0] is good_a
-        assert results[2] is good_b
-        assert isinstance(results[1], RichBlockUnsupported)
-        assert getattr(results[1], "parse_failed") is True
-        assert kc.get_rich_block_parse_failed_count() == 1
-
-
 class TestHasParseFailures:
     def test_none(self):
         assert kc.has_parse_failures(None) is False
@@ -277,18 +246,13 @@ class TestHasParseFailures:
         )
         assert kc.has_parse_failures(rm) is False
 
-    def test_deeply_nested_failure(self):
-        leaf = SimpleNamespace(parse_failed=True)
-        rm = SimpleNamespace(
-            blocks=[SimpleNamespace(items=[SimpleNamespace(blocks=[leaf])])]
-        )
-        assert kc.has_parse_failures(rm) is True
-
-    def test_failure_in_table_cells(self):
-        # cells is a list OF lists (RichBlockTable).
+    def test_nested_marker_is_not_walked(self):
+        # Only the message contour marks, and only the top-level object: the recursive
+        # block walk went with the block contour, so a nested marker is invisible here.
+        # Nothing can produce one any more — this pins the narrowed contract.
         bad_cell = SimpleNamespace(parse_failed=True)
         rm = SimpleNamespace(blocks=[SimpleNamespace(cells=[[SimpleNamespace(), bad_cell]])])
-        assert kc.has_parse_failures(rm) is True
+        assert kc.has_parse_failures(rm) is False
 
 
 class TestNoOpDegradation:

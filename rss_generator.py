@@ -326,6 +326,12 @@ def _create_messages_groups(messages: list[Message], group_ids: dict[int, str | 
                 if 'GROUP_CHAT_CREATED'     in str(message.service): continue
                 if 'CHANNEL_CHAT_CREATED'   in str(message.service): continue
                 if 'DELETE_CHAT_PHOTO'      in str(message.service): continue
+                # Communities (Kurigram 2.2.26, MTProto layer 228/229): a channel that
+                # belongs to a community emits these when it is added to / removed from
+                # one. Membership bookkeeping, never a post.
+                if 'COMMUNITY_CHAT_ADDED'   in str(message.service): continue
+                if 'COMMUNITY_CHAT_REMOVED' in str(message.service): continue
+                if 'COMMUNITY_CHAT_JOINED'  in str(message.service): continue
 
             effective_group_id = group_ids.get(message.id, message.media_group_id)
             if effective_group_id:

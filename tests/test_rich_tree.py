@@ -24,8 +24,14 @@ def node(clsname, **fields):
     return obj
 
 
-def media_obj(fid="fid1", file_size=None, mime_type=None):
-    return SimpleNamespace(file_unique_id=fid, file_size=file_size, mime_type=mime_type, file_id="FILEID_" + str(fid))
+def media_obj(fid="fid1", file_size=None, mime_type=None, file_name=None):
+    return SimpleNamespace(file_unique_id=fid, file_size=file_size, mime_type=mime_type,
+                           file_name=file_name, file_id="FILEID_" + str(fid))
+
+
+def button(text="Go", url=None):
+    """A RichMessageButton stub: `url` is absent on callback / web_app / copy_text buttons."""
+    return node("RichMessageButton", text=text, url=url)
 
 
 def para(text):
@@ -114,6 +120,49 @@ class TestAdapterBasics:
                              "caption": {"text": "cap", "credit": None}}
         assert blocks[1] == {"t": "video", "fid": "vid", "size": 999}
 
+    def test_document_node_is_info_only(self):
+        # Kurigram 2.2.26: RichBlockDocument carries NO fid on purpose — a generic file is
+        # not proxied through /media (post_parser._select_document routes ordinary ones to
+        # the t.me info block), so the node holds name + size and nothing servable.
+        cap = node("RichBlockCaption", text="spec", credit=None)
+        blocks = rich_tree.from_pyrogram(rm(
+            node("RichBlockDocument", document=media_obj("doc", file_size=42, file_name="report.pdf"), caption=cap),
+            node("RichBlockDocument", document=media_obj("anon"), caption=None),
+        ))["blocks"]
+        assert blocks[0] == {"t": "document", "name": "report.pdf",
+                             "caption": {"text": "spec", "credit": None}}
+        assert blocks[1] == {"t": "document", "name": None}
+
+    def test_expandable_blockquote_is_text_shaped(self):
+        # Despite the name it carries `text` (like a pullquote), not `blocks`.
+        blocks = rich_tree.from_pyrogram(rm(
+            node("RichBlockExpandableBlockQuotation", text="hidden", credit="Src"),
+            node("RichBlockExpandableBlockQuotation", text="bare", credit=None),
+        ))["blocks"]
+        assert blocks[0] == {"t": "expandable_blockquote", "text": "hidden", "credit": "Src"}
+        assert blocks[1] == {"t": "expandable_blockquote", "text": "bare", "credit": None}
+
+    def test_buttons_row_node(self):
+        # `align` is deliberately not carried into the tree.
+        row = node("RichBlockButtons", align="center", buttons=[
+            button("Open", "https://example.com/a"),
+            button("Cancel"),
+        ])
+        blocks = rich_tree.from_pyrogram(rm(row))["blocks"]
+        assert blocks[0] == {"t": "buttons", "buttons": [
+            {"text": "Open", "url": "https://example.com/a"},
+            {"text": "Cancel", "url": None},
+        ]}
+
+    def test_empty_buttons_row_node(self):
+        blocks = rich_tree.from_pyrogram(rm(node("RichBlockButtons", align=None, buttons=[])))["blocks"]
+        assert blocks[0] == {"t": "buttons", "buttons": []}
+
+    def test_rt_button_node(self):
+        b = node("RichTextButton", button=button("Buy", "https://shop.example/x"))
+        tree = rich_tree.from_pyrogram(rm(para(b)))
+        assert tree["blocks"][0]["text"] == {"t": "button", "text": "Buy", "url": "https://shop.example/x"}
+
 
 class TestAdapterGuards:
     def test_depth_over_limit_is_placeholder(self):
@@ -160,6 +209,15 @@ class TestAdapterGuards:
         assert isinstance(adapted, list)
         assert len(adapted) < 5000
         assert len(adapted) <= rich_tree.MAX_RICH_NODES
+
+    def test_buttons_count_against_budget(self):
+        # A button row is unbounded upstream, so buttons are charged like list items:
+        # without the per-button take() the row would balloon past MAX_RICH_NODES silently.
+        row = node("RichBlockButtons", align=None,
+                   buttons=[button(str(i)) for i in range(rich_tree.MAX_RICH_NODES + 50)])
+        tree = rich_tree.from_pyrogram(rm(row))
+        assert tree["blocks"][-1] == {"t": "truncated"}
+        assert len(tree["blocks"][0]["buttons"]) <= rich_tree.MAX_RICH_NODES
 
     def test_sparse_empty_table_rows_trip_truncation(self):
         # DoS cap (review F1.2): rows with NO cells (cells=[[],[],…]) never enter the inner
@@ -268,6 +326,53 @@ class TestRender:
         assert "<blockquote><p>q</p><i>Author</i></blockquote>" in out
         assert "<blockquote>pull<i>Src</i></blockquote>" in out
 
+    def test_expandable_blockquote_renders_like_pullquote(self):
+        eb = node("RichBlockExpandableBlockQuotation", text="hidden", credit="Src")
+        out = rich_tree.render_html(rich_tree.from_pyrogram(rm(eb)), lambda f: None)
+        # No `expandable` attribute: sanitizer.py does not allow it on <blockquote>.
+        assert out == "<blockquote>hidden<i>Src</i></blockquote>"
+
+    def test_buttons_row_renders_one_paragraph(self):
+        row = node("RichBlockButtons", align="left", buttons=[
+            button("Open", "https://example.com/a"),
+            button("Cancel"),
+        ])
+        out = rich_tree.render_html(rich_tree.from_pyrogram(rm(row)), lambda f: None)
+        assert out == '<p><a href="https://example.com/a">Open</a> Cancel</p>'
+
+    def test_empty_buttons_row_renders_nothing(self):
+        row = node("RichBlockButtons", align=None, buttons=[])
+        assert rich_tree.render_html(rich_tree.from_pyrogram(rm(row)), lambda f: None) == ""
+
+    def test_button_without_url_is_text_not_link(self):
+        # callback / web_app / copy_text buttons carry no url — nothing to link to.
+        row = node("RichBlockButtons", align=None, buttons=[button("Callback")])
+        inline = para(node("RichTextButton", button=button("Inline")))
+        out = rich_tree.render_html(rich_tree.from_pyrogram(rm(row, inline)), lambda f: None)
+        assert "<a " not in out
+        assert "Callback" in out and "Inline" in out
+
+    def test_rt_button_renders_link(self):
+        b = node("RichTextButton", button=button("Buy", "https://shop.example/x"))
+        out = rich_tree.render_html(rich_tree.from_pyrogram(rm(para(b))), lambda f: None)
+        assert out == '<p><a href="https://shop.example/x">Buy</a></p>'
+
+    def test_document_renders_name_without_a_link(self):
+        # No <a> at all: the file is not served by the bridge, and a url_builder that WOULD
+        # sign a URL must not change that — the feed item already points at the post.
+        named = node("RichBlockDocument", document=media_obj("d", file_name="a&b.pdf"), caption=None)
+        anon = node("RichBlockDocument", document=media_obj("d2"), caption=None)
+        out = rich_tree.render_html(rich_tree.from_pyrogram(rm(named, anon)), lambda f: "u/" + f)
+        assert "<a " not in out
+        assert '<div class="rich-document">📎 a&amp;b.pdf — open it in Telegram to download</div>' in out
+        assert '<div class="rich-document">📎 Document — open it in Telegram to download</div>' in out
+
+    def test_document_caption_is_rendered_after_the_block(self):
+        cap = node("RichBlockCaption", text="the spec", credit=None)
+        doc = node("RichBlockDocument", document=media_obj("d", file_name="x.zip"), caption=cap)
+        out = rich_tree.render_html(rich_tree.from_pyrogram(rm(doc)), lambda f: None)
+        assert out.endswith("<p><i>the spec</i></p>")
+
     def test_rt_formatting_wrappers(self):
         p = para(["plain ", node("RichTextBold", text="b"), node("RichTextItalic", text="i"),
                   node("RichTextCode", text="c"), node("RichTextMarked", text="m"),
@@ -374,6 +479,14 @@ class TestIterators:
         got = list(rich_tree.iter_tree_media(tree))
         assert {"fid": "ph", "size": 5, "kind": "photo"} in got
         assert {"fid": "vid", "size": None, "kind": "video"} in got
+
+    def test_documents_are_not_collected_for_download(self):
+        # Both iterators feed the /media pipeline (media-table registration and the download
+        # walk). A generic file must reach neither — the bridge does not mirror files.
+        doc = node("RichBlockDocument", document=media_obj("dc", file_size=7, file_name="f.bin"), caption=None)
+        tree = rich_tree.from_pyrogram(rm(doc))
+        assert list(rich_tree.iter_tree_media(tree)) == []
+        assert list(rich_tree.iter_media_objects(rm(doc))) == []
 
     def test_iter_media_objects_walks_live_nesting(self):
         # Live objects (with file_id) inside a collage inside details, plus a list item.
