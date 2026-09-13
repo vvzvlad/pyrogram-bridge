@@ -5,45 +5,35 @@
 # pylint: disable=broad-exception-caught, logging-fstring-interpolation, line-too-long
 # pylint: disable=missing-function-docstring
 
-"""Defensive monkey-patches over Kurigram's Rich* message parsers (phase 1 of the
-Rich Messages epic, issue #83 / #84).
+"""A single wrapper over Kurigram's ``RichMessage._parse`` (Rich Messages epic, #83 / #84).
 
-WORKAROUND(kurigram-richblock-none)
------------------------------------
-Kurigram 2.2.24 (MTProto layer 227) parses ``message.rich_message`` but ships two
-deterministic upstream bugs that raise *inside* ``RichBlock._parse`` and crash the
-ENTIRE message parse, because ``Message._parse`` does not guard the call
-(pyrogram/types/messages_and_media/message.py:1679):
+Kurigram 2.2.26 (MTProto layer 229) parses ``message.rich_message``, and ``Message._parse``
+calls ``RichMessage._parse`` UNCONDITIONALLY for every message
+(pyrogram/types/messages_and_media/message.py:1777), guarding nothing. This module wraps
+that one call. It does two jobs:
 
-  1. ``documents.get(...)`` returns ``None`` for a missing video/audio document and the
-     result is dereferenced (``doc.attributes``) without a None-guard
-     (pyrogram/types/messages_and_media/rich_block.py:243-244 video, 280-281 audio).
-  2. ``RichBlockListItem._parse`` recurses via ``types.RichBlock._parse(client, block)``
-     WITHOUT forwarding the ``photos``/``documents`` dicts (rich_block.py:475, 499), so
-     any video/audio inside a list item raises ``AttributeError`` unconditionally and any
-     inline photo silently degrades to ``RichBlockPhoto(photo=None)``.
+  * recovers the ``part`` flag — LOAD-BEARING, not defensive. The high-level type drops it
+    (rich_message.py keeps only ``blocks``/``is_rtl``), and phase 3 (#86) needs it to know
+    which posts to re-fetch in full. Nothing else can recover it after the parse.
+  * fails soft on the whole message. Anything raising under the parse (a block, the vector
+    comprehensions, ``.rtl``) would otherwise take down the entire get_messages/history
+    call. Instead we emit a ``part=True`` sentinel with empty blocks, which the phase-3
+    re-fetch recognises and REPAIRS.
 
-Verified byte-for-byte against the installed wheel ``Kurigram==2.2.24``; rich_block.py is
-identical to upstream dev HEAD sha 793ef246. Upstream bug report: <link once filed>.
-These workarounds are removable once the upstream fix lands.
+HISTORY — removed in the 2.2.24 -> 2.2.26 bump: a second wrapper over ``RichBlock._parse``
+degraded ONE bad block to a marked ``RichBlockUnsupported`` node instead of losing the post.
+It existed for two deterministic upstream bugs (a missing document dereferenced without a
+None-guard; ``RichBlockListItem._parse`` recursing without forwarding photos/documents).
+2.2.26 fixed BOTH — every media branch now returns ``RichBlockUnsupported()`` on a missing
+document (rich_block.py:290, 331, 347) and the list-item recursion forwards the full
+argument set (rich_block.py:571, 596) — so the wrapper had nothing left to catch. A block
+that raises now degrades the whole post to the sentinel above rather than a single block:
+less granular, still never a crash. Restore the block contour from git history if a future
+layer reintroduces a per-block upstream crash.
 
-Two contours, both mandatory (they play DIFFERENT roles — not interchangeable):
-
-  * message-contour — wraps ``RichMessage._parse``. Catches failures OUTSIDE any single
-    block (the vector comprehensions, ``.rtl``) and is the last line of defence. Also
-    recovers the ``part`` flag (dropped by the high-level type — rich_message.py only keeps
-    ``blocks``/``is_rtl``) by re-attaching it to the parsed object, and is where None
-    passes straight through (every ordinary post calls RichMessage._parse with None).
-
-  * block-contour — wraps ``RichBlock._parse``. Degrades ONE bad block to a marked
-    ``RichBlockUnsupported`` node so the rest of the post survives. Recursion is covered
-    for free: containers and list items call ``types.RichBlock._parse`` by class name
-    (rich_block.py:175, 199, 211, 226, 475, 499), so the patched name is hit nested,
-    including the video-in-list crash above.
-
-Rollback safety: on a Kurigram build that lacks the Rich* classes (e.g. a downgrade to
-2.2.23) the import degrades to a no-op — the container must not crash-loop. Both wrappers
-use ``except Exception`` (NOT BaseException — never swallow CancelledError).
+Rollback safety: on a Kurigram build that lacks the Rich* classes the import degrades to a
+no-op — the container must not crash-loop. The wrapper uses ``except Exception`` (NOT
+BaseException — never swallow CancelledError).
 """
 
 import logging
@@ -57,8 +47,7 @@ logger = logging.getLogger(__name__)
 # may parse concurrently. Surfaced read-only via the get_*_count() accessors, exported to
 # /health so a silent rich-parse regression becomes observable to the operator.
 _counter_lock = threading.Lock()
-_rich_msg_parse_failed = 0    # whole-message parse failures (ERROR) — message-contour
-_rich_block_parse_failed = 0  # single-block parse failures (WARNING) — block-contour
+_rich_msg_parse_failed = 0    # whole-message parse failures (ERROR)
 _rich_part_seen = 0           # partial rich messages observed (WARNING) — phase-3 signal
 
 
@@ -66,12 +55,6 @@ def _incr_msg_parse_failed() -> None:
     global _rich_msg_parse_failed
     with _counter_lock:
         _rich_msg_parse_failed += 1
-
-
-def _incr_block_parse_failed() -> None:
-    global _rich_block_parse_failed
-    with _counter_lock:
-        _rich_block_parse_failed += 1
 
 
 def _incr_part_seen() -> None:
@@ -86,12 +69,6 @@ def get_rich_msg_parse_failed_count() -> int:
         return _rich_msg_parse_failed
 
 
-def get_rich_block_parse_failed_count() -> int:
-    """Single-block rich parse failures since process start (unsupported node emitted)."""
-    with _counter_lock:
-        return _rich_block_parse_failed
-
-
 def get_rich_part_seen_count() -> int:
     """Partial (``part=True``) rich messages seen since process start.
 
@@ -104,10 +81,9 @@ def get_rich_part_seen_count() -> int:
 
 def reset_counters() -> None:
     """Reset all counters. For test isolation only — not used in production."""
-    global _rich_msg_parse_failed, _rich_block_parse_failed, _rich_part_seen
+    global _rich_msg_parse_failed, _rich_part_seen
     with _counter_lock:
         _rich_msg_parse_failed = 0
-        _rich_block_parse_failed = 0
         _rich_part_seen = 0
 
 
@@ -117,13 +93,10 @@ try:
     from pyrogram import types as _types
 
     _RichMessage = _types.RichMessage
-    _RichBlock = _types.RichBlock
-    _RichBlockUnsupported = _types.RichBlockUnsupported
     _RawRichMessage = _raw.types.RichMessage
-    # Captured BEFORE patching so the wrappers always delegate to the genuine originals
+    # Captured BEFORE patching so the wrapper always delegates to the genuine original
     # (re-installing is therefore idempotent — a wrapper never wraps a wrapper).
     _orig_richmessage_parse = _RichMessage._parse
-    _orig_richblock_parse = _RichBlock._parse
     _RICH_AVAILABLE = True
 except (ImportError, AttributeError):  # pragma: no cover - exercised via monkeypatch in tests
     _RICH_AVAILABLE = False
@@ -134,7 +107,7 @@ _installed = False
 async def _wrapped_richmessage_parse(client, rich_message=None, users=None, chats=None):
     """message-contour wrapper for ``RichMessage._parse`` (async staticmethod)."""
     # None-passthrough (LOAD-BEARING): Message._parse calls RichMessage._parse
-    # UNCONDITIONALLY for every message (message.py:1679), and an ordinary post passes
+    # UNCONDITIONALLY for every message (message.py:1777), and an ordinary post passes
     # rich_message=None. Delegate verbatim so a normal post never enters the stats/part
     # path below. Without this early return the sentinel/degradation path would flood
     # every feed item. (Do NOT fold this into the try: the setattr below assumes a
@@ -188,28 +161,6 @@ async def _wrapped_richmessage_parse(client, rich_message=None, users=None, chat
     return parsed
 
 
-async def _wrapped_richblock_parse(client, rich_block=None, *args, **kwargs):
-    """block-contour wrapper for ``RichBlock._parse`` (async staticmethod).
-
-    ``*args``/``**kwargs`` forward photos/documents/part/users/chats verbatim, preserving
-    the recursion contract so nested container/list-item parses hit this wrapper too.
-    """
-    try:
-        return await _orig_richblock_parse(client, rich_block, *args, **kwargs)
-    except Exception as e:
-        # One bad block degrades to a single marked node; the rest of the post is intact.
-        # An exception raised in a list ITEM's own parse degrades the whole list to one
-        # node — acceptable (the alternative is losing the entire post).
-        _incr_block_parse_failed()
-        logger.warning(f"rich_block_parse_failed: {type(e).__name__}: {e}")
-        node = _RichBlockUnsupported()
-        # parse_failed distinguishes OUR failure node from the honest upstream fallthrough
-        # for not-yet-implemented block types (rich_block.py:315 returns a bare
-        # RichBlockUnsupported()). Object.default serialises it into /raw_json.
-        setattr(node, "parse_failed", True)
-        return node
-
-
 def _d(value):
     """Default empty-dict for the optional users/chats args (mirrors upstream defaults)."""
     return {} if value is None else value
@@ -225,40 +176,20 @@ def _describe_chats(chats: Any) -> str:
 
 
 def has_parse_failures(rich_message) -> bool:
-    """True if any node in the rich message carries the ``parse_failed`` marker.
+    """True if this rich message is the wrapper's failed-parse sentinel.
 
-    Recursive over the block tree (containers/list-items/table-cells). Used by the phase
-    2/3 download path to decide 503-transient vs 404-permanent for missing rich media.
+    Used by the phase 2/3 download path to decide 503-transient vs 404-permanent for
+    missing rich media. Only the message contour sets ``parse_failed``, and only on the
+    top-level object, so this is a flat check — the recursive block walk went with the
+    block contour (see the module docstring).
     """
     if rich_message is None:
         return False
-    if getattr(rich_message, "parse_failed", False):
-        return True
-    return _walk_has_failure(getattr(rich_message, "blocks", None))
-
-
-# Container attributes that hold child blocks (rich_block.py __init__ signatures):
-# blocks (ListItem/BlockQuotation/Collage/Slideshow/Details), items (RichBlockList),
-# cells (RichBlockTable — a list OF lists of cells).
-_CHILD_BLOCK_ATTRS = ("blocks", "items", "cells")
-
-
-def _walk_has_failure(node) -> bool:
-    if node is None:
-        return False
-    if isinstance(node, (list, tuple)):
-        return any(_walk_has_failure(x) for x in node)
-    if getattr(node, "parse_failed", False):
-        return True
-    for attr in _CHILD_BLOCK_ATTRS:
-        child = getattr(node, attr, None)
-        if child and _walk_has_failure(child):
-            return True
-    return False
+    return bool(getattr(rich_message, "parse_failed", False))
 
 
 def install() -> bool:
-    """Install the two defensive wrappers. Idempotent; no-op on a non-rich Kurigram.
+    """Install the RichMessage._parse wrapper. Idempotent; no-op on a non-rich Kurigram.
 
     Called at import time from telegram_client.py BEFORE the Client is created. Returns
     True if the wrappers were installed, False on the no-op (rollback) path.
@@ -273,9 +204,8 @@ def install() -> bool:
         return False
     if _installed:
         return True
-    # Re-patch through staticmethod(...) — RichMessage/RichBlock._parse are staticmethods.
+    # Re-patch through staticmethod(...) — RichMessage._parse is a staticmethod.
     _RichMessage._parse = staticmethod(_wrapped_richmessage_parse)
-    _RichBlock._parse = staticmethod(_wrapped_richblock_parse)
     _installed = True
-    logger.info("kurigram_compat: rich parse wrappers installed (message + block contours)")
+    logger.info("kurigram_compat: rich parse wrapper installed (message contour)")
     return True
