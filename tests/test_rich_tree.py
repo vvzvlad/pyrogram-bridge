@@ -29,9 +29,16 @@ def media_obj(fid="fid1", file_size=None, mime_type=None, file_name=None):
                            file_name=file_name, file_id="FILEID_" + str(fid))
 
 
-def button(text="Go", url=None):
-    """A RichMessageButton stub: `url` is absent on callback / web_app / copy_text buttons."""
-    return node("RichMessageButton", text=text, url=url)
+def button(text="Go", url=None, login_url=None, web_app=None):
+    """A RichMessageButton stub.
+
+    Upstream sets exactly ONE destination field; a callback / copy_text / switch_inline /
+    disabled button sets none at all, and neither does one whose type upstream could not
+    map — then the button has nothing to open.
+    """
+    return node("RichMessageButton", text=text, url=url,
+                login_url=node("LoginUrl", url=login_url) if login_url else None,
+                web_app=node("WebAppInfo", url=web_app) if web_app else None)
 
 
 def para(text):
@@ -162,6 +169,30 @@ class TestAdapterBasics:
         b = node("RichTextButton", button=button("Buy", "https://shop.example/x"))
         tree = rich_tree.from_pyrogram(rm(para(b)))
         assert tree["blocks"][0]["text"] == {"t": "button", "text": "Buy", "url": "https://shop.example/x"}
+
+    def test_button_destination_comes_from_any_url_carrying_field(self):
+        # A login button and a web-app button hold their URL one level down; both open a
+        # real address for the reader, so both become links like a plain `url` button.
+        row = node("RichBlockButtons", align=None, buttons=[
+            button("Sign in", login_url="https://auth.example/s"),
+            button("Play", web_app="https://app.example/w"),
+        ])
+        inline = node("RichTextButton", button=button("Mini", web_app="https://app.example/i"))
+        tree = rich_tree.from_pyrogram(rm(row, para(inline)))
+        assert tree["blocks"][0]["buttons"] == [
+            {"text": "Sign in", "url": "https://auth.example/s"},
+            {"text": "Play", "url": "https://app.example/w"},
+        ]
+        assert tree["blocks"][1]["text"]["url"] == "https://app.example/i"
+
+    def test_plain_url_wins_over_the_nested_holders(self):
+        # Upstream sets exactly one field; if a malformed object sets several, the plain
+        # link is the one that is unambiguously the button's own destination.
+        b = button("Both", url="https://direct.example/d", login_url="https://auth.example/s")
+        row = node("RichBlockButtons", align=None, buttons=[b])
+        assert rich_tree.from_pyrogram(rm(row))["blocks"][0]["buttons"] == [
+            {"text": "Both", "url": "https://direct.example/d"},
+        ]
 
 
 class TestAdapterGuards:
@@ -345,12 +376,22 @@ class TestRender:
         assert rich_tree.render_html(rich_tree.from_pyrogram(rm(row)), lambda f: None) == ""
 
     def test_button_without_url_is_text_not_link(self):
-        # callback / web_app / copy_text buttons carry no url — nothing to link to.
+        # A callback / copy_text / switch_inline / disabled button carries no destination at
+        # all — a feed reader cannot press it, so it stays a bare label.
         row = node("RichBlockButtons", align=None, buttons=[button("Callback")])
         inline = para(node("RichTextButton", button=button("Inline")))
         out = rich_tree.render_html(rich_tree.from_pyrogram(rm(row, inline)), lambda f: None)
         assert "<a " not in out
         assert "Callback" in out and "Inline" in out
+
+    def test_login_and_web_app_buttons_render_as_links(self):
+        row = node("RichBlockButtons", align=None, buttons=[
+            button("Sign in", login_url="https://auth.example/s"),
+            button("Play", web_app="https://app.example/w"),
+        ])
+        out = rich_tree.render_html(rich_tree.from_pyrogram(rm(row)), lambda f: None)
+        assert out == ('<p><a href="https://auth.example/s">Sign in</a> '
+                       '<a href="https://app.example/w">Play</a></p>')
 
     def test_rt_button_renders_link(self):
         b = node("RichTextButton", button=button("Buy", "https://shop.example/x"))

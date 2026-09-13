@@ -308,12 +308,28 @@ def _adapt_buttons(obj, depth, budget):
 
 
 def _adapt_button(btn, budget):
-    """RichMessageButton -> {"text", "url"}. url is absent on callback/webapp/copy_text buttons."""
-    url = getattr(btn, "url", None)
-    # Same normalisation as the RichTextUrl branch: only a genuine str reaches the tree, so
-    # the snapshot can never round-trip a non-str into something that renders as a link.
+    """RichMessageButton -> {"text", "url"}. url is None on the buttons that open nothing."""
     return {"text": _adapt_rt(getattr(btn, "text", None), budget),
-            "url": url if isinstance(url, str) else None}
+            "url": _button_url(btn)}
+
+
+def _button_url(btn) -> Optional[str]:
+    """The URL a button opens, or None when it opens nothing.
+
+    Three fields can hold one: the plain link, and the two that carry theirs one level down
+    (LoginUrl.url, WebAppInfo.url). Upstream sets exactly one, so the order below only
+    decides a malformed object's fate. A callback, copy_text, switch_inline or disabled
+    button — and one whose type upstream could not map at all — has no destination and
+    stays a bare label, because a feed reader cannot press it.
+
+    Only a genuine non-empty str reaches the tree: the same rule _render_button applies,
+    one step earlier, so a snapshot can never round-trip something unrenderable into a link.
+    """
+    for holder in (btn, getattr(btn, "login_url", None), getattr(btn, "web_app", None)):
+        url = getattr(holder, "url", None) if holder is not None else None
+        if isinstance(url, str) and url:
+            return url
+    return None
 
 
 def _adapt_collage(obj, depth, budget):
@@ -499,11 +515,11 @@ def _adapt_rt(rt: Any, budget: _Budget, depth: int = 0) -> Any:
         return {"t": "url", "text": _adapt_rt(getattr(rt, "text", None), budget, depth + 1),
                 "url": url if isinstance(url, str) else None}
     if name == "RichTextButton":
-        # The button's own label is a RichText; .url is absent on callback/webapp/copy_text.
+        # The button's own label is a RichText; the destination comes from _button_url so an
+        # inline button and a button-row entry resolve identically.
         btn = getattr(rt, "button", None)
-        btn_url = getattr(btn, "url", None)
         return {"t": "button", "text": _adapt_rt(getattr(btn, "text", None), budget, depth + 1),
-                "url": btn_url if isinstance(btn_url, str) else None}
+                "url": _button_url(btn)}
     if name == "RichTextTextMention":
         user = getattr(rt, "user", None)
         return {"t": "text_mention", "text": _adapt_rt(getattr(rt, "text", None), budget, depth + 1),
