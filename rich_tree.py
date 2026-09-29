@@ -780,7 +780,8 @@ def _render_rt(rt: Any) -> str:
     if rt is None:
         return ""
     if isinstance(rt, str):
-        return _html.escape(rt)
+        # HTML collapses a raw newline into a space; same '\n' -> <br> as the plain-text path.
+        return _html.escape(rt).replace("\n", "<br>")
     if isinstance(rt, (list, tuple)):
         return "".join(_render_rt(x) for x in rt)
     if not isinstance(rt, dict):
