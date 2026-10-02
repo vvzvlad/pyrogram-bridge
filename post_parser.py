@@ -1247,7 +1247,11 @@ class PostParser:
         if re.search(r'(?i)(#реклама|#промо|О\s+рекламодателе|партнерский\s+пост)', message_text_str):
             flags.append("advert")
 
-        if re.search(r'(?i)(по\s+промокоду|erid|скидка\s+на\s+курс|регистрируйтесь\s+тут)', message_text_str):
+        # The ad-marking token (erid) is searched in the rendered body: it often lives only
+        # in a link URL ("?erid=..."), and a rich post has no message.text at all. Word
+        # boundaries keep words like "Meridian" or "triglyceride" from matching.
+        if (re.search(r'(?i)(по\s+промокоду|скидка\s+на\s+курс|регистрируйтесь\s+тут)', message_text_str)
+                or re.search(r'(?i)\berid\b', message_body_html)):
             flags.append("advert")
 
         # Check for paywall-related words and tags
@@ -1277,6 +1281,12 @@ class PostParser:
             if (re.search(r'https?://(?!(?:www\.)?t\.me)[^\s<>"\']+', message_body_html) or 
                 re.search(r'href=[\"\']https?://(?!(?:www\.)?t\.me)[^\"\']+[\"\']', message_body_html)):
                 flags.append("link")
+
+        # Ad links carry referral/tracking query parameters (bot deep links with start=,
+        # invitedBy=, erid=, utm_*). Matched inside href only; the separator may be
+        # '?', '&' or ';' (the tail of an HTML-escaped '&amp;').
+        if re.search(r'(?i)href=["\'][^"\']*[?&;](?:start|invitedBy|erid|utm_[a-z]+)=', message_body_html):
+            flags.append("tracking_link")
         # --- End Link Flags ---
 
         # Check if the message contains channel mentions in the format @name
