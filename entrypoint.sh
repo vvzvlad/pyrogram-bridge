@@ -16,6 +16,12 @@
 # install. It is idempotent and fast (a no-op walk) once ownership is already app.
 set -e
 
+# Started as non-root (compose `user:` pinned): chown and the privilege drop below both
+# need root, so skip them and run the app as the user we were given.
+if [ "$(id -u)" -ne 0 ]; then
+    exec "$@"
+fi
+
 # Migrate the data volume to the runtime uid. Only /app/data — never the whole
 # /app image tree — so this stays a cheap targeted fixup on every start.
 chown -R app:app /app/data
