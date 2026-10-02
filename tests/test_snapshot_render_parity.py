@@ -30,7 +30,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from pyrogram.enums import MessageMediaType
+from pyrogram.enums import MessageMediaType, MessageServiceType
 
 from message_snapshot import snapshot_messages, restore_messages
 from tests import golden_replay as gr
@@ -68,6 +68,7 @@ _DEFAULTS = dict(
     sticker=None, story=None, contact=None, location=None, venue=None,
     dice=None, game=None, giveaway=None, giveaway_winners=None,
     checklist=None, paid_media=None, live_photo=None,
+    quote=None, external_reply=None, author_signature=None, invoice=None,
 )
 
 _id_counter = [1000]
@@ -250,6 +251,85 @@ def build_corpus():
         from_user=SimpleNamespace(first_name="Joe", last_name="Doe", username="joedoe"),
     )]))
 
+    # --- Post-content coverage pass (snapshot v9) ------------------------- #
+    # Poll media: rendered live from description_media, so the snapshot must carry it.
+    corpus.append(("poll_description_photo", [make_msg(
+        media=MessageMediaType.POLL,
+        poll=SimpleNamespace(
+            question=SimpleNamespace(text="Which one?", entities=[]),
+            options=[SimpleNamespace(text=SimpleNamespace(text="This", entities=[]))],
+            description_media=SimpleNamespace(photo=SimpleNamespace(file_unique_id="pdm_p", file_size=1024),
+                                              video=None, animation=None, sticker=None),
+            explanation_media=None,
+        ),
+    )]))
+    corpus.append(("poll_description_video", [make_msg(
+        media=MessageMediaType.POLL,
+        poll=SimpleNamespace(
+            question=SimpleNamespace(text="Watch?", entities=[]),
+            options=[],
+            description_media=SimpleNamespace(photo=None, video=SimpleNamespace(file_unique_id="pdm_v", file_size=2048),
+                                              animation=None, sticker=None),
+            explanation_media=None,
+        ),
+    )]))
+    corpus.append(("story_caption", [make_msg(
+        media=MessageMediaType.STORY,
+        story=SimpleNamespace(video=None, photo=SimpleNamespace(file_unique_id="sto_c", file_size=10),
+                              caption="Story <caption>\nsecond line"),
+    )]))
+    corpus.append(("story_deleted", [make_msg(
+        media=MessageMediaType.STORY,
+        story=SimpleNamespace(video=None, photo=None, caption=None, deleted=True),
+    )]))
+    corpus.append(("audio_tags", [make_msg(media=MessageMediaType.AUDIO,
+                                           audio=SimpleNamespace(file_unique_id="au_t", mime_type="audio/mpeg",
+                                                                 file_size=100, performer="Justice", title="D.A.N.C.E."))]))
+    corpus.append(("sticker_animated", [make_msg(media=MessageMediaType.STICKER,
+                                                 sticker=SimpleNamespace(file_unique_id="st_tgs", emoji="🐱",
+                                                                         is_video=False, is_animated=True))]))
+    corpus.append(("author_signature", [make_msg(
+        text=FakeStr("signed", "signed"),
+        sender_chat=SimpleNamespace(id=-100, title="Sender Chan", username="senderchan"),
+        author_signature="Jane Writer",
+    )]))
+    corpus.append(("invoice", [make_msg(
+        media=MessageMediaType.INVOICE,
+        invoice=SimpleNamespace(title="Course", description="Ten lessons", currency="USD", total_amount=1250),
+    )]))
+    corpus.append(("reply_selected_quote", [make_msg(
+        text=FakeStr("answer", "answer"),
+        reply_to_message_id=900,
+        reply_to_message=SimpleNamespace(
+            id=900, text=FakeStr("the whole long original", "the whole long original"), caption=None,
+            chat=SimpleNamespace(id=-1009999), sender_chat=SimpleNamespace(id=-1009999, title="Other", username="other"),
+            from_user=None),
+        quote=SimpleNamespace(text=FakeStr("long original", "<b>long</b> original")),
+    )]))
+    corpus.append(("external_reply", [make_msg(
+        text=FakeStr("answer", "answer"),
+        reply_to_message_id=2161,
+        external_reply=SimpleNamespace(
+            message_id=2161,
+            chat=SimpleNamespace(id=-1001198983871, title="Zhovner Hub", username="zhovner_hub"),
+            origin=SimpleNamespace(type="channel", chat=SimpleNamespace(id=-1001198983871, title="Zhovner Hub",
+                                                                        username="zhovner_hub"),
+                                   message_id=2161, author_signature=None),
+        ),
+        quote=SimpleNamespace(text=FakeStr("selected words", "selected <i>words</i>")),
+    )]))
+    corpus.append(("external_reply_hidden_user", [make_msg(
+        text=FakeStr("answer", "answer"),
+        reply_to_message_id=7,
+        external_reply=SimpleNamespace(message_id=7, chat=None,
+                                       origin=SimpleNamespace(type="hidden_user", sender_user_name="Anon")),
+    )]))
+    # CUSTOM_ACTION: kurigram puts action.message into .text as a plain str (no .html).
+    corpus.append(("custom_action", [make_msg(
+        service=MessageServiceType.CUSTOM_ACTION,
+        text="Custom <action> text",
+    )]))
+
     # --- Multi-message media group (grouping merge) ----------------------- #
     corpus.append(("media_group", [
         make_msg(media=MessageMediaType.PHOTO, media_group_id="grp1",
@@ -306,3 +386,38 @@ def test_corpus_covers_all_special_media_types():
                 "dice", "game", "giveaway", "giveaway_winners", "checklist", "paid_media",
                 "live_photo"}
     assert required <= names
+
+
+def test_corpus_covers_v9_snapshot_fields():
+    """Guard: every field added in snapshot v9 is exercised by the parity corpus."""
+    names = {n for n, _ in build_corpus()}
+    required = {"poll_description_photo", "poll_description_video", "story_caption", "story_deleted",
+                "audio_tags", "sticker_animated", "author_signature", "invoice",
+                "reply_selected_quote", "external_reply", "external_reply_hidden_user", "custom_action"}
+    assert required <= names
+
+
+def test_parity_cases_render_the_new_content(monkeypatch):
+    """The parity oracle only proves live == restored; this proves the v9 cases actually
+    render their new content, so an equally-empty render on both sides cannot pass."""
+    gr.pin_environment(monkeypatch)
+    corpus = dict(build_corpus())
+    expected = {
+        "poll_description_photo": "/pdm_p/",
+        "poll_description_video": "/pdm_v/",
+        "story_caption": "Story &lt;caption&gt;<br>second line",
+        "story_deleted": "Story unavailable",
+        "audio_tags": "🎵 Justice — D.A.N.C.E.<br>",
+        "sticker_animated": "Sticker 🐱",
+        "invoice": "Price: 12.50 USD",
+        "reply_selected_quote": "<b>long</b> original",
+        "external_reply": "selected <i>words</i>",
+        "external_reply_hidden_user": "Reply to Anon, #7",
+        "custom_action": "Custom &lt;action&gt; text",
+    }
+    for name, needle in expected.items():
+        restored = restore_messages(snapshot_messages(corpus[name]))
+        html, _rss = _render(restored, monkeypatch)
+        assert needle in html, f"case '{name}' lost its content on a cache hit"
+    _html, rss = _render(restore_messages(snapshot_messages(corpus["author_signature"])), monkeypatch)
+    assert "<author>Jane Writer</author>" in rss

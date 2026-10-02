@@ -131,8 +131,9 @@ class TestNoRich:
 # --------------------------------------------------------------------------------------
 class TestSnapshotRoundtrip:
     def test_version_is_current(self):
-        # v8 = rich_tree (v7) plus the reply target's chat.id and the chat type.
-        assert ms.SNAPSHOT_VERSION == 8
+        # v9 = v8 (rich_tree, reply target chat.id, chat type) plus the post-content
+        # coverage fields.
+        assert ms.SNAPSHOT_VERSION == 9
 
     def test_rich_tree_stored_for_rich_post(self):
         msg = SimpleNamespace(rich_message=SimpleNamespace(blocks=[]))

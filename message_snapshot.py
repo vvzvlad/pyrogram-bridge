@@ -60,7 +60,13 @@ logger = logging.getLogger(__name__)
 # None, so without it a cache hit would decide "foreign chat" and print a full quote where a
 # live render truncates), and chat.type keeps the shortening to CHANNEL feeds instead of also
 # hitting replies to people in a group — invalidate v7 files (one-off refetch per feed).
-SNAPSHOT_VERSION = 8
+# v9: added the fields of the post-content coverage pass: poll.description_media (the poll's
+# photo/video was rendered live but lost on a cache hit), story.caption, audio.performer /
+# audio.title, sticker.is_animated, author_signature, invoice (title/description/price), the
+# selected reply fragment `quote` and `external_reply` (a reply to a chat the fetch could not
+# resolve). A v8 file lacks them all, so a cache hit would render those posts differently from
+# a live fetch — invalidate v8 files (one-off refetch per feed).
+SNAPSHOT_VERSION = 9
 
 
 class CachedStr(str):
@@ -201,6 +207,11 @@ def _snapshot_reactions(reactions: Any) -> Optional[list]:
     return out
 
 
+# The description_media objects post_parser._poll_media_object may pick, in its order. Each
+# keeps file_unique_id (the render URL) and file_size (_save_media_file_ids' >100MB skip).
+_POLL_MEDIA_KEYS = ["photo", "video", "animation", "sticker"]
+
+
 def _snapshot_poll(poll: Any) -> Optional[dict]:
     if poll is None:
         return None
@@ -208,9 +219,14 @@ def _snapshot_poll(poll: Any) -> Optional[dict]:
     snap_options = None
     if options:
         snap_options = [{"text": _unwrap_text(getattr(o, "text", None))} for o in options]
+    description_media = getattr(poll, "description_media", None)
     return {
         "question": _unwrap_text(getattr(poll, "question", None)),
         "options": snap_options,
+        "description_media": None if description_media is None else {
+            key: _snapshot_obj(getattr(description_media, key, None), ["file_unique_id", "file_size"])
+            for key in _POLL_MEDIA_KEYS
+        },
     }
 
 
@@ -259,6 +275,31 @@ def _snapshot_reply(reply: Any) -> Optional[dict]:
     }
 
 
+def _snapshot_quote(quote: Any) -> Optional[dict]:
+    """message.quote (TextQuote): only its text, with the .html rendering of its entities."""
+    if quote is None:
+        return None
+    return {"text": _snapshot_str(getattr(quote, "text", None))}
+
+
+def _snapshot_external_reply(external_reply: Any) -> Optional[dict]:
+    """message.external_reply: what post_parser._format_external_reply_info reads — the target
+    chat + message id (the link) and the origin's author fields (the label)."""
+    if external_reply is None:
+        return None
+    origin = getattr(external_reply, "origin", None)
+    return {
+        "message_id": getattr(external_reply, "message_id", None),
+        "chat": _snapshot_obj(getattr(external_reply, "chat", None), ["id", "title", "username"]),
+        "origin": None if origin is None else {
+            "chat": _snapshot_obj(getattr(origin, "chat", None), ["id", "title", "username"]),
+            "sender_chat": _snapshot_obj(getattr(origin, "sender_chat", None), ["id", "title", "username"]),
+            "sender_user": _snapshot_obj(getattr(origin, "sender_user", None), ["first_name", "last_name", "username"]),
+            "sender_user_name": getattr(origin, "sender_user_name", None),
+        },
+    }
+
+
 # --------------------------------------------------------------------------- #
 # Special-media snapshots (issue #23 review fix).
 #
@@ -274,12 +315,15 @@ def _snapshot_story(story: Any) -> Optional[dict]:
     story.photo, each by .file_unique_id (video wins over photo). The chosen object is
     also the one _save_media_file_ids reads .file_size off for the >100MB skip, so
     file_size is snapshotted too (else a >100MB story media would be collected on a
-    cache hit — F1). The render URL is still built from file_unique_id."""
+    cache hit — F1). The render URL is still built from file_unique_id. The caption
+    (a plain str in kurigram) is rendered by _format_special_media."""
     if story is None:
         return None
+    caption = getattr(story, "caption", None)
     return {
         "video": _snapshot_obj(getattr(story, "video", None), ["file_unique_id", "file_size"]),
         "photo": _snapshot_obj(getattr(story, "photo", None), ["file_unique_id", "file_size"]),
+        "caption": str(caption) if isinstance(caption, str) else None,
     }
 
 
@@ -378,6 +422,9 @@ def snapshot_message(message: Any) -> dict:
         "show_caption_above_media": getattr(message, "show_caption_above_media", None),
         "reply_to_message_id": getattr(message, "reply_to_message_id", None),
         "reply_to_message": _snapshot_reply(getattr(message, "reply_to_message", None)),
+        "quote": _snapshot_quote(getattr(message, "quote", None)),
+        "external_reply": _snapshot_external_reply(getattr(message, "external_reply", None)),
+        "author_signature": getattr(message, "author_signature", None),
         "empty": getattr(message, "empty", None),
         "chat": _snapshot_chat(getattr(message, "chat", None)),
         "sender_chat": _snapshot_obj(getattr(message, "sender_chat", None), ["id", "title", "username"]),
@@ -393,11 +440,11 @@ def snapshot_message(message: Any) -> dict:
         # video_note select this exact object). Without it a restored >100MB media
         # would have file_size=None and be wrongly collected on a cache hit (F1).
         "document": _snapshot_obj(getattr(message, "document", None), ["file_unique_id", "mime_type", "file_size", "file_name"]),
-        "audio": _snapshot_obj(getattr(message, "audio", None), ["file_unique_id", "mime_type", "file_size"]),
+        "audio": _snapshot_obj(getattr(message, "audio", None), ["file_unique_id", "mime_type", "file_size", "performer", "title"]),
         "voice": _snapshot_obj(getattr(message, "voice", None), ["file_unique_id", "mime_type"]),
         "video_note": _snapshot_obj(getattr(message, "video_note", None), ["file_unique_id", "file_size"]),
         "animation": _snapshot_obj(getattr(message, "animation", None), ["file_unique_id", "file_size"]),
-        "sticker": _snapshot_obj(getattr(message, "sticker", None), ["file_unique_id", "emoji", "is_video"]),
+        "sticker": _snapshot_obj(getattr(message, "sticker", None), ["file_unique_id", "emoji", "is_video", "is_animated"]),
         # LIVE_PHOTO (Kurigram 2.2.23) renders as a video element via the video_loop_400
         # kind. MEDIA_SOURCES/_get_file_unique_id/_save_media_file_ids read live_photo's
         # file_unique_id + file_size (the >100MB skip); find_file_id also reads file_unique_id.
@@ -411,6 +458,7 @@ def snapshot_message(message: Any) -> dict:
         "venue": _snapshot_venue(getattr(message, "venue", None)),
         "dice": _snapshot_obj(getattr(message, "dice", None), ["emoji", "value"]),
         "game": _snapshot_obj(getattr(message, "game", None), ["title"]),
+        "invoice": _snapshot_obj(getattr(message, "invoice", None), ["title", "description", "currency", "total_amount"]),
         "giveaway": _snapshot_giveaway(getattr(message, "giveaway", None)),
         "giveaway_winners": _snapshot_obj(
             getattr(message, "giveaway_winners", None), ["winner_count", "quantity", "prize_description"]),
@@ -488,7 +536,12 @@ def _restore_poll(d: Optional[dict]) -> Optional[SimpleNamespace]:
     # options must be namespace objects with a .text string; a bare string would make
     # getattr(option, 'text', '') return '' and render empty options.
     restored_options = [SimpleNamespace(text=o.get("text")) for o in options]
-    return SimpleNamespace(question=d.get("question"), options=restored_options)
+    description_media = d.get("description_media")
+    restored_media = None if description_media is None else SimpleNamespace(**{
+        key: _ns(description_media.get(key), ["file_unique_id", "file_size"]) for key in _POLL_MEDIA_KEYS
+    })
+    return SimpleNamespace(question=d.get("question"), options=restored_options,
+                           description_media=restored_media)
 
 
 def _restore_web_page(d: Optional[dict]) -> Optional[SimpleNamespace]:
@@ -517,6 +570,28 @@ def _restore_reply(d: Optional[dict]) -> Optional[SimpleNamespace]:
         chat=_ns(d.get("chat"), ["id"]),
         sender_chat=_ns(d.get("sender_chat"), ["id", "title", "username"]),
         from_user=_ns(d.get("from_user"), ["id", "first_name", "last_name", "username"]),
+    )
+
+
+def _restore_quote(d: Optional[dict]) -> Optional[SimpleNamespace]:
+    if d is None:
+        return None
+    return SimpleNamespace(text=_restore_str(d.get("text")))
+
+
+def _restore_external_reply(d: Optional[dict]) -> Optional[SimpleNamespace]:
+    if d is None:
+        return None
+    origin = d.get("origin")
+    return SimpleNamespace(
+        message_id=d.get("message_id"),
+        chat=_ns(d.get("chat"), ["id", "title", "username"]),
+        origin=None if origin is None else SimpleNamespace(
+            chat=_ns(origin.get("chat"), ["id", "title", "username"]),
+            sender_chat=_ns(origin.get("sender_chat"), ["id", "title", "username"]),
+            sender_user=_ns(origin.get("sender_user"), ["first_name", "last_name", "username"]),
+            sender_user_name=origin.get("sender_user_name"),
+        ),
     )
 
 
@@ -559,6 +634,7 @@ def _restore_story(d: Optional[dict]) -> Optional[SimpleNamespace]:
     return SimpleNamespace(
         video=_ns(d.get("video"), ["file_unique_id", "file_size"]),
         photo=_ns(d.get("photo"), ["file_unique_id", "file_size"]),
+        caption=d.get("caption"),
     )
 
 
@@ -634,6 +710,9 @@ class CachedMessage:
         self.show_caption_above_media = data.get("show_caption_above_media")
         self.reply_to_message_id = data.get("reply_to_message_id")
         self.reply_to_message = _restore_reply(data.get("reply_to_message"))
+        self.quote = _restore_quote(data.get("quote"))
+        self.external_reply = _restore_external_reply(data.get("external_reply"))
+        self.author_signature = data.get("author_signature")
         self.empty = bool(data.get("empty"))
         self.chat = _restore_chat(data.get("chat"))
         self.sender_chat = _ns(data.get("sender_chat"), ["id", "title", "username"])
@@ -645,11 +724,11 @@ class CachedMessage:
         self.photo = _ns(data.get("photo"), ["file_unique_id"])
         self.video = _ns(data.get("video"), ["file_unique_id", "file_size"])
         self.document = _ns(data.get("document"), ["file_unique_id", "mime_type", "file_size", "file_name"])
-        self.audio = _ns(data.get("audio"), ["file_unique_id", "mime_type", "file_size"])
+        self.audio = _ns(data.get("audio"), ["file_unique_id", "mime_type", "file_size", "performer", "title"])
         self.voice = _ns(data.get("voice"), ["file_unique_id", "mime_type"])
         self.video_note = _ns(data.get("video_note"), ["file_unique_id", "file_size"])
         self.animation = _ns(data.get("animation"), ["file_unique_id", "file_size"])
-        self.sticker = _ns(data.get("sticker"), ["file_unique_id", "emoji", "is_video"])
+        self.sticker = _ns(data.get("sticker"), ["file_unique_id", "emoji", "is_video", "is_animated"])
         # LIVE_PHOTO: restored like `video` so the video_loop_400 media block renders on a
         # cache hit (file_unique_id → URL; file_size → the >100MB collection skip).
         self.live_photo = _ns(data.get("live_photo"), ["file_unique_id", "file_size"])
@@ -661,6 +740,7 @@ class CachedMessage:
         self.venue = _restore_venue(data.get("venue"))
         self.dice = _ns(data.get("dice"), ["emoji", "value"])
         self.game = _ns(data.get("game"), ["title"])
+        self.invoice = _ns(data.get("invoice"), ["title", "description", "currency", "total_amount"])
         self.giveaway = _restore_giveaway(data.get("giveaway"))
         self.giveaway_winners = _ns(
             data.get("giveaway_winners"), ["winner_count", "quantity", "prize_description"])
