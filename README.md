@@ -397,9 +397,13 @@ The container starts as root on purpose: the entrypoint first hands the data vol
 (`/app/data`) to uid 1000 and then drops to that user to run the service. So an old install
 whose volume still holds root-owned files upgrades without any manual steps.
 
-For the same reason, do not set `user:` in the compose file. A container started as a non-root
-user cannot drop privileges and exits at once with
-`setpriv: initgroups failed: Operation not permitted`.
+If you pin `user: "1000:1000"` (the uid of the image's `app` user) in the compose file, the
+container starts as that user and leaves the volume as it is. An old volume with root-owned files then has to be
+handed over once by hand (the real volume name is in `docker volume ls`):
+
+```bash
+docker run --rm -v <stack>_pyrogram_bridge:/data busybox chown -R 1000:1000 /data
+```
 
 ## Development
 
