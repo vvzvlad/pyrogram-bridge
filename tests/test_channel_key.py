@@ -9,6 +9,7 @@ import logging
 import os
 import shutil
 import sqlite3
+import tempfile
 from types import SimpleNamespace
 
 import pytest
@@ -17,6 +18,21 @@ import tg_cache
 from channel_key import canonical_channel_key
 from migrate_channel_keys import migrate_channel_keys_sync
 from post_parser import PostParser
+
+
+def _fs_is_case_sensitive() -> bool:
+    """True if the filesystem holding pytest's temp dirs tells 'A' from 'a' (Linux does,
+    the default macOS volume does not)."""
+    with tempfile.TemporaryDirectory() as d:
+        open(os.path.join(d, "A"), "w").close()
+        return not os.path.exists(os.path.join(d, "a"))
+
+
+# The real rename/merge tests need 'Durov' and 'durov' to be two different directories.
+needs_case_sensitive_fs = pytest.mark.skipif(
+    not _fs_is_case_sensitive(),
+    reason="needs a case-sensitive filesystem: 'Durov' and 'durov' are one directory here",
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -197,6 +213,7 @@ def test_migration_samefile_guard_no_data_loss(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 # Task 11 (c) — merge of two genuinely different dirs → combined, target wins.
 # --------------------------------------------------------------------------- #
+@needs_case_sensitive_fs
 def test_migration_fs_merge_different_dirs(tmp_path):
     db = str(tmp_path / "m.db")
     cache = tmp_path / "cache"
@@ -222,6 +239,7 @@ def test_migration_fs_merge_different_dirs(tmp_path):
     assert (cache / "durov" / "6" / "only_new").read_bytes() == b"NEW_ONLY"  # untouched
 
 
+@needs_case_sensitive_fs
 def test_migration_fs_rename_when_dst_missing(tmp_path):
     db = str(tmp_path / "m.db")
     cache = tmp_path / "cache"
@@ -267,6 +285,7 @@ def test_migration_rerun_noop(tmp_path):
 # Data-loss guard — an FS-step failure must SKIP the SQL step (rows stay old-cased).
 # Has teeth: fails if the `continue` after the FS OSError is removed.
 # --------------------------------------------------------------------------- #
+@needs_case_sensitive_fs
 def test_migration_fs_failure_skips_sql(tmp_path, monkeypatch, caplog):
     db = str(tmp_path / "m.db")
     cache = tmp_path / "cache"
