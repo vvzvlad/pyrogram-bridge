@@ -289,9 +289,9 @@ async def test_get_post_html_album_debug_includes_raw_message():
 # ---------------------------------------------------------------------------
 
 def test_snapshot_version_is_current():
-    # v8: added chat.id to the reply target and chat.type to the message's own chat
-    # (same-channel + channel-feed detection on a cache hit).
-    assert SNAPSHOT_VERSION == 8
+    # v9: added the post-content coverage fields (poll description_media, story caption,
+    # audio tags, sticker.is_animated, author_signature, invoice, quote, external_reply).
+    assert SNAPSHOT_VERSION == 9
 
 
 def test_document_file_name_survives_roundtrip():

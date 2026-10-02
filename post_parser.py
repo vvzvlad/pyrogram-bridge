@@ -16,6 +16,7 @@ import html
 import inspect
 from dataclasses import dataclass
 from datetime import datetime
+from types import SimpleNamespace
 from typing import Union, Dict, Any, List, Optional, Callable, Tuple
 from pyrogram.types import Message
 from pyrogram.enums import MessageMediaType
@@ -334,11 +335,15 @@ def _select_document(message):
 
 
 def _select_sticker(message):
-    """STICKER selector: video stickers loop as <video> ('video_loop_200'), image
-    stickers render as <img> ('img_200_sticker')."""
+    """STICKER selector: video stickers loop as <video> ('video_loop_200'), animated
+    (TGS) stickers become a text line ('sticker_text') because their file is gzipped
+    Lottie JSON that no <img> can display, image stickers render as <img>
+    ('img_200_sticker')."""
     sticker = message.sticker
     if getattr(sticker, 'is_video', False):
         return sticker, 'video_loop_200'
+    if getattr(sticker, 'is_animated', False):
+        return sticker, 'sticker_text'
     return sticker, 'img_200_sticker'
 
 
@@ -404,6 +409,7 @@ class RenderCtx:
     mime: Optional[str] = None      # audio/voice <source> type; default chosen by media type
     file_name: Optional[str] = None  # document file name — only the 'file' renderer uses it
     file_size: Optional[int] = None  # document size in bytes — only the 'file' renderer uses it
+    audio_label: Optional[str] = None  # "Performer — Title" — only the 'audio' renderer uses it
 
 
 # Renderers return list[str] so the byte structure of the '\n'.join in
@@ -424,9 +430,20 @@ def _render_video_400(ctx: 'RenderCtx') -> List[str]:
 
 
 def _render_audio(ctx: 'RenderCtx') -> List[str]:
-    return [f'<audio controls style="width:100%; max-width:{MEDIA_MAX_WIDTH_PX};">'
-            f'<source src="{ctx.url}" type="{ctx.mime}"></audio>',
-            '<br>']
+    # The track name sits above the player; without tags (and for every voice message)
+    # nothing is added, so those fragments keep their old bytes.
+    label = [f'🎵 {html.escape(ctx.audio_label)}<br>'] if ctx.audio_label else []
+    return label + [f'<audio controls style="width:100%; max-width:{MEDIA_MAX_WIDTH_PX};">'
+                    f'<source src="{ctx.url}" type="{ctx.mime}"></audio>',
+                    '<br>']
+
+
+def _audio_label(audio) -> Optional[str]:
+    """'Performer — Title' from an audio file's tags; either part alone when only one is
+    set, None when neither is."""
+    parts = [value.strip() for value in (getattr(audio, 'performer', None), getattr(audio, 'title', None))
+             if isinstance(value, str) and value.strip()]
+    return ' — '.join(parts) or None
 
 
 def _render_video_loop_200(ctx: 'RenderCtx') -> List[str]:
@@ -438,6 +455,11 @@ def _render_video_loop_200(ctx: 'RenderCtx') -> List[str]:
 def _render_img_200_sticker(ctx: 'RenderCtx') -> List[str]:
     return [f'<img src="{ctx.url}" alt="Sticker {ctx.emoji}" style="max-width:100%;'
             f'width:auto; height:auto; max-height:{MEDIA_MAX_HEIGHT_SMALL_PX}; object-fit:contain;">']
+
+
+def _render_sticker_text(ctx: 'RenderCtx') -> List[str]:
+    # Animated (TGS) sticker: a text line instead of an <img> pointing at Lottie JSON.
+    return [f'Sticker {html.escape(ctx.emoji or "")}'.rstrip()]
 
 
 def _render_video_loop_400(ctx: 'RenderCtx') -> List[str]:
@@ -464,6 +486,27 @@ def _format_file_size(size) -> str:
     return f"{size / (1024 * 1024 * 1024):.2f} GB"
 
 
+# Invoice.total_amount is in the currency's smallest unit. Digits after the decimal point
+# for the currencies where it is NOT 2, per Telegram's currencies.json
+# (https://core.telegram.org/bots/payments/currencies.json); XTR (Telegram Stars) is counted
+# in whole stars.
+_CURRENCY_EXPONENTS = {'XTR': 0, 'CLP': 0, 'ISK': 0, 'JPY': 0, 'KRW': 0, 'PYG': 0, 'UGX': 0,
+                       'VND': 0, 'BHD': 3, 'IQD': 3, 'JOD': 3}
+
+
+def _format_invoice_price(total_amount, currency) -> Optional[str]:
+    """'12.50 USD' / '50 ⭐' for an invoice, or None when the amount or currency is unusable."""
+    if not isinstance(total_amount, int) or isinstance(total_amount, bool):
+        return None
+    if not isinstance(currency, str) or not currency.strip():
+        return None
+    code = currency.strip().upper()
+    if code == 'XTR':
+        return f"{total_amount} ⭐"
+    exponent = _CURRENCY_EXPONENTS.get(code, 2)
+    return f"{total_amount / 10 ** exponent:.{exponent}f} {html.escape(code)}"
+
+
 def _render_file(ctx: 'RenderCtx') -> List[str]:
     """Generic-document info block: file name + size linking to the t.me post.
     Replaces the broken <img> that non-image documents (.stl/.zip/...) used to
@@ -483,6 +526,7 @@ RENDERERS: Dict[str, Callable[['RenderCtx'], List[str]]] = {
     'audio':           _render_audio,
     'video_loop_200':  _render_video_loop_200,
     'img_200_sticker': _render_img_200_sticker,
+    'sticker_text':    _render_sticker_text,
     'video_loop_400':  _render_video_loop_400,
     'pdf':             _render_pdf,
     'file':            _render_file,
@@ -633,6 +677,11 @@ class PostParser:
             raise
 
     def _get_author_info(self, message: Message) -> str: #Tests: tests/postparser_author_info.py
+        # A channel that signs its posts names the person who wrote this one; that person,
+        # not the channel itself, is the post's author.
+        signature = getattr(message, 'author_signature', None)
+        if isinstance(signature, str) and signature.strip():
+            return signature.strip()
         if message.sender_chat:
             title = getattr(message.sender_chat, 'title', None)
             username = getattr(message.sender_chat, 'username', None)
@@ -1104,7 +1153,9 @@ class PostParser:
             # neighbouring post makes two adjacent feed entries look half-identical (issue:
             # t.me/univelis/1472 quoted in full inside t.me/univelis/1473).
             max_chars = Config['reply_quote_truncate_chars'] if self._reply_is_near_own_channel(message, reply_to) else 0
-            quote = self._format_reply_quote(reply_to, max_chars)
+            # A reply that selected a fragment of the target quotes only that fragment (as
+            # Telegram shows it); otherwise the target's whole text.
+            quote = self._format_reply_quote(self._selected_quote(message) or reply_to, max_chars)
             # A shortened quote MUST stay one click from the original, otherwise the reader ends
             # up with less than the full quote gave them — and on the signed-post shape this
             # feature targets, the sender_chat _reply_target_url needs is None, so the block had
@@ -1121,7 +1172,52 @@ class PostParser:
                         f'<br>{MARKER_QUOTE_END}</div><br>')
             return f'<div class="message-reply">{MARKER_REPLY_OPEN}{target} ---</div><br>'
 
+        external_reply = getattr(message, "external_reply", None)
+        if external_reply is not None:
+            return self._format_external_reply_info(message, external_reply)
+
         return None
+
+    @staticmethod
+    def _selected_quote(message: Any) -> Any:
+        """message.quote (the fragment of the target the reply selected) when it holds text, else None.
+
+        A TextQuote exposes `.text` (a Str with .html) exactly like a reply target does, so
+        _format_reply_quote renders it unchanged. The isinstance check also keeps a mock's
+        auto-created attribute from passing for a quote.
+        """
+        text_quote = getattr(message, 'quote', None)
+        text = getattr(text_quote, 'text', None)
+        return text_quote if isinstance(text, str) and text.strip() else None
+
+    def _format_external_reply_info(self, message: Any, external_reply: Any) -> str:
+        """Reply block for a target in ANOTHER chat that the fetch could not resolve.
+
+        kurigram parses message.external_reply from the reply header (no extra fetch of the
+        target message), so it is present even when the target chat is private or unreachable
+        and reply_to_message stays None. The header carries no text of the target: the quote is
+        message.quote — the fragment chosen by the author or added by the server — if any. The label names the origin's author in the same forms
+        as _reply_author_label; the link points at the target chat + message id.
+        """
+        origin = getattr(external_reply, 'origin', None)
+        message_id = getattr(external_reply, 'message_id', None)
+        chat = getattr(external_reply, 'chat', None) or getattr(origin, 'chat', None)
+        hidden_name = getattr(origin, 'sender_user_name', None)
+        if isinstance(hidden_name, str) and hidden_name.strip():
+            label_raw = hidden_name.strip()
+        else:
+            sender_chat = getattr(origin, 'chat', None) or getattr(origin, 'sender_chat', None)
+            from_user = getattr(origin, 'sender_user', None)
+            if sender_chat is None and from_user is None:
+                sender_chat = chat
+            label_raw = self._reply_author_label(
+                SimpleNamespace(id=message_id, sender_chat=sender_chat, from_user=from_user))
+        target = self._format_reply_target(SimpleNamespace(id=message_id, sender_chat=chat), label_raw)
+        quote = self._format_reply_quote(self._selected_quote(message))
+        if quote:
+            return (f'<div class="message-reply">{MARKER_REPLY_OPEN}{target} ---<br>{quote}'
+                    f'<br>{MARKER_QUOTE_END}</div><br>')
+        return f'<div class="message-reply">{MARKER_REPLY_OPEN}{target} ---</div><br>'
 
     def _extract_reactions(self, message: Message) -> Union[Dict[str, int], None]:
         if reactions := getattr(message, 'reactions', None):
@@ -1274,13 +1370,23 @@ class PostParser:
         if is_only_link:
             flags.append("only_link")
 
-        # Check if the message contains any http/https links (excluding t.me) 
+        # Check if the message contains any http/https links (excluding t.me)
         # Only add 'link' if 'only_link' isn't already set
         if not is_only_link:
-            # Search within the generated HTML body to catch links in hrefs as well
-            if (re.search(r'https?://(?!(?:www\.)?t\.me)[^\s<>"\']+', message_body_html) or 
-                re.search(r'href=[\"\']https?://(?!(?:www\.)?t\.me)[^\"\']+[\"\']', message_body_html)):
-                flags.append("link")
+            # Search within the generated HTML body to catch links in hrefs as well. The
+            # bridge's own URLs (the signed /media/... src of every rendered photo/video)
+            # are not links the post makes, so they are skipped. The prefix ends with '/'
+            # so a foreign host that merely starts like the bridge host still counts.
+            bridge_url = Config['pyrogram_bridge_url']
+            bridge_prefix = bridge_url.rstrip('/') + '/' if bridge_url else None
+            link_patterns = (r'https?://(?!(?:www\.)?t\.me)[^\s<>"\']+',
+                             r'href=[\"\'](https?://(?!(?:www\.)?t\.me)[^\"\']+)[\"\']')
+            for pattern in link_patterns:
+                # Group 1 is the bare URL of the href pattern; the first pattern has no group.
+                urls = (match.group(match.lastindex or 0) for match in re.finditer(pattern, message_body_html))
+                if any(bridge_prefix is None or not url.startswith(bridge_prefix) for url in urls):
+                    flags.append("link")
+                    break
 
         # Ad links carry referral/tracking query parameters (bot deep links with start=,
         # invitedBy=, erid=, utm_*). Matched inside href only; the separator may be
@@ -1513,9 +1619,13 @@ class PostParser:
         return None
     
     def _get_post_text_with_urls(self, message: Message) -> Union[str, None]:
-        if message.text: text = message.text.html
-        elif message.caption: text = message.caption.html
-        else: return None
+        value = message.text or message.caption
+        if not value: return None
+        # A CUSTOM_ACTION service message carries its text as a plain str (kurigram assigns
+        # action.message as is, no entities, no .html). Escape it the same way the snapshot
+        # does (message_snapshot._snapshot_str), so a live render matches a cache hit.
+        raw_html = getattr(value, 'html', None)
+        text = raw_html if raw_html is not None else html.escape(str(value))
 
         text = text.replace('\n', '<br>') # Replace newlines with <br>
         text_html = self._add_hyperlinks_to_raw_urls(text)
@@ -1636,10 +1746,13 @@ class PostParser:
         # Info-block-only media types (NO_IMAGE_MEDIA_TYPES) are rendered by
         # _format_special_media — do not open an empty message-media container for
         # them. PAID_MEDIA (also in that set) is handled by the branch above; POLL is
-        # not in the set and is let in only when it carries renderable poll media.
+        # not in the set and is let in only when it carries renderable poll media; a
+        # STORY only when it still has a photo/video (a deleted or inaccessible story
+        # gets its "unavailable" line from _format_special_media instead).
         elif (message.media
                 and message.media not in NO_IMAGE_MEDIA_TYPES
-                and (message.media != MessageMediaType.POLL or poll_media_obj is not None)):
+                and (message.media != MessageMediaType.POLL or poll_media_obj is not None)
+                and (message.media != MessageMediaType.STORY or _story_media_object(message)[0] is not None)):
             content_media.append(f'<div class="message-media">')
 
             file_unique_id = self._get_file_unique_id(message)
@@ -1679,7 +1792,8 @@ class PostParser:
                                 ctx.mime = getattr(message.voice, 'mime_type', 'audio/ogg')
                             else:
                                 ctx.mime = getattr(message.audio, 'mime_type', 'audio/mpeg')
-                        elif kind == 'img_200_sticker':
+                                ctx.audio_label = _audio_label(message.audio)
+                        elif kind in ('img_200_sticker', 'sticker_text'):
                             ctx.emoji = getattr(message.sticker, 'emoji', '')
                         content_media.extend(renderer(ctx))
             # Registry §3.14: close the message-media container in EVERY branch. It used
@@ -1917,7 +2031,8 @@ class PostParser:
         """Render an info block for media types that carry no downloadable file.
 
         Covers giveaways, giveaway winners, checklists, contacts, locations, venues,
-        dice, games, invoices and UNSUPPORTED content (Kurigram 2.2.23). Each block is
+        dice, games, invoices and UNSUPPORTED content (Kurigram 2.2.23), plus a story's
+        caption / "unavailable" line (its media itself is rendered elsewhere). Each block is
         gated on message.media so unrelated messages never render these. All new
         Message attributes are accessed via getattr only (older objects/mocks do not
         define them) and ALL user-controlled strings go through html.escape.
@@ -2002,8 +2117,32 @@ class PostParser:
                 else:
                     block = "🎮 Game"
 
+            elif media == MessageMediaType.STORY:
+                # The story's photo/video is rendered by _generate_html_media; this block adds
+                # its caption and, when no media is left (deleted / inaccessible story), says so
+                # instead of leaving the post empty. The caption is a plain str in kurigram.
+                lines = []
+                if _story_media_object(message)[0] is None:
+                    lines.append("📖 Story unavailable — it was deleted or is not accessible")
+                caption = getattr(getattr(message, 'story', None), 'caption', None)
+                if isinstance(caption, str) and caption.strip():
+                    lines.append(html.escape(caption.strip()).replace('\n', '<br>'))
+                if lines:
+                    block = '<br>'.join(lines)
+
             elif media == MessageMediaType.INVOICE:
-                block = "🧾 Invoice"
+                invoice = getattr(message, 'invoice', None)
+                title = getattr(invoice, 'title', None)
+                lines = [f"🧾 Invoice: {html.escape(title.strip())}"
+                         if isinstance(title, str) and title.strip() else "🧾 Invoice"]
+                description = getattr(invoice, 'description', None)
+                if isinstance(description, str) and description.strip():
+                    lines.append(html.escape(description.strip()).replace('\n', '<br>'))
+                price = _format_invoice_price(getattr(invoice, 'total_amount', None),
+                                              getattr(invoice, 'currency', None))
+                if price:
+                    lines.append(f"Price: {price}")
+                block = '<br>'.join(lines)
 
             elif media == MessageMediaType.UNSUPPORTED:
                 block = "⚠️ This post contains content not supported by the bridge — open it in Telegram."

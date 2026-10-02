@@ -315,23 +315,17 @@ def _create_messages_groups(messages: list[Message], group_ids: dict[int, str | 
     # First pass - collect messages and organize into processing groups
     for message in messages:
         try:
-            # Skip service messages about pinned posts and new chat photos
+            # Service messages (chat photo/title changes, giveaway launches/results, gifts,
+            # checklist updates, community membership, ...) are bookkeeping, not posts:
+            # post_parser renders them with no body — at most a stock title ("🖼 New chat
+            # photo"), mostly an empty "❓ Unknown Post" entry. A pin does get a quote block, but it only repeats a post already in
+            # the feed, so it stays skipped as before. Skip them all, except CUSTOM_ACTION
+            # with text — the only service type kurigram gives a text (action.message),
+            # which post_parser renders as the post body. An allowlist, so a service type
+            # added by a future kurigram stays out of the feed instead of showing up empty.
             if message.service:
-                if 'PINNED_MESSAGE'         in str(message.service): continue
-                if 'NEW_CHAT_PHOTO'         in str(message.service): continue
-                if 'NEW_CHAT_TITLE'         in str(message.service): continue
-                if 'VIDEO_CHAT_STARTED'     in str(message.service): continue
-                if 'VIDEO_CHAT_ENDED'       in str(message.service): continue
-                if 'VIDEO_CHAT_SCHEDULED'   in str(message.service): continue
-                if 'GROUP_CHAT_CREATED'     in str(message.service): continue
-                if 'CHANNEL_CHAT_CREATED'   in str(message.service): continue
-                if 'DELETE_CHAT_PHOTO'      in str(message.service): continue
-                # Communities (Kurigram 2.2.26, MTProto layer 228/229): a channel that
-                # belongs to a community emits these when it is added to / removed from
-                # one. Membership bookkeeping, never a post.
-                if 'COMMUNITY_CHAT_ADDED'   in str(message.service): continue
-                if 'COMMUNITY_CHAT_REMOVED' in str(message.service): continue
-                if 'COMMUNITY_CHAT_JOINED'  in str(message.service): continue
+                if not ('CUSTOM_ACTION' in str(message.service) and message.text):
+                    continue
 
             effective_group_id = group_ids.get(message.id, message.media_group_id)
             if effective_group_id:
