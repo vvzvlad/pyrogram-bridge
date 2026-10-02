@@ -1281,6 +1281,12 @@ class PostParser:
             if (re.search(r'https?://(?!(?:www\.)?t\.me)[^\s<>"\']+', message_body_html) or 
                 re.search(r'href=[\"\']https?://(?!(?:www\.)?t\.me)[^\"\']+[\"\']', message_body_html)):
                 flags.append("link")
+
+        # Ad links carry referral/tracking query parameters (bot deep links with start=,
+        # invitedBy=, erid=, utm_*). Matched inside href only; the separator may be
+        # '?', '&' or ';' (the tail of an HTML-escaped '&amp;').
+        if re.search(r'(?i)href=["\'][^"\']*[?&;](?:start|invitedBy|erid|utm_[a-z]+)=', message_body_html):
+            flags.append("tracking_link")
         # --- End Link Flags ---
 
         # Check if the message contains channel mentions in the format @name
