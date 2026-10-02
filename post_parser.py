@@ -1247,7 +1247,11 @@ class PostParser:
         if re.search(r'(?i)(#реклама|#промо|О\s+рекламодателе|партнерский\s+пост)', message_text_str):
             flags.append("advert")
 
-        if re.search(r'(?i)(по\s+промокоду|erid|скидка\s+на\s+курс|регистрируйтесь\s+тут)', message_text_str):
+        # The ad-marking token (erid) is searched in the rendered body: it often lives only
+        # in a link URL ("?erid=..."), and a rich post has no message.text at all. Word
+        # boundaries keep words like "Meridian" or "triglyceride" from matching.
+        if (re.search(r'(?i)(по\s+промокоду|скидка\s+на\s+курс|регистрируйтесь\s+тут)', message_text_str)
+                or re.search(r'(?i)\berid\b', message_body_html)):
             flags.append("advert")
 
         # Check for paywall-related words and tags
