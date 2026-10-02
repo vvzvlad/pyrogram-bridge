@@ -74,13 +74,24 @@ the feed's filters with buttons.
    The repository's [`docker-compose.yml`](docker-compose.yml) is a fuller example: every
    optional variable with a comment, log rotation and a healthcheck.
 
-3. Start it: `docker compose up -d` (or deploy the stack).
+3. Log in to Telegram once, interactively, **before** starting the bridge for real. Without a
+   session the bridge asks for a phone number on start; a container running in the background
+   has no terminal to ask in, so it fails at start and keeps restarting.
 
-4. Log in to Telegram once, interactively — there is no session yet:
+   With Docker Compose, from the directory with the compose file:
 
    ```bash
-   docker exec -it pyrogram-bridge /bin/bash
-   python3 api_server.py
+   docker compose run --rm pyrogram_bridge
+   ```
+
+   With Portainer or plain Docker: deploy the stack, stop it, and run a one-off container on
+   the stack's volume. Compose and Portainer prefix the volume name with the project/stack
+   name, so look it up with `docker volume ls`:
+
+   ```bash
+   docker run --rm -it -v <stack>_pyrogram_bridge:/app/data \
+     -e TG_API_ID=12345678 -e TG_API_HASH=0123456789abcdef0123456789abcdef \
+     gitea.vvzvlad.xyz/projects/pyrogram-bridge:latest
    ```
 
    Enter the phone number, the code Telegram sends you and, if two-step verification is on,
@@ -96,14 +107,12 @@ the feed's filters with buttons.
    Enter password (empty to recover): ********
    ```
 
-   Wait for `INFO:     Application startup complete.`, stop it with Ctrl+C and leave the
-   container.
+   Wait for `INFO:     Application startup complete.` and stop it with Ctrl+C.
 
-5. Restart the container: `docker restart pyrogram-bridge`.
+4. Start the bridge: `docker compose up -d` (or start the stack).
 
 The session is saved as `pyro_bridge.session` in the data volume (`/app/data` inside the
-container; with the compose above, `/var/lib/docker/volumes/pyrogram_bridge/_data/` on the
-host). It *is* the logged-in account: keep it, and do not share it.
+container). It *is* the logged-in account: keep it, and do not share it.
 
 Check that it works: `curl https://pgbridge.example.com/rss/DragorWW_space/change-me`.
 
@@ -291,7 +300,7 @@ required; the bridge does not start without them.
 | --- | --- | --- |
 | `TG_API_ID` | — | Telegram API id from my.telegram.org. Required. |
 | `TG_API_HASH` | — | Telegram API hash from my.telegram.org. Required. |
-| `PYROGRAM_BRIDGE_URL` | — | Public base URL of the bridge, e.g. `https://pgbridge.example.com`. Media links in feeds are built from it — without it pictures and videos do not load in readers. |
+| `PYROGRAM_BRIDGE_URL` | — | Public base URL of the bridge, e.g. `https://pgbridge.example.com`. Media links in feeds are built from it; without it they are relative (`/media/…`), and pictures load only if the reader resolves them against the bridge's address. |
 | `TOKEN` | — | Access token, see [Access token](#access-token). |
 | `API_PORT` | `8000` | HTTP port inside the container. |
 | `API_HOST` | `0.0.0.0` | Address to listen on. |
@@ -384,17 +393,13 @@ in-process when it is not.
 
 ## Upgrading
 
-The container runs the service as a non-root user (uid 1000). On start it briefly runs as root
-only to `chown -R 1000:1000` its data volume (`/app/data`), so upgrading an old install whose
-volume still holds root-owned files just works — no manual action needed.
+The container starts as root on purpose: the entrypoint first hands the data volume
+(`/app/data`) to uid 1000 and then drops to that user to run the service. So an old install
+whose volume still holds root-owned files upgrades without any manual steps.
 
-The one exception: if you pin `user:` in your compose (e.g. `user: "1000:1000"`), the container
-never starts as root and cannot fix ownership. In that case, do a one-time manual chown of the
-volume before starting the new image:
-
-```bash
-docker run --rm -v pyrogram_bridge:/data busybox chown -R 1000:1000 /data
-```
+For the same reason, do not set `user:` in the compose file. A container started as a non-root
+user cannot drop privileges and exits at once with
+`setpriv: initgroups failed: Operation not permitted`.
 
 ## Development
 
