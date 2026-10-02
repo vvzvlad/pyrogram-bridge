@@ -1,174 +1,409 @@
 # Pyrogram Bridge
 
-## First start
+[English](README.md) · [Русский](README.ru.md)
 
-1)Login at https://my.telegram.org/apps, API development tools - create new application, copy api_id and api_hash
+Turns Telegram channels into RSS feeds. The bridge logs in to Telegram as a regular user
+account (MTProto, via [Kurigram](https://github.com/KurimuzonAkuma/pyrogram), a Pyrogram
+fork), reads channel history and serves it over HTTP as RSS, as an HTML page or as JSON —
+with media, albums, replies and reactions, and with filters that drop the posts you do not
+want to read.
 
-1) Сreate docker-compose.yml (or, recommended, create stack in portainer):
+It reads whatever that account can read: public channels by username, and private channels
+the account is subscribed to by numeric id. Nothing supernatural — it is just one more
+Telegram client.
 
-```docker-compose
-volumes:
-  pyrogram_bridge:
-  
-services:
-  pyrogram_bridge:
-    image: gitea.vvzvlad.xyz/projects/pyrogram-bridge:latest
-    container_name: pyrogram-bridge
-    environment:
-      TG_API_ID: 290389758
-      TG_API_HASH: c22987sdfnkjjhd37efa5f0
-      PYROGRAM_BRIDGE_URL: https://pgbridge.example.com
-      API_PORT: 80
-      TOKEN: "1234567890"
-    restart: always
-    volumes:
-      - pyrogram_bridge:/app/data
-    labels:
-      traefik.enable: "true"
-      traefik.http.routers.pgbridge.rule: Host(`pgbridge.example.com`)
-      traefik.http.services.pgbridge.loadBalancer.server.port: 80
-      traefik.http.routers.pgbridge.entrypoints: websecure
-      traefik.http.routers.pgbridge.tls: true
-```
+It pairs with [miniflux-tg-add-bot](https://github.com/vvzvlad/miniflux-tg-add-bot): forward a
+post to the bot and it subscribes the channel's bridge feed in Miniflux, then lets you switch
+the feed's filters with buttons.
 
-2) Run ```docker-compose up -d``` or start stack in portainer
+---
 
-3) Enter in container:
+## Features
 
-```bash
-docker exec -it pyrogram-bridge /bin/bash
-```
+- **An RSS feed per channel** — `/rss/<channel>`; the same posts can also be rendered as one
+  HTML page.
+- **Single posts** as HTML or JSON — `/html/<channel>/<id>`, `/json/<channel>/<id>`.
+- **Media through the bridge** — photos, videos and files are downloaded from Telegram,
+  cached in the data volume and served from signed URLs, so the RSS reader never needs
+  Telegram access.
+- **Albums become one entry**; optionally, posts published a few seconds apart are merged too.
+- **Post filtering** — drop posts by built-in flags (ads, forwards, links to other channels,
+  streams, clown-reaction memes, …) and by your own regex, per feed, right in the feed URL.
+  See [Filtering posts](#filtering-posts).
+- **Full rendering** — replies with the quoted post, polls, link previews, Telegram Rich
+  Messages, reactions, views and links back to Telegram.
+- **Gentle on Telegram** — channel info and history are cached and live calls are throttled;
+  a FloodWait turns into HTTP 429 with `Retry-After`; feeds answer `ETag`/`Last-Modified`
+  conditional requests with 304.
+- **Self-healing** — an in-process watchdog restarts a stuck Telegram session, and `/ping`
+  serves the container healthcheck.
 
-4) Run bridge in interactive mode:
+## Quick start (Docker)
 
-```bash
-python3 api_server.py
-```
+1. Get an `api_id` and `api_hash`: log in at <https://my.telegram.org/apps> →
+   *API development tools* → create an application.
 
-5) Enter phone number, get code in telegram, enter code, and copy session string. 
+2. Create a `docker-compose.yml` (or a stack in Portainer):
+
+   ```yaml
+   volumes:
+     pyrogram_bridge:
+
+   services:
+     pyrogram_bridge:
+       image: gitea.vvzvlad.xyz/projects/pyrogram-bridge:latest
+       container_name: pyrogram-bridge
+       environment:
+         TG_API_ID: 12345678
+         TG_API_HASH: 0123456789abcdef0123456789abcdef
+         PYROGRAM_BRIDGE_URL: https://pgbridge.example.com
+         API_PORT: 80
+         TOKEN: change-me
+         TZ: Europe/Moscow
+       restart: always
+       volumes:
+         - pyrogram_bridge:/app/data
+       labels:
+         traefik.enable: "true"
+         traefik.http.routers.pgbridge.rule: Host(`pgbridge.example.com`)
+         traefik.http.services.pgbridge.loadBalancer.server.port: 80
+         traefik.http.routers.pgbridge.entrypoints: websecure
+         traefik.http.routers.pgbridge.tls: true
+   ```
+
+   The repository's [`docker-compose.yml`](docker-compose.yml) is a fuller example: every
+   optional variable with a comment, log rotation and a healthcheck.
+
+3. Start it: `docker compose up -d` (or deploy the stack).
+
+4. Log in to Telegram once, interactively — there is no session yet:
+
+   ```bash
+   docker exec -it pyrogram-bridge /bin/bash
+   python3 api_server.py
+   ```
+
+   Enter the phone number, the code Telegram sends you and, if two-step verification is on,
+   the password:
+
+   ```text
+   Enter phone number or bot token: +7 900 000 00 00
+   Is "+7 900 000 00 00" correct? (y/N): y
+   The confirmation code has been sent via Telegram app
+   Enter confirmation code: 12345
+   The two-step verification is enabled and a password is required
+   Password hint: None
+   Enter password (empty to recover): ********
+   ```
+
+   Wait for `INFO:     Application startup complete.`, stop it with Ctrl+C and leave the
+   container.
+
+5. Restart the container: `docker restart pyrogram-bridge`.
+
+The session is saved as `pyro_bridge.session` in the data volume (`/app/data` inside the
+container; with the compose above, `/var/lib/docker/volumes/pyrogram_bridge/_data/` on the
+host). It *is* the logged-in account: keep it, and do not share it.
+
+Check that it works: `curl https://pgbridge.example.com/rss/DragorWW_space/change-me`.
+
+## Usage
+
+### Endpoints
+
+| URL | What you get |
+| --- | --- |
+| `/rss/<channel>` | the channel's RSS feed |
+| `/rss/<channel>?output_type=html` | the same posts as one HTML page — handy for checking filters in a browser |
+| `/html/<channel>/<post_id>` | one post as HTML; a post from an album is shown with the whole album |
+| `/json/<channel>/<post_id>` | one message as JSON: text, rendered HTML, flags, date, author, views, reactions, link preview |
+| `/flags` | the list of flags the bridge assigns, as JSON (see [Filtering posts](#filtering-posts)) |
+| `/ping`, `/health` | liveness and status (see [Monitoring](#monitoring)) |
+
+`<channel>` is a public username without `@` (`DragorWW_space`) or a numeric channel id
+(`-1002069358234`). The id is how you reach a private channel — the bridge account has to be
+subscribed to it. To find the id, forward a post from the channel to
+[@userinfobot](https://t.me/userinfobot); it replies with `Id: -100…`.
+[miniflux-tg-add-bot](https://github.com/vvzvlad/miniflux-tg-add-bot) does this for you.
+
+Single-post pages accept `?debug=true`: the page then also shows the post title and the raw
+Telegram message.
+
+### Feed parameters
+
+All of them are query parameters and can be combined:
+
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| `limit` | `50` | Maximum number of entries, 1–200. A feed often has fewer — see [below](#why-a-feed-has-fewer-entries-than-limit). |
+| `exclude_flags` | — | Comma-separated flags; posts carrying any of them are dropped. See [Filtering posts](#filtering-posts). |
+| `exclude_text` | — | A regular expression; posts whose text matches it are dropped. |
+| `merge_seconds` | `5` | Window for time-based merging; has effect only with `TIME_BASED_MERGE=true`. See [Merging posts](#merging-posts). |
+| `output_type` | `rss` | `rss` or `html`. |
+| `token` | — | The access token, as an alternative to the `/<TOKEN>` path segment. |
 
 ```text
-Enter phone number or bot token: +7 993 850 5104
-Is "+7 993 850 5104" correct? (y/N): y
-The confirmation code has been sent via Telegram app
-Enter confirmation code: 69267
-The two-step verification is enabled and a password is required
-Password hint: None
-Enter password (empty to recover): Passport-Vegan-Scale6
+https://pgbridge.example.com/rss/DragorWW_space?limit=30&exclude_flags=advert,fwd
+https://pgbridge.example.com/rss/DragorWW_space/change-me?exclude_text=розыгрыш|giveaway
+https://pgbridge.example.com/rss/-1002069358234?merge_seconds=10
 ```
 
-Wait until show message "INFO:     Application startup complete.", then exit from container.
+### Timeouts
 
-6) Restart bridge container:
+A feed that is not cached yet can take a while: the bridge sends one Telegram request at a
+time, with a pause between them, and media are fetched on top of that. Give your reader a
+generous HTTP timeout — in Miniflux, `HTTP_CLIENT_TIMEOUT=200`. When Telegram answers with a
+FloodWait, the bridge returns `429 Too Many Requests` with a `Retry-After` header (at most
+190 seconds) instead of hanging.
 
-```bash
-docker restart pyrogram-bridge
+## Filtering posts
+
+Every feed URL carries its own filters, so the same channel can be read raw in one place and
+cleaned up in another. There are two filters, and they combine: a post is dropped when it
+matches **either** of them.
+
+### By flags — `exclude_flags`
+
+While rendering, the bridge tags each post with flags describing its content.
+`exclude_flags` takes a comma-separated list of them, and a post carrying **any** of the
+listed flags is dropped:
+
+```text
+/rss/DragorWW_space?exclude_flags=advert,fwd,clownpoo
 ```
 
-Session file will be saved in your data directory, in docker compose case — /var/lib/docker/volumes/pyrogram_bridge/_data/pyro_bridge.session.  
+| Flag | The post… |
+| --- | --- |
+| `advert` | contains ad markers: `#реклама`, `#промо`, «партнерский пост», «по промокоду», an `erid` label and the like |
+| `fwd` | is forwarded from another channel or user |
+| `foreign_channel` | links to another public channel (`t.me/othername`, or a boost link of another channel); links to the channel itself do not count |
+| `hid_channel` | links to a private channel invite (`t.me/+…`) |
+| `link` | contains an external `http(s)` link; `t.me` links do not count |
+| `only_link` | is nothing but one external link, or only a link preview (gets `only_link` instead of `link`) |
+| `mention` | mentions an `@username` |
+| `donat` | asks for donations: «донат…», `pay.cloudtips.ru`, `t.me/boost/…` links |
+| `paywall` | mentions paid platforms: Boosty/Бусти, Sponsr, Дзен.Премиум |
+| `stream` | announces a stream or a webinar: «стрим…», livestream, «вебинар…», «онлайн-лекция» |
+| `clownpoo` | has at least 30 🤡 or at least 30 💩 reactions |
+| `video` | is a video, GIF, round video or live photo with at most 200 characters of text |
+| `audio` | is an audio file or a voice message with at most 200 characters of text |
+| `no_image` | has no picture or video: a text-only post, a file, a poll without media… |
+| `sticker` | is a sticker |
+| `poll` | is a poll |
+| `rich` | is a Telegram Rich Message |
+| `merged` | is assembled from several messages: an album, or a time-based merge |
+
+`/flags` returns the current list — everything above except `merged`, which is assigned
+later, while grouping messages; it still works in `exclude_flags`. miniflux-tg-add-bot builds
+its flag buttons from this endpoint.
+
+Things to know:
+
+- **Flags describe the post's own content.** A mention or a link inside the message the post
+  replies to does not set `mention`, `link`, `hid_channel` or `foreign_channel`.
+- **An album or merged entry carries the flags of all its parts**, so it is dropped as a
+  whole if any part matches.
+- **`exclude_flags=all` drops every post that has at least one flag** — far more than it
+  sounds: text-only posts carry `no_image` and albums carry `merged`, so `all` empties most
+  feeds. List the flags you mean instead.
+- **To see which flags posts get**, set `SHOW_POST_FLAGS=true`: every entry then ends with its
+  flags (`🏷 advert 🏷 link`). Together with `?output_type=html` this is the quickest way to
+  tune a filter in the browser.
+
+### By text — `exclude_text`
+
+`exclude_text` is a regular expression
+([Python syntax](https://docs.python.org/3/library/re.html#regular-expression-syntax)),
+matched case-insensitively against the post's text — the message text or the media caption;
+for an album, the texts of all its parts. A post in which it matches anywhere is dropped:
+
+```text
+/rss/DragorWW_space?exclude_text=розыгрыш|giveaway
+/rss/DragorWW_space?exclude_text=все.*комикс|реклам.*канал
+```
+
+The second one drops posts that contain «все» followed somewhere later by «комикс», and posts
+that contain «реклам» followed by «канал».
+
+- **Alternatives are separated by `|`, not by commas.** A comma is an ordinary character in a
+  regex: `реклама,акция` matches only that exact string.
+- **Only the visible text is searched** — not the URLs behind hyperlinks and not the quoted
+  message of a reply.
+- **Encode special characters in the URL.** `+` must be written as `%2B` (unencoded, it turns
+  into a space, so `\d+` silently becomes "a digit followed by a space"), `#` as `%23`, `&` as
+  `%26`. Most readers
+  encode Cyrillic themselves; if yours does not, use any URL encoder, e.g.
+  <https://www.urlencoder.org/>.
+- **A regex that does not compile fails the feed request** with an error instead of returning
+  the feed unfiltered.
+
+### Why a feed has fewer entries than `limit`
+
+- **Filters run after `limit`.** The bridge takes the newest `limit` entries and only then
+  removes the filtered ones, so an aggressive filter can leave just a few. Raise `limit` to
+  compensate.
+- **Albums take one message per picture.** The RSS feed reads `2 × limit` messages from the
+  channel, and a 10-photo album uses ten of them, so on a channel that posts large albums
+  `limit` may change little or nothing. The HTML feed (`output_type=html`) reads exactly
+  `limit` messages.
+
+## Merging posts
+
+Telegram stores an album as separate messages, one per photo or video. The bridge always
+joins them back into one entry.
+
+Some channels post a series of separate messages instead — a picture and then its caption, a
+long text in several parts. With `TIME_BASED_MERGE=true` the bridge also joins every message
+published within `merge_seconds` (default 5) of the previous one into the same entry; the
+window can be changed per feed with `?merge_seconds=…`. Without `TIME_BASED_MERGE` the
+parameter does nothing. Merged entries get the `merged` flag.
+
+## Access token
+
+Whoever can reach the bridge can read through it everything your Telegram account can read —
+and Telegram sees all of it as your account's activity, which sooner or later ends in limits
+or a ban for botting. If the bridge is reachable from the internet, set `TOKEN`.
+
+With `TOKEN` set, every endpoint except `/`, `/ping` and the media links requires it, as the
+last path segment or as a query parameter:
+
+```text
+https://pgbridge.example.com/rss/DragorWW_space/change-me
+https://pgbridge.example.com/rss/DragorWW_space?token=change-me&limit=30
+```
+
+Media links do not need the token: each one carries its own signature (see
+`MEDIA_SIGNING_SECRET`).
+
+Requests from `127.0.0.1` / `::1` skip the check. If your reverse proxy connects to the bridge
+from localhost, every request would look local — put the proxy's address in
+`TRUSTED_PROXIES`, and the client's real address is then taken from `X-Real-IP` /
+`X-Forwarded-For`.
+
+## Configuration
+
+Everything is configured with environment variables. Only `TG_API_ID` and `TG_API_HASH` are
+required; the bridge does not start without them.
+
+### Basics
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `TG_API_ID` | — | Telegram API id from my.telegram.org. Required. |
+| `TG_API_HASH` | — | Telegram API hash from my.telegram.org. Required. |
+| `PYROGRAM_BRIDGE_URL` | — | Public base URL of the bridge, e.g. `https://pgbridge.example.com`. Media links in feeds are built from it — without it pictures and videos do not load in readers. |
+| `TOKEN` | — | Access token, see [Access token](#access-token). |
+| `API_PORT` | `8000` | HTTP port inside the container. |
+| `API_HOST` | `0.0.0.0` | Address to listen on. |
+| `TRUSTED_PROXIES` | — | Comma-separated addresses of reverse proxies whose `X-Real-IP` / `X-Forwarded-For` are trusted. |
+| `TZ` | `UTC` | Time zone of the dates shown in posts. |
+| `LOG_LEVEL` | `INFO` | Log level. |
+| `DEBUG` | `false` | Print the raw Telegram message to stdout on every single-post request. |
+| `SESSION_PATH` | `data` | Directory of the Telegram session file, relative to `/app`. |
+
+### Feed content
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `TIME_BASED_MERGE` | `false` | Merge posts published a few seconds apart, see [Merging posts](#merging-posts). |
+| `SHOW_POST_FLAGS` | `false` | Show each post's flags at the end of the entry. |
+| `SHOW_BRIDGE_LINK` | `false` | Add an "Open in Bridge" link to each post (the post page with `debug=true`). The link contains `TOKEN`, so everyone who reads the feed sees the token. |
+| `REPLY_QUOTE_TRUNCATE_CHARS` | `200` | When a post replies to a neighbouring post of the same channel, keep only this many visible characters of the quote — otherwise the reader shows post A in full and then post B with all of A quoted inside it. `0` keeps quotes in full. Replies to other channels, to users or to older posts are never shortened. |
+| `REPLY_QUOTE_TRUNCATE_DISTANCE` | `2` | How far apart (in message ids) the reply and its target may be for the quote to be shortened; 2 covers "a reply to the post right above", even after an album. `0` disables shortening. Both values apply at render time, no cache clearing needed. |
+
+### Media links
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `MEDIA_SIGNING_SECRET` | — | Secret for signing media URLs (HMAC-SHA256, key derived with HKDF). If unset, the key is derived from `TOKEN`, and without `TOKEN` it comes from a key file generated in the data volume. Set this or `TOKEN`: the key file disappears with the volume, and every media URL already delivered to readers dies with it. |
+| `MEDIA_ALLOW_LEGACY_DIGEST` | `true` | Also accept media URLs signed by the old scheme (SHA-1, 8 characters), so links delivered before an upgrade keep working. Set to `false` once every feed has been re-read. |
+| `MEDIA_URL_TTL_DAYS` | — | Give media URLs a signed expiry this many days out. Unset means no expiry, which is right for RSS: readers often fetch an entry's media days later. |
+
+### Telegram connection
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `TG_PROXY_HOST` | — | Connect to Telegram through a SOCKS5 proxy (e.g. an MTProto proxy's SOCKS5 interface). Prefer an IP address: a hostname is re-resolved on every reconnect. |
+| `TG_PROXY_PORT` | `1080` | Proxy port. |
+| `TG_PROXY_USERNAME`, `TG_PROXY_PASSWORD` | — | Proxy credentials, if needed. |
+| `TG_RPC_CONCURRENCY` | `1` | How many Telegram requests may run at once. |
+| `TG_RPC_MIN_INTERVAL_MS` | `500` | Minimum pause between the starts of two Telegram requests, ms. |
+| `TG_RPC_TIMEOUT` | `60` | Maximum duration of one Telegram request, seconds. |
+| `TG_CHAT_CACHE_TTL_HOURS` | `12` | How long channel info (title, username, id) is cached, hours. |
+
+### Watchdog
+
+The watchdog periodically checks that the Telegram session is actually alive and restarts it
+in-process when it is not.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `TG_WATCHDOG_ENABLED` | `true` | Turn the watchdog on or off. |
+| `TG_WATCHDOG_INTERVAL` | `60` | Seconds between checks. |
+| `TG_WATCHDOG_TIMEOUT` | `10` | Timeout of one check, seconds. |
+| `TG_WATCHDOG_FAILURES` | `3` | Consecutive failed checks before a restart. |
+| `TG_WATCHDOG_RESTART_TIMEOUT` | `90` | Timeout of the restart itself, seconds. |
+| `TG_WATCHDOG_HEARTBEAT_EVERY` | `30` | Log an INFO heartbeat every N successful checks. |
+| `TG_DISCONNECT_FLAP_LIMIT` | `3` | Disconnects within the window that trigger a restart. |
+| `TG_DISCONNECT_FLAP_WINDOW` | `120` | That window, seconds. |
+| `TG_PING_UNHEALTHY_AFTER` | `250` | `/ping` reports unhealthy when the last successful check is older than this many seconds. The default is derived from the three values above: interval × (failures + 1) + timeout. |
+
+### Media downloads and cache
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `MEDIA_DOWNLOAD_TIMEOUT_MIN` | `120` | Download timeout for regular files, and the floor for large ones, seconds. |
+| `MEDIA_DOWNLOAD_TIMEOUT_MAX` | `1800` | Download timeout cap for the largest videos, seconds. |
+| `MEDIA_DOWNLOAD_MIN_SPEED` | `262144` | Assumed minimum download speed, bytes/s; a large file's timeout ≈ size / this speed, clamped to the two values above. |
+| `TG_MAX_CONCURRENT_TRANSMISSIONS` | `3` | Simultaneous file downloads from Telegram. |
+| `MEDIA_TIMEOUT_RESTART_THRESHOLD` | `5` | Consecutive download timeouts after which the Telegram client is restarted (the watchdog cannot see a dead media connection). |
+| `MEDIA_BACKOFF_MAX_S` | `21600` | Upper bound of the growing pause before re-trying a file that keeps failing to download, seconds. |
+| `MEDIA_FAILURES_DROP_ROW` | `15` | Failed downloads in a row after which a file is forgotten. |
+| `CACHE_SWEEP_INTERVAL` | `900` | Seconds between passes of the background media downloader and cache cleaner; at least 60. |
+| `IO_THREAD_POOL_SIZE` | `32` | Threads for blocking I/O (SQLite, file system). |
+
+### Caching and delays
+
+- A channel's history is cached for 6.4–8 hours (8 hours with a per-channel jitter), so a new
+  post can take that long to appear in its feed. This is what keeps the account's request rate
+  to Telegram low.
+- Media referenced by rendered posts are downloaded in the background and kept in the data
+  volume; a file nobody has requested for 20 days is deleted.
+- Feeds are sent with `Cache-Control: private, max-age=300` and answer conditional requests
+  with `304 Not Modified`.
+
+## Monitoring
+
+- **`/ping`** — instant liveness check for the container healthcheck; never calls Telegram.
+  Answers `200 {"status": "ok", …}` while the session is connected and the watchdog's last
+  successful check is fresh, `503 {"status": "degraded", …}` otherwise. The repository's
+  [`docker-compose.yml`](docker-compose.yml) shows the healthcheck.
+- **`/health`** (requires the token) — calls Telegram and returns JSON with the logged-in
+  account, the configuration (secrets masked), media cache statistics and render-failure
+  counters.
 
 ## Upgrading
 
-The container runs the service as a non-root user (uid 1000). On start it briefly runs as root only to `chown -R 1000:1000` its data volume (`/app/data`), so upgrading an old install whose volume still holds root-owned files just works — no manual action needed.
+The container runs the service as a non-root user (uid 1000). On start it briefly runs as root
+only to `chown -R 1000:1000` its data volume (`/app/data`), so upgrading an old install whose
+volume still holds root-owned files just works — no manual action needed.
 
-The one exception: if you pin `user:` in your compose (e.g. `user: "1000:1000"`), the container never starts as root and cannot fix ownership. In that case, do a one-time manual chown of your volume before starting the new image:
+The one exception: if you pin `user:` in your compose (e.g. `user: "1000:1000"`), the container
+never starts as root and cannot fix ownership. In that case, do a one-time manual chown of the
+volume before starting the new image:
 
 ```bash
 docker run --rm -v pyrogram_bridge:/data busybox chown -R 1000:1000 /data
 ```
 
-## ENV Settings 
+## Development
 
-TG_API_ID - telegram api id  
-TG_API_HASH - telegram api hash  
-API_PORT - port to run http server  
-PYROGRAM_BRIDGE_URL - url to rss bridge, used for generate absolute url to media  
-TOKEN - optional, if set, will be used to check if user has access to rss feed. If token is set, rss url will be https://pgbridge.example.com/rss/DragorWW_space/1234567890  
-Use this if you rss bridge access all world, otherwise your bridge can be used by many people and telegram will inevitably be sanctioned for botting.  
-TIME_BASED_MERGE - optional, if set to true, will merge posts by time. Merge time is 5 seconds, use &merge_seconds=XX in rss url for tuning.  
-SHOW_BRIDGE_LINK - optional, if set to true, will add "Open in Bridge" link to html post view. Default is false.  
-SHOW_POST_FLAGS - optional, if set to true, will show post flags in html post view. Default is false.  
-MEDIA_SIGNING_SECRET - optional, secret used to sign media URLs (HMAC-SHA256, v2 scheme). If unset, the signing key is derived from TOKEN (if set), otherwise from an auto-generated key file in the data volume. Set this (or TOKEN) so media URLs keep working after the data volume is recreated — the file-based key is wiped with the volume and all previously issued media URLs would die. Key derivation uses HKDF-SHA256; the same secret always yields the same key.  
-MEDIA_ALLOW_LEGACY_DIGEST - optional, default true. Also accept the old pre-v2 (SHA-1/8-char) media digests, so media URLs already delivered to readers keep working after upgrade. Set to false only once every feed has been re-polled and all URLs regenerated with the v2 scheme.  
-MEDIA_URL_TTL_DAYS - optional, default unset (no expiry). When set to a positive integer, freshly generated media URLs carry a signed expiry that many days out. Leave unset for RSS: readers may fetch a feed entry days/weeks later, and a hard expiry breaks those legitimate late fetches. Each feed regeneration refreshes the expiry.  
-REPLY_QUOTE_TRUNCATE_CHARS - optional, default 200. How many visible characters of the quote to keep when a post replies to a NEIGHBOURING post of the same channel. Without it the feed shows post A in full and then post B with the whole post A quoted inside, so two adjacent entries read as half the same text — while Telegram itself only shows a short preview of the quoted post. Set to 0 to never truncate (quotes stay full, as before). Replies to another channel, to a user, or to an older post are never truncated: there the quote is the only place the reader can see what is being answered.  
-REPLY_QUOTE_TRUNCATE_DISTANCE - optional, default 2. Maximum distance in message ids between the post and its reply target for the quote to be truncated (2 covers "reply to the post right above", allowing for an album that occupies several ids). Set to 0 to disable the truncation. Truncation is applied at render time only, so changing either value takes effect without clearing the cache.  
+Python 3.11; `python-magic` needs the system `libmagic`.
 
-## Get channel rss feed (use it in your rss reader)
+```bash
+pip install -r requirements.txt
+pytest
+```
 
-``` curl https://pgbridge.example.com/rss/DragorWW_space ```  
-``` curl https://pgbridge.example.com/rss/DragorWW_space/1234567890 ``` with auth token (if env token is set)  
-``` curl https://pgbridge.example.com/rss/DragorWW_space?limit=30 ``` with limit parameter (also, can be used with token)  
-``` curl https://pgbridge.example.com/rss/DragorWW_space?merge_seconds=10 ``` with merge_seconds parameter  
-``` curl https://pgbridge.example.com/rss/DragorWW_space?exclude_flags=video,stream,donat,clown ``` with exclude_flags parameter  
-``` curl https://pgbridge.example.com/rss/DragorWW_space?exclude_text=реклама,акция ``` with exclude_text parameter  
-``` curl https://pgbridge.example.com/rss/DragorWW_space?exclude_text="специальное предложение",акция ``` with exclude_text parameter containing phrases with spaces  
-``` curl https://pgbridge.example.com/html/DragorWW_space/123?debug=true ``` with debug parameter to print raw message to logs  
-
-Warning: TG API has rate limit, and bridge will wait time before http response, if catch FloodWait exception. Increase http timeout in your client prevention timeout error. Examply, in miniflux: ENV HTTP_CLIENT_TIMEOUT=200  
-
-Note: bridge has support for numeric channel ID: use id (e.g. -1002069358234) instead of username (e.g. DragorWW_space) for rss/html/json urls: ``` curl https://pgbridge.example.com/rss/-1002069358234 ```  
-Obviously, you must have a closed/hidden channel subscription prior to use, using the same Telegram account you got the token from (see Get session). Bridge doesn't do anything supernatural, it just pretends to be a TG client. If you don't have access to the channel, you can't get anything from it.  
-
-For known id channel, you can use bot @userinfobot: forward message from channel to bot, and get id from bot response: "Id: -1002069358234".  
-Or, use my https://github.com/vvzvlad/miniflux-tg-add-bot to add channel to miniflux: after forward message from channel to bot, subscribition automatically added to miniflux.
-
-"Limit" parameter can work somewhat unintuitively: this will be noticeable on groups that post multiple sets of pictures.  
-The thing is that in Telegram each picture is a separate message and they are grouped later, on the client. The maximum number of pictures in one message is 10, so in order to guarantee 10 posts with 10 pictures with a limit of 10 posts, we would need to request 10х10=100 messages each time.  
-This creates an unnecessary load, so we do something else: we request limit х2 and delete the last group of media files for fear that it might be incomplete (because to find out for sure, we have to go further down the history and find the next group). So don't expect the limit parameter to give you exactly as many posts as it specifies, they may be a) much less b)the number of posts may not change when the limit is changed, because incomplete groups at the end of the feed are deleted automatically
-
-## Exclude flags
-
-Exclusion flags are a way to filter channel content based on pre-defined (by me) criteria. It's not a universal regexp-based filtering engine, for example, but it does 99% of my tasks of filtering the content of some toxic tg channels (mostly with fresh memes).  
-
-There are several flags:  
-
-- video - presence of video and small text in the post  
-- stream - words like "стрим", "livestream"  
-- donat - word "донат" and its variations  
-- clown - clown emoticon (🤡) in post reactions (>30)  
-- poo - poo emoticon (💩) in post reactions (>30)  
-- advert - "#реклама" tag, "Партнерский пост" or "по промокоду" phrases  
-- fwd - forwarded messages from channels, users or hidden users  
-- hid_channel - links to closed tg channels (https://t.me/+S0OfKyMDRi)  
-- foreign_channel - links to open channels (https://t.me/superchannel) that do not equal the name of the current channel
-- link - presence of any http/https links in the post
-- mention - presence of @username mentions in the post
-- vebinar - words like "вебинар" and its variations
-
-Flags describe the post's own content: mentions and links inside a quoted (reply or pinned) message do not produce the `mention`, `link`, `hid_channel` or `foreign_channel` flags.
-
-You can use exclude_flags parameter in rss/html/json urls to exclude posts with certain flags. For example, to exclude all posts with the flags "video", "stream", "donat", "clown", you can use:
-
-``` curl https://pgbridge.example.com/rss/DragorWW_space?exclude_flags=video,stream,donat,clown ```
-
-Or use meta-flag "all" to exclude all flags in posts:
-
-``` curl https://pgbridge.example.com/rss/DragorWW_space?exclude_flags=all ```
-
-## Exclude text
-
-You can filter out posts containing specific text patterns using the `exclude_text` parameter. This parameter accepts a regular expression pattern that will be matched against the post text.
-
-The pattern is case-insensitive and supports all standard regex features. For example:
-
-``` curl https://pgbridge.example.com/rss/DragorWW_space?exclude_text=все.*комикс|реклам.*канал ```
-
-This will exclude posts containing:
-
-- Any text starting with "все" and ending with "комикс"
-- Any text containing "реклам" followed by "канал"
-
-You can use any regex pattern, including:
-
-- `.*` for any characters
-- `\d+` for numbers
-- `[а-яА-Я]+` for Russian letters
-- `|` for alternative patterns
-- And other standard regex features
-
-The pattern is matched against the entire post text, so you can create complex filtering rules.
-
-For some applications you will need to convert the request to an encoded URL: 
-```Салли.*и.*Фасолька|Увядший.*Лепесток``` -> ```%D0%A1%D0%B0%D0%BB%D0%BB%D0%B8.%2A%D0%B8. %2A%D0%A4%D0%B0%D1%81%D0%BE%D0%BB%D1%8C%D0%BA%D0%B0%7C%D0%A3%D0%B2%D1%8F%D0%B4%D1%88%D0%B8%D0%B9.%2A%D0%9B%D0%B5%D0%BF%D0%B5%D1%81%D1%82%D0%BE%D0%BA```
-For example, you can use this tool: https://www.urlencoder.org/
+Gitea Actions runs the tests on pull requests to `main`; a push to `main` runs them again and,
+if they pass, builds and publishes the image `gitea.vvzvlad.xyz/projects/pyrogram-bridge:latest`.
