@@ -87,16 +87,6 @@ def _own_channel_reply(msg_id=1472, text=LONG_TEXT):
                   sender_chat=SimpleNamespace(id=CHANNEL_ID, title="Univelis", username="univelis"))
 
 
-def _renderable_message(reply_to, text="Ответ на соседний пост."):
-    """`_message` plus the fields _generate_html_body reads while rendering a whole post."""
-    msg = _message(reply_to)
-    msg.text = FakeStr(text, text)
-    msg.caption = None
-    msg.media = None
-    msg.forward_origin = None
-    return msg
-
-
 # --------------------------------------------------------------------------- #
 # The truncating case: same channel, one id above.
 # --------------------------------------------------------------------------- #
@@ -461,8 +451,8 @@ def test_wider_distance_setting_is_honoured(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# The cut never breaks the markup: _extract_flags matches the block on UNSANITIZED
-# html, so the fragment must already be well-formed when it leaves the renderer.
+# The cut never breaks the markup: the fragment must already be well-formed when it
+# leaves the renderer.
 # --------------------------------------------------------------------------- #
 def test_cut_closes_the_open_entity_tag():
     reply = _own_channel_reply(text=FakeStr("A" * 300, "<b>" + "A" * 300 + "</b>"))
@@ -568,7 +558,7 @@ def test_a_lone_bracket_still_costs_one_character():
 
 def test_pseudo_tag_is_never_closed_as_a_tag():
     # '<Word here>' is prose, not markup: closing it would print a '</word>' the input never
-    # contained, and the block is compared to the html body as an EXACT fragment.
+    # contained.
     out = _truncate_quote_html("a<Word here>b" + "c" * 300, 10)
 
     assert "</word>" not in out.lower()
@@ -591,7 +581,7 @@ def test_cut_inside_a_tg_emoji_span_closes_the_full_tag_name():
 # bare; pre may carry a language; blockquote may carry the VALUELESS 'expandable'; text links
 # and mentions are <a href>; custom emoji and dates are the hyphenated tg-* tags). '<a href>'
 # also arrives from _add_hyperlinks_to_raw_urls. A tag missed by the tokenizer is charged to
-# the visible budget and can be cut in half, which leaves broken markup for _extract_flags.
+# the visible budget and can be cut in half, which leaves broken markup in the body.
 PYROGRAM_TAGS = [
     ("<b>", "</b>"), ("<i>", "</i>"), ("<u>", "</u>"), ("<s>", "</s>"),
     ("<code>", "</code>"), ("<pre>", "</pre>"), ('<pre language="python">', "</pre>"),
@@ -679,26 +669,3 @@ def test_truncated_block_is_identical_live_and_from_cache():
     assert "…" in cached_out
     assert cached_out.endswith(f"<br>{MARKER_QUOTE_END}</div><br>")
 
-
-# --------------------------------------------------------------------------- #
-# _extract_flags strips the reply block from the html body as an EXACT fragment,
-# which only works while the renderer is deterministic and emits the very same
-# string both times it is called.
-# --------------------------------------------------------------------------- #
-def test_truncated_block_is_deterministic_and_strippable_from_the_body():
-    parser = _parser()
-    message = _renderable_message(_own_channel_reply())
-
-    block = parser._format_reply_info(message)
-    assert parser._format_reply_info(message) == block
-    assert "…" in block
-
-    body = parser._generate_html_body(message)
-    assert block in body
-    stripped = body.replace(block, '', 1)
-    # The block is gone WHOLE: no orphaned marker, fence or quote text stays behind to leak
-    # into mention / link / foreign_channel detection.
-    assert MARKER_QUOTE_END not in stripped
-    assert "--- Reply to " not in stripped
-    assert "…" not in stripped
-    assert len(stripped) == len(body) - len(block)

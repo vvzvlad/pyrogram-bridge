@@ -208,8 +208,9 @@ its flag buttons from this endpoint.
 
 Things to know:
 
-- **Flags describe the post's own content.** A mention or a link inside the message the post
-  replies to does not set `mention`, `link`, `hid_channel` or `foreign_channel`.
+- **Flags describe the post's own content:** its text, its links and the URL of its link
+  preview. The "Forwarded from" line, the message the post replies to and the preview's title
+  and description do not set `mention`, `link`, `hid_channel` or `foreign_channel`.
 - **An album or merged entry carries the flags of all its parts**, so it is dropped as a
   whole if any part matches.
 - **`exclude_flags=all` drops every post that has at least one flag** — far more than it

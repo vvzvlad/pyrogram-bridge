@@ -124,7 +124,7 @@ class TestProcessMessageRich:
         # A plain post: tree_of is None -> no rich-content div, no rich flag.
         body = parser._generate_html_body(msg)
         assert "rich-content" not in body
-        assert "rich" not in parser._extract_flags(msg, html_body=body)
+        assert "rich" not in parser._extract_flags(msg)
 
 
 # --------------------------------------------------------------------------------------

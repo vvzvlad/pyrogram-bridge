@@ -90,7 +90,7 @@ class TestRichPlaceholderRender:
         assert "Hello" in parser._generate_title(msg)
 
     def test_rich_flag_present(self, parser):
-        flags = parser._extract_flags(_rich_mock(), html_body="")
+        flags = parser._extract_flags(_rich_mock())
         assert "rich" in flags
 
     def test_rich_flag_discoverable(self):
@@ -119,7 +119,7 @@ class TestNoRich:
         assert parser._generate_title(_plain_mock()) != RICH_TITLE
 
     def test_no_rich_flag(self, parser):
-        assert "rich" not in parser._extract_flags(_plain_mock(), html_body="")
+        assert "rich" not in parser._extract_flags(_plain_mock())
 
     def test_no_rich_special_media(self, parser):
         # media=None and not rich → no special block at all.
@@ -160,7 +160,7 @@ class TestSnapshotRoundtrip:
         restored = ms.restore_message(snap)
         # The restored (cache-hit) message renders the same placard as a live one.
         assert parser._generate_title(restored) == RICH_TITLE
-        assert "rich" in parser._extract_flags(restored, html_body="")
+        assert "rich" in parser._extract_flags(restored)
         assert RICH_PLACEHOLDER_TEXT in parser._format_special_media(restored)
 
     def test_plain_restored_message_has_no_rich(self):
