@@ -59,8 +59,8 @@ UNKNOWN_REPLY_AUTHOR = 'Unknown author'
 # HTML→text conversion. Without it the quote and the post's own text read as one post.
 # ACCEPTED LIMITATION: a quoted message can itself contain a marker-looking line (exactly as
 # it can contain '--- Forwarded post end ---' today); the consequence is cosmetic attribution
-# ambiguity only — it never reaches flag detection (_extract_flags removes the whole block as
-# an exact fragment) and never affects sanitizing.
+# ambiguity only — it never reaches flag detection (flags never see the reply block) and
+# never affects sanitizing.
 MARKER_REPLY_OPEN = '--- Reply to '
 MARKER_PINNED_OPEN = '--- Pinned message'
 MARKER_QUOTE_END = '--- End of quote ---'
@@ -85,8 +85,8 @@ _TRAILING_BR_WINDOW = 16
 # text). Treating those as free markup zeroed the visible counter — a bare '<' swallowed the
 # rest of the line — and silently disabled truncation on exactly the quotes it exists for.
 # The hyphen belongs in the name class: pyrogram prints '<tg-emoji emoji-id="...">' for custom
-# emoji and '<tg-time unix="...">' for dates, and closing those as '</tg>' would hand BROKEN
-# markup to _extract_flags, which matches the reply block on unsanitized html.
+# emoji and '<tg-time unix="...">' for dates, and closing those as '</tg>' would leave BROKEN
+# markup in the body.
 _QUOTE_TAG_NAME_RE = re.compile(r'<(/?)([A-Za-z][A-Za-z0-9-]*)')
 # What may follow the name inside a real tag: nothing (optionally a self-closing '/'), an
 # attribute with a value, or the ONE valueless attribute pyrogram emits — ' expandable' on
@@ -126,8 +126,7 @@ def _truncate_quote_html(quote_html: str, max_chars: int) -> str:
     harmless here because a quote is a Telegram message and cannot exceed its length limit.
 
     Tags left open by the cut are closed in reverse order, so the fragment is well-formed BEFORE
-    the sanitizer: _extract_flags removes the rendered reply block from the html body as an exact
-    fragment, i.e. it works on unsanitized markup and nh3 never gets to repair anything here.
+    the sanitizer.
 
     `max_chars <= 0` means "do not truncate". Never raises: an unparsable quote is returned as-is
     rather than lost, because a rendering detail must not break the post.
@@ -1076,7 +1075,7 @@ class PostParser:
         ACCEPTED APPROXIMATION: an album occupies several ids, so a reply to the post right above
         can measure as a distance of 2-3; that is what makes the threshold configurable. Looking
         at the actual neighbouring messages would need feed/API access, which this renderer must
-        not have — _format_reply_info is pure and _extract_flags re-renders it to strip the block.
+        not have — _format_reply_info is pure.
         """
         distance = Config['reply_quote_truncate_distance']
         if distance <= 0:
@@ -1237,30 +1236,32 @@ class PostParser:
             return result
         return None
 
-    def _extract_flags(self, message: Message, html_body: Optional[str] = None) -> List[str]: #Tests: tests/postparser_extract_flags.py
-        # Use raw text/caption for some checks before HTML processing
+    def _flag_content_html(self, message: Message) -> str:
+        """The post's own content that the link / mention / channel / ad-marking flags match.
+
+        Built from the message itself — its text with entity links (the rich tree for a rich
+        post) and the URL of its link preview — never from the rendered body: the bridge adds a
+        forward header, the quoted reply/pinned block, signed /media URLs, t.me/c file links and
+        map links there, and none of that is the post's content. The preview's title and
+        description are left out too: the linked site wrote them, not the post's author. Only
+        regexes read the result; it is never rendered, so nothing here is escaped.
+        """
+        parts = []
+        tree = rich_tree.tree_of(message)
+        if tree is not None and tree.get("blocks"):
+            # A media node gets no URL, so it renders a placeholder instead of a /media link.
+            parts.append(rich_tree.render_html(tree, lambda fid: None))
+        elif text_html := self._get_post_text_with_urls(message):
+            parts.append(text_html)
+        if webpage_url := getattr(getattr(message, "web_page", None), "url", None):
+            parts.append(f'<a href="{webpage_url}"></a>')
+        return '\n'.join(parts)
+
+    def _extract_flags(self, message: Message) -> List[str]: #Tests: tests/postparser_extract_flags.py
+        # Use raw text/caption for the keyword checks
         message_text_str = str(message.text or message.caption or '')
-        # Use HTML body for checks involving formatted text or links within HTML
-        # If html_body is provided (pre-computed), use it directly to avoid redundant generation
-        if html_body is None:
-            message_body_html = self._generate_html_body(message)
-        else:
-            message_body_html = html_body
-        # Flags describe the POST's own content, never the quoted one: the reply/pinned
-        # blocks carry the author label (with its @username) and the full HTML of somebody
-        # else's message, which would otherwise leak into the mention / link / hid_channel /
-        # foreign_channel detection below and silently change public exclude_flags results.
-        # The block is removed as an EXACT fragment (re-rendered here; _format_reply_info is
-        # pure and does no RPC) rather than matched by a regex: pyrogram's .html leaves text
-        # outside entity ranges unescaped, so a literal </div> or <div class="message-reply">
-        # coming from user text would make any regex cut too little or far too much.
-        # INVARIANT: _generate_html_body emits this block BEFORE the post text and media, so
-        # replace(..., 1) always hits the generated block and never a look-alike copy planted
-        # in the post's own text. Revisit flag detection if that ordering ever changes.
-        # The stripped copy is local to flag detection — the rendered body stays untouched.
-        reply_block = self._format_reply_info(message)
-        if reply_block:
-            message_body_html = message_body_html.replace(reply_block, '', 1)
+        # Links, mentions and channel links are looked up in the post's own content only
+        content_html = self._flag_content_html(message)
         flags = []
 
         # Add "fwd" flag for forwarded messages
@@ -1343,11 +1344,11 @@ class PostParser:
         if re.search(r'(?i)(#реклама|#промо|О\s+рекламодателе|партнерский\s+пост)', message_text_str):
             flags.append("advert")
 
-        # The ad-marking token (erid) is searched in the rendered body: it often lives only
+        # The ad-marking token (erid) is searched in the content html: it often lives only
         # in a link URL ("?erid=..."), and a rich post has no message.text at all. Word
         # boundaries keep words like "Meridian" or "triglyceride" from matching.
         if (re.search(r'(?i)(по\s+промокоду|скидка\s+на\s+курс|регистрируйтесь\s+тут)', message_text_str)
-                or re.search(r'(?i)\berid\b', message_body_html)):
+                or re.search(r'(?i)\berid\b', content_html)):
             flags.append("advert")
 
         # Check for paywall-related words and tags
@@ -1373,40 +1374,29 @@ class PostParser:
         # Check if the message contains any http/https links (excluding t.me)
         # Only add 'link' if 'only_link' isn't already set
         if not is_only_link:
-            # Search within the generated HTML body to catch links in hrefs as well. The
-            # bridge's own URLs (the signed /media/... src of every rendered photo/video)
-            # are not links the post makes, so they are skipped. The prefix ends with '/'
-            # so a foreign host that merely starts like the bridge host still counts.
-            bridge_url = Config['pyrogram_bridge_url']
-            bridge_prefix = bridge_url.rstrip('/') + '/' if bridge_url else None
-            link_patterns = (r'https?://(?!(?:www\.)?t\.me)[^\s<>"\']+',
-                             r'href=[\"\'](https?://(?!(?:www\.)?t\.me)[^\"\']+)[\"\']')
-            for pattern in link_patterns:
-                # Group 1 is the bare URL of the href pattern; the first pattern has no group.
-                urls = (match.group(match.lastindex or 0) for match in re.finditer(pattern, message_body_html))
-                if any(bridge_prefix is None or not url.startswith(bridge_prefix) for url in urls):
-                    flags.append("link")
-                    break
+            # Search the content html to catch links in hrefs as well
+            if re.search(r'https?://(?!(?:www\.)?t\.me)[^\s<>"\']+', content_html):
+                flags.append("link")
 
         # Ad links carry referral/tracking query parameters (bot deep links with start=,
         # invitedBy=, erid=, utm_*). Matched inside href only; the separator may be
         # '?', '&' or ';' (the tail of an HTML-escaped '&amp;').
-        if re.search(r'(?i)href=["\'][^"\']*[?&;](?:start|invitedBy|erid|utm_[a-z]+)=', message_body_html):
+        if re.search(r'(?i)href=["\'][^"\']*[?&;](?:start|invitedBy|erid|utm_[a-z]+)=', content_html):
             flags.append("tracking_link")
         # --- End Link Flags ---
 
         # Check if the message contains channel mentions in the format @name
-        if re.search(r'@[a-zA-Z][a-zA-Z0-9_]{3,}', message_body_html):
+        if re.search(r'@[a-zA-Z][a-zA-Z0-9_]{3,}', content_html):
             flags.append("mention")
 
         try:
             # Find links with a '+' after t.me/ indicating a hidden channel link.
-            hidden_links = re.findall(r'https?://(?:www\.)?t\.me/\+([A-Za-z0-9]+)', message_body_html)
+            hidden_links = re.findall(r'https?://(?:www\.)?t\.me/\+([A-Za-z0-9]+)', content_html)
             # Find links without a '+' after t.me/ indicating an open (foreign) channel link.
-            open_links = re.findall(r'https?://(?:www\.)?t\.me/(?!\+)([A-Za-z0-9_]+)', message_body_html)
-            
+            open_links = re.findall(r'https?://(?:www\.)?t\.me/(?!\+)([A-Za-z0-9_]+)', content_html)
+
             # Find links with pattern t.me/boost/channel_name
-            boost_links = re.findall(r'https?://(?:www\.)?t\.me/boost/([A-Za-z0-9_]+)', message_body_html)
+            boost_links = re.findall(r'https?://(?:www\.)?t\.me/boost/([A-Za-z0-9_]+)', content_html)
             
             if hidden_links:
                 flags.append("hid_channel")
@@ -1512,19 +1502,11 @@ class PostParser:
                 (per-post for BOTH RSS and HTML), so no fragment is sanitized more
                 than once.
         """
-        # Compute html body once — avoids triple _generate_html_body calls.
+        # The body is rendered once here; flags come from the message itself.
         # The internal per-fragment sanitize passes are gone; sanitize runs exactly
         # once at the output boundary here when requested, never inside body/footer.
         html_body = self._generate_html_body(message)
-        # NOTE: flags are extracted from the PRE-sanitize body (there is no longer a
-        # per-fragment sanitize inside _generate_html_body). Legitimate links are
-        # unaffected — bleach keeps whitelisted <a href="http(s)://…"> — so
-        # link/foreign_channel/mention flags are identical for normal content. They can
-        # differ ONLY for URL-like text that bleach would strip (e.g. a URL inside a
-        # disallowed attribute); flags are non-security (used for exclude_flags filtering
-        # / display), so this edge divergence is accepted rather than re-adding the
-        # per-message sanitize pass that was deliberately eliminated.
-        flags = self._extract_flags(message, html_body=html_body)
+        flags = self._extract_flags(message)
         footer = self.generate_html_footer(message, flags_list=flags)
         if sanitize:
             html_body = self._sanitize_html(html_body)

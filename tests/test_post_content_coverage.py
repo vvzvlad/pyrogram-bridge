@@ -4,8 +4,8 @@
 # pylance: disable=reportMissingImports, reportMissingModuleSource
 """Post content the bridge used to lose (post-content coverage pass, snapshot v9).
 
-One section per item: service-message filtering, poll media on a cache hit, the `link`
-flag vs the bridge's own media URLs, selected reply fragments and replies to unresolved
+One section per item: service-message filtering, poll media on a cache hit, flags vs
+what the bridge itself adds to the body, selected reply fragments and replies to unresolved
 chats, story caption / unavailable story, audio tags, animated (TGS) stickers,
 author_signature and invoices. Live-vs-restored byte parity for every new field is proven
 in test_snapshot_render_parity.py; the tests here pin the rendered content itself.
@@ -138,13 +138,13 @@ def test_poll_without_description_media_restores_none():
 
 
 # --------------------------------------------------------------------------- #
-# 4. `link` flag ignores the bridge's own URLs.
+# 4. Flags ignore what the bridge itself adds to the body.
 # --------------------------------------------------------------------------- #
 def test_photo_only_post_has_no_link_flag(parser):
     msg = make_message(media=MessageMediaType.PHOTO, photo=SimpleNamespace(file_unique_id="ph"))
     body = parser._generate_html_body(msg)
     assert "http://test.example.com/media/" in body
-    assert "link" not in parser._extract_flags(msg, html_body=body)
+    assert "link" not in parser._extract_flags(msg)
 
 
 def test_external_url_still_sets_link_flag(parser):
@@ -153,15 +153,28 @@ def test_external_url_still_sets_link_flag(parser):
     assert "link" in parser._extract_flags(msg)
 
 
-def test_host_that_only_starts_like_the_bridge_is_a_link(parser):
-    body = '<a href="http://test.example.com.evil.org/x">x</a>'
-    assert "link" in parser._extract_flags(make_message(), html_body=body)
+def test_forward_header_sets_no_mention_or_channel_flags(parser):
+    origin = SimpleNamespace(chat=SimpleNamespace(title="Other Chan", username="otherchan"))
+    msg = make_message(text=FakeStr("own words"), forward_origin=origin)
+    assert "(@otherchan)" in parser._generate_html_body(msg)
+    flags = parser._extract_flags(msg)
+    assert "fwd" in flags
+    assert not {"mention", "foreign_channel"} & set(flags)
 
 
-def test_bridge_url_counts_as_link_when_not_configured(parser, monkeypatch):
-    monkeypatch.setitem(post_parser.Config, "pyrogram_bridge_url", "")
-    body = '<img src="http://test.example.com/media/testchan/1/uid/digest">'
-    assert "link" in parser._extract_flags(make_message(), html_body=body)
+def test_rich_photo_post_has_no_link_flag(parser):
+    msg = make_message(rich_tree={"v": 1, "blocks": [{"t": "photo", "fid": "rp"}]})
+    assert "http://test.example.com/media/" in parser._generate_html_body(msg)
+    assert "link" not in parser._extract_flags(msg)
+
+
+def test_preview_url_counts_but_preview_text_does_not(parser):
+    msg = make_message(text=FakeStr("a long post about something without any links at all"),
+                       web_page=SimpleNamespace(url="https://t.me/otherchan/5", title="by @someone",
+                                                description="follow @someone"))
+    flags = parser._extract_flags(msg)
+    assert "foreign_channel" in flags
+    assert "mention" not in flags
 
 
 # --------------------------------------------------------------------------- #
@@ -233,9 +246,8 @@ def test_external_reply_block_does_not_leak_into_flags(parser):
     msg = make_message(text=FakeStr("own words"),
                        external_reply=_external(SimpleNamespace(chat=_HUB), chat=_HUB),
                        quote=SimpleNamespace(text=FakeStr("see https://example.org and @somechannel")))
-    body = parser._generate_html_body(msg)
-    assert "zhovner_hub" in body
-    flags = parser._extract_flags(msg, html_body=body)
+    assert "zhovner_hub" in parser._generate_html_body(msg)
+    flags = parser._extract_flags(msg)
     assert not {"foreign_channel", "mention", "link"} & set(flags)
 
 

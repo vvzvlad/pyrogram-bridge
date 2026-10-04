@@ -538,8 +538,8 @@ class TestPostParserExtractFlags(unittest.TestCase):
         message = self._create_mock_message(text=own_text)
         message.reply_to_message = SimpleNamespace(
             id=4146,
-            # The </div><br> tail mimics the real end of the block, so a regex anchored on it
-            # would ALSO cut early here — the exact-fragment removal does not care.
+            # The </div><br> tail mimics the real end of the block; flags never read the
+            # rendered block, so the literal markup cannot leak anything into them.
             text=StrWithHtml('start </div><br> @somebody https://example.com https://t.me/otherchan'),
             caption=None,
             sender_chat=None,
@@ -564,7 +564,7 @@ class TestPostParserExtractFlags(unittest.TestCase):
         self.assertIn("foreign_channel", flags)
 
     def test_own_content_still_flags_when_a_reply_block_is_present(self):
-        # The strip must not swallow the post's OWN mention/link/foreign-channel content.
+        # A reply block must not hide the post's OWN mention/link/foreign-channel content.
         message = self._create_mock_message(
             text="Мой пост: @myfriend https://example.org https://t.me/foreignchan")
         message.reply_to_message = self._noisy_reply_target()

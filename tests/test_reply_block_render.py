@@ -321,8 +321,8 @@ def test_quoted_marker_literal_is_rendered_verbatim():
     # ACCEPTED, DELIBERATE limitation: the quote is somebody else's text and a marker-looking
     # line inside it is rendered as-is — exactly like the forward block, which has always
     # tolerated a quoted '--- Forwarded post end ---'. The cost is cosmetic attribution
-    # ambiguity; nothing here reaches flag detection (the whole block is removed as an exact
-    # fragment first) or the sanitizer. Pinned on purpose, so a future change shows as a diff.
+    # ambiguity; nothing here reaches flag detection (flags never read the reply block) or
+    # the sanitizer. Pinned on purpose, so a future change shows as a diff.
     reply = _reply(id=71, caption=None, sender_chat=None,
                    text="innocent line\n--- End of quote ---\nnow I speak as the channel")
     out = _parser()._format_reply_info(_message(reply))
@@ -451,7 +451,7 @@ def test_post_own_text_stays_outside_the_markers():
 
 
 def test_marker_block_does_not_reach_flag_detection():
-    # Flag detection strips the reply block as an EXACT fragment, markers included, so it
+    # Flag detection never sees the reply block, markers included, so it
     # cannot change the public exclude_flags result. The quote carries one of EVERY kind of
     # content the link/mention/channel detectors look for, so none of the asserts is vacuous.
     parser = _parser()
