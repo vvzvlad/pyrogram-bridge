@@ -570,12 +570,14 @@ def _esc(value: Any) -> str:
     return _html.escape(str(value if value is not None else ""))
 
 
-def render_html(tree: Optional[dict], url_builder: Callable[[str], Optional[str]]) -> str:
+def render_html(tree: Optional[dict], url_builder: Optional[Callable[[str], Optional[str]]]) -> str:
     """Render a rich tree to a sanitiser-ready HTML fragment. PURE: reads only the tree.
 
     ``url_builder(fid) -> Optional[str]`` builds a signed /media URL (None -> media node
-    renders a placeholder). An empty ``blocks`` returns '' (the empty-tree placard is owned
-    by _format_special_media). A tree with a foreign ``v`` renders a forward-compat placard.
+    renders a placeholder). ``url_builder=None`` renders no media URL and no map link
+    (flag detection reads that form). An empty ``blocks`` returns '' (the empty-tree placard
+    is owned by _format_special_media). A tree with a foreign ``v`` renders a forward-compat
+    placard.
     """
     if not isinstance(tree, dict):
         return ""
@@ -634,7 +636,7 @@ def _render_block(node: Any, url_builder) -> str:
         inner = "".join(_render_block(b, url_builder) for b in (node.get("blocks") or []))
         return f"<details{open_attr}><summary>{_render_rt(node.get('summary'))}</summary>{inner}</details>"
     if t == "map":
-        return _render_map(node)
+        return _render_map(node, url_builder)
     if t == "document":
         # Name only, no link: the file is not served through /media (see _adapt_document),
         # and the feed item already points at the post.
@@ -733,11 +735,12 @@ def _render_table(node: dict) -> str:
     return "".join(parts)
 
 
-def _render_map(node: dict) -> str:
+def _render_map(node: dict, url_builder) -> str:
     lat = node.get("lat")
     lon = node.get("lon")
     caption = _render_caption(node.get("caption"))
-    if isinstance(lat, (int, float)) and not isinstance(lat, bool) \
+    if url_builder is not None \
+            and isinstance(lat, (int, float)) and not isinstance(lat, bool) \
             and isinstance(lon, (int, float)) and not isinstance(lon, bool):
         osm = f"https://www.openstreetmap.org/?mlat={lat}&mlon={lon}#map=16/{lat}/{lon}"
         link = f'<a href="{_html.escape(osm, quote=True)}">{lat:.5f}, {lon:.5f}</a>'
@@ -755,7 +758,7 @@ _STYLE_AUDIO = "width:100%; max-width:400px;"
 
 def _render_media(node: dict, url_builder) -> str:
     fid = node.get("fid")
-    url = url_builder(fid) if (isinstance(fid, str) and fid) else None
+    url = url_builder(fid) if (url_builder is not None and isinstance(fid, str) and fid) else None
     if not url:
         body = '<div class="rich-unsupported">Media unavailable — open it in Telegram.</div>'
         return body + _render_caption(node.get("caption"))

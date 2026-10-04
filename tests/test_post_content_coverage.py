@@ -168,6 +168,12 @@ def test_rich_photo_post_has_no_link_flag(parser):
     assert "link" not in parser._extract_flags(msg)
 
 
+def test_rich_map_post_has_no_link_flag(parser):
+    msg = make_message(rich_tree={"v": 1, "blocks": [{"t": "map", "lat": 55.75, "lon": 37.62}]})
+    assert "openstreetmap.org" in parser._generate_html_body(msg)
+    assert "link" not in parser._extract_flags(msg)
+
+
 def test_preview_url_counts_but_preview_text_does_not(parser):
     msg = make_message(text=FakeStr("a long post about something without any links at all"),
                        web_page=SimpleNamespace(url="https://t.me/otherchan/5", title="by @someone",

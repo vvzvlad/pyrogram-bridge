@@ -189,6 +189,7 @@ listed flags is dropped:
 | `hid_channel` | links to a private channel invite (`t.me/+…`) |
 | `link` | contains an external `http(s)` link; `t.me` links do not count |
 | `only_link` | is nothing but one external link, or only a link preview (gets `only_link` instead of `link`) |
+| `tracking_link` | has a link with referral or tracking parameters: `utm_*`, `start=`, `invitedBy=`, `erid=` |
 | `mention` | mentions an `@username` |
 | `donat` | asks for donations: «донат…», `pay.cloudtips.ru`, `t.me/boost/…` links |
 | `paywall` | mentions paid platforms: Boosty/Бусти, Sponsr, Дзен.Премиум |

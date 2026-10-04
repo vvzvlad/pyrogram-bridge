@@ -1249,8 +1249,8 @@ class PostParser:
         parts = []
         tree = rich_tree.tree_of(message)
         if tree is not None and tree.get("blocks"):
-            # A media node gets no URL, so it renders a placeholder instead of a /media link.
-            parts.append(rich_tree.render_html(tree, lambda fid: None))
+            # No url_builder: media nodes render a placeholder and map blocks no map link.
+            parts.append(rich_tree.render_html(tree, None))
         elif text_html := self._get_post_text_with_urls(message):
             parts.append(text_html)
         if webpage_url := getattr(getattr(message, "web_page", None), "url", None):
