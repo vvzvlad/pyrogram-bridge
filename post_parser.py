@@ -1249,7 +1249,7 @@ class PostParser:
         parts = []
         tree = rich_tree.tree_of(message)
         if tree is not None and tree.get("blocks"):
-            # No url_builder: media nodes render a placeholder and map blocks no map link.
+            # No url_builder: no media URL, no map link, no t.me link for a user mention.
             parts.append(rich_tree.render_html(tree, None))
         elif text_html := self._get_post_text_with_urls(message):
             parts.append(text_html)

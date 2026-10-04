@@ -174,6 +174,17 @@ def test_rich_map_post_has_no_link_flag(parser):
     assert "link" not in parser._extract_flags(msg)
 
 
+def test_rich_user_mention_sets_no_foreign_channel(parser):
+    mention = {"t": "text_mention", "text": "Bob", "username": "bobuser"}
+    cell = {"text": mention, "header": False, "colspan": None, "rowspan": None}
+    msg = make_message(rich_tree={"v": 1, "blocks": [
+        {"t": "paragraph", "text": ["hi ", mention]},
+        {"t": "table", "title": None, "rows": [[cell]]}]})
+    # Flags first: they must not strip the link from the shared tree the body renders next.
+    assert "foreign_channel" not in parser._extract_flags(msg)
+    assert parser._generate_html_body(msg).count("https://t.me/bobuser") == 2
+
+
 def test_preview_url_counts_but_preview_text_does_not(parser):
     msg = make_message(text=FakeStr("a long post about something without any links at all"),
                        web_page=SimpleNamespace(url="https://t.me/otherchan/5", title="by @someone",
