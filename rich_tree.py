@@ -574,10 +574,10 @@ def render_html(tree: Optional[dict], url_builder: Optional[Callable[[str], Opti
     """Render a rich tree to a sanitiser-ready HTML fragment. PURE: reads only the tree.
 
     ``url_builder(fid) -> Optional[str]`` builds a signed /media URL (None -> media node
-    renders a placeholder). ``url_builder=None`` renders no media URL and no map link
-    (flag detection reads that form). An empty ``blocks`` returns '' (the empty-tree placard
-    is owned by _format_special_media). A tree with a foreign ``v`` renders a forward-compat
-    placard.
+    renders a placeholder). ``url_builder=None`` renders no media URL, no map link and no
+    t.me link for a user mention (flag detection reads that form). An empty ``blocks``
+    returns '' (the empty-tree placard is owned by _format_special_media). A tree with a
+    foreign ``v`` renders a forward-compat placard.
     """
     if not isinstance(tree, dict):
         return ""
@@ -586,7 +586,21 @@ def render_html(tree: Optional[dict], url_builder: Optional[Callable[[str], Opti
     blocks = tree.get("blocks") or []
     if not blocks:
         return ""
+    if url_builder is None:
+        # The t.me/<username> link of a user mention is built by the bridge: without the
+        # username the mention renders as its bare text, like a plain post's tg://user link.
+        blocks = _without_mention_usernames(blocks)
     return "\n".join(_render_block(b, url_builder) for b in blocks)
+
+
+def _without_mention_usernames(node: Any) -> Any:
+    """A copy of a tree fragment with the username dropped from every text_mention node."""
+    if isinstance(node, dict):
+        return {k: _without_mention_usernames(v) for k, v in node.items()
+                if not (k == "username" and node.get("t") == "text_mention")}
+    if isinstance(node, (list, tuple)):
+        return [_without_mention_usernames(x) for x in node]
+    return node
 
 
 def _render_block(node: Any, url_builder) -> str:
