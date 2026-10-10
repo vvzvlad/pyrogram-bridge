@@ -311,7 +311,7 @@ def _clear_download_failure(key: tuple[str, int, str]) -> None:
         logger.info(f"download_backoff_cleared: {key[0]}/{key[1]}/{key[2]} recovered")
 
 # --------------------------------------------------------------------------- #
-# Rich part=True re-fetch memo for the /media download cascade (#86).
+# Rich part=True re-fetch memo for the /media download cascade.
 # --------------------------------------------------------------------------- #
 # A reader burst over ONE part post carrying N media must not fire N identical GetRichMessage
 # RPCs. The re-fetch result (the enriched rich message, or None on failure) is cached per
@@ -329,13 +329,13 @@ _rich_refetch_inflight: "dict[tuple[str, int], asyncio.Future]" = {}
 
 
 async def _rich_refetch_for_download(channel: Union[str, int], post_id: int) -> Any:
-    """ONE bare, memoised + coalesced GetRichMessage re-fetch for the /media cascade (#86).
+    """ONE bare, memoised + coalesced GetRichMessage re-fetch for the /media cascade.
 
     BARE — no ``tg_rpc_bounded``: a reader /media request must NOT queue behind feed
     enrichment, and a FloodWait is already mapped to a retryable 429 by get_media's handler.
     ``safe_get_rich_message`` never raises (it returns a typed result), so a transient blip
     can never propagate as an ``RPCError(CODE==400)`` that the _runner classifier would blacken
-    into a permanent 404. Returns the enriched high-level rich message (possibly a #84 sentinel)
+    into a permanent 404. Returns the enriched high-level rich message (possibly a kurigram_compat sentinel)
     or None on any fetch failure; the value is memoised for _RICH_REFETCH_TTL seconds AND
     coalesced across concurrent callers for the same (channel, post_id).
     """
@@ -586,7 +586,7 @@ if __name__ == "__main__":
 
 async def find_file_id_in_message(message: Message, file_unique_id: str) -> Union[str, None]:
     """Find file_id by checking all possible media types in message"""
-    # Rich media (Kurigram 2.2.24, #85): a rich post carries its media inside rich blocks,
+    # Rich media (Kurigram 2.2.24): a rich post carries its media inside rich blocks,
     # not on message.<type>. Resolved from the LIVE Kurigram objects (file_id is ephemeral
     # and never stored in the tree). Checked BEFORE the general loop (same precedent as the
     # poll branch below); mutually exclusive with a POLL message.
@@ -732,7 +732,8 @@ async def prepare_file_response(file_path: str, request: Request,
     FileResponse handles Range/If-Range/206/416/multipart and sets
     Accept-Ranges/ETag/Last-Modified itself, and reads the file efficiently (no per-64KB
     to_thread hop that starved the threadpool). We keep: the early 404 pre-check, the MIME
-    logic (python-magic + SQLite type cache) and the stage-2 temp_* mtime touch.
+    logic (python-magic + SQLite type cache) and the temp_* mtime touch
+    (tests/test_stage2_static.py).
     """
     # `request` is unused now that FileResponse parses the Range header itself, but the
     # signature is kept for call-site compatibility (and future needs).
@@ -1057,7 +1058,7 @@ async def download_media_file(channel: Union[str, int], post_id: int, file_uniqu
         except Exception as e:
             logger.error(f"Failed to get video file size for message {post_id}: {str(e)}")
 
-    # Rich video (Kurigram 2.2.24, #85): a rich post has message.video=None but may embed a
+    # Rich video (Kurigram 2.2.24): a rich post has message.video=None but may embed a
     # >100MB video in a rich block. Route it through the same temp_ (non-cached) large-video
     # path, sized from the live rich object rather than message.video.
     if not is_large_video and message.video is None:
@@ -1082,7 +1083,7 @@ async def download_media_file(channel: Union[str, int], post_id: int, file_uniqu
             raise HTTPException(status_code=404, detail="File not found in message")
         # Scale the timeout with size (≈256 KB/s floor) so slow big-video downloads aren't
         # cut short at the fixed 120s used for regular files. large_video_size is sized from
-        # message.video for a regular large video, or from the rich video object (#85).
+        # message.video for a regular large video, or from the rich video object.
         file_size = large_video_size
         timeout = _media_download_timeout(file_size)
         logger.info(f"Downloading large video file {file_unique_id} to temporary path {temp_file_path} (timeout={timeout:.0f}s)")
@@ -1117,7 +1118,7 @@ async def download_media_file(channel: Union[str, int], post_id: int, file_uniqu
 
     file_id = await find_file_id_in_message(message, file_unique_id)
     if not file_id:
-        # Rich media download cascade (Kurigram 2.2.24, #86). The fid was not resolvable from
+        # Rich media download cascade (Kurigram 2.2.24). The fid was not resolvable from
         # the live (possibly partial / parse-degraded) rich object. Do ONE bare, memoised
         # GetRichMessage re-fetch and re-resolve the fid against the fuller object.
         rich_message = getattr(message, 'rich_message', None)
@@ -1559,7 +1560,7 @@ def is_local_request(request: Request) -> bool:
 def _enforce_token(request: Request, token: str | None, endpoint: str) -> None:
     """Authorize a request against the shared-secret token unless it is local.
 
-    Security invariants (issue #56): never log the presented token or the expected
+    Security invariants: never log the presented token or the expected
     secret at any level. On failure we log only a short SHA-256 prefix of the
     *presented* token so an attack can be correlated in the logs without disclosing
     either secret. The comparison is constant-time (hmac.compare_digest over the
@@ -1660,7 +1661,7 @@ async def get_raw_post_json(channel: str, post_id: int, request: Request, token:
         if isinstance(channel, str) and channel.startswith('-100'):
             channel_id = int(channel)
             
-        # Bound the RPC (stage-1 DoD: every Telegram RPC has a timeout). This
+        # Bound the RPC (invariant: every Telegram RPC has a timeout). This
         # endpoint is not under the tg_rpc gate, so a hang here only blocks this
         # one request, but leaving it unbounded still violates the invariant.
         message = await asyncio.wait_for(
@@ -1744,18 +1745,18 @@ async def health_check(request: Request, token: str | None = None) -> Response:
             "tg_first_name": me.first_name,
             "tg_last_name": me.last_name,
             # Posts that failed to render and were surfaced as a degraded placeholder
-            # instead of being silently dropped (issue #60). A non-zero, growing value
+            # instead of being silently dropped. A non-zero, growing value
             # flags a render regression that would otherwise be invisible.
             "render_failed": get_render_failed_count(),
-            # Rich Messages parse-degradation counter (Kurigram 2.2.26, #83/#84), same
+            # Rich Messages parse-degradation counter (Kurigram 2.2.26), same
             # pattern as render_failed. A non-zero/growing value flags total rich
-            # degradation invisible to the reader; rich_part_seen signals phase-3 activation.
+            # degradation invisible to the reader.
             # (rich_block_parse_failed went with the block contour — see kurigram_compat.)
             "rich_msg_parse_failed": get_rich_msg_parse_failed_count(),
-            # Adapter (tree-build) per-block failures (Rich Messages phase 2, #85).
+            # Adapter (tree-build) per-block failures.
             "rich_block_adapt_failed": rich_tree.get_rich_block_adapt_failed_count(),
             "rich_part_seen": get_rich_part_seen_count(),
-            # Rich Messages phase 3 (#86): part=True GetRichMessage re-fetch attempts and
+            # part=True GetRichMessage re-fetch attempts and
             # failures (feed enrichment + /media cascade). A growing failed/attempt ratio flags
             # a DC/throttle problem that would otherwise only show as silently-persistent plaques.
             "rich_part_fetch_attempts": get_rich_part_fetch_attempt_count(),
@@ -1779,7 +1780,7 @@ async def get_media(channel: str, post_id: int, file_unique_id: str, request: Re
         verified = verify_media_digest(url, digest) if exp is None else verify_media_digest(url, digest, exp)
         if not verified:
             # Never log the expected digest: it is a signature over a secret key and would
-            # leak signing-oracle output for a chosen url (#56). The presented digest is
+            # leak signing-oracle output for a chosen url. The presented digest is
             # attacker-supplied, so it is safe to log for correlation.
             logger.warning(f"Invalid media digest for {url} (presented digest {digest} rejected)")
             raise HTTPException(status_code=403, detail="Invalid URL signature")
@@ -1906,7 +1907,7 @@ async def get_media(channel: str, post_id: int, file_unique_id: str, request: Re
     raise HTTPException(status_code=500, detail="Internal server error: Unexpected state reached in media handling.")
 
 # --------------------------------------------------------------------------- #
-# Conditional GET for feeds (issue #62)
+# Conditional GET for feeds
 #
 # Miniflux (and any conformant reader) sends If-None-Match / If-Modified-Since on
 # every poll. Honoring them lets us answer an unchanged feed with 304 + no body,

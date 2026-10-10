@@ -75,7 +75,7 @@ def _store_entry(path: str, payload: dict) -> None:
     entry = {
         'version': SNAPSHOT_VERSION,
         'timestamp': time.time(),
-        # Per-write TTL jitter (§17): decided ONCE at write time, so repeated reads of the
+        # Per-write TTL jitter: decided ONCE at write time, so repeated reads of the
         # same file are stable (the reader never calls random()).
         'jitter': random.uniform(0.8, 1.0),
     }
@@ -224,7 +224,7 @@ async def _reply_enrichment(client: Client, messages: list[Message]) -> list[Mes
     return messages
 
 
-# Total wall-clock budget (seconds) for part-message enrichment PER feed render (#83 / #86).
+# Total wall-clock budget (seconds) for part-message enrichment PER feed render.
 # The RPC gate is global and serialised, so unbounded per-render enrichment could starve every
 # other feed poll; and the whole history snapshot must be written before the reader's ~20s HTTP
 # timeout. 15s leaves ample margin. When the budget is spent the remaining part posts are still
@@ -233,7 +233,7 @@ RICH_ENRICH_TIME_BUDGET = 15
 
 
 def _needs_rich_enrichment(message: Message) -> bool:
-    """True for a partial (part=True) rich message — INCLUDING a #84 parse_failed sentinel.
+    """True for a partial (part=True) rich message — INCLUDING a kurigram_compat parse_failed sentinel.
 
     A part=True post whose parse crashed is ALSO re-fetched: the fuller GetRichMessage vectors
     may parse cleanly. A part=False (complete) rich post and a non-rich post are skipped.
@@ -337,7 +337,7 @@ async def cached_get_chat_history(client: Client, channel_id: Union[str, int], l
         # from cache instead of re-fetching it on every poll.
         messages = await _reply_enrichment(client, messages)
         # Re-fetch the full content of any part=True rich posts before the snapshot, so the
-        # enriched rich tree (not the partial one) is what gets cached (#86).
+        # enriched rich tree (not the partial one) is what gets cached.
         messages = await enrich_rich_parts(client, messages)
         await asyncio.to_thread(_save_history_to_cache, channel_id, messages, limit)
 

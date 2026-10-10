@@ -7,7 +7,7 @@
 # pylint: disable=broad-exception-caught, missing-function-docstring, missing-class-docstring
 # pylance: disable=reportMissingImports, reportMissingModuleSource
 
-"""JSON snapshot / restore for pyrogram Message objects (issue #23).
+"""JSON snapshot / restore for pyrogram Message objects.
 
 The history cache no longer pickles live pyrogram objects. On write a plain JSON
 snapshot is extracted from a Message via an explicit allowlist, the FIELDS table; on read
@@ -332,7 +332,7 @@ def _snapshot_story(story: Any) -> Optional[dict]:
     story.photo, each by .file_unique_id (video wins over photo). The chosen object is
     also the one _save_media_file_ids reads .file_size off for the >100MB skip, so
     file_size is snapshotted too (else a >100MB story media would be collected on a
-    cache hit — F1). The render URL is still built from file_unique_id. The caption
+    cache hit). The render URL is still built from file_unique_id. The caption
     (a plain str in kurigram) is rendered by _format_special_media. Its markup comes
     separately in caption_entities, so the HTML they produce is stored next to it as
     caption_html (None without entities); "caption" stays a plain str."""
@@ -494,7 +494,7 @@ FIELDS: Dict[str, _Codec] = {
     # file_size is snapshotted for every type whose selected object flows into
     # _save_media_file_ids' >100MB skip (MEDIA_SOURCES: document/audio/animation/
     # video_note select this exact object). Without it a restored >100MB media
-    # would have file_size=None and be wrongly collected on a cache hit (F1).
+    # would have file_size=None and be wrongly collected on a cache hit.
     "document": OBJ({"file_unique_id": VALUE, "mime_type": VALUE, "file_size": VALUE, "file_name": VALUE}),
     "audio": OBJ({"file_unique_id": VALUE, "mime_type": VALUE, "file_size": VALUE, "performer": VALUE,
                   "title": VALUE}),
@@ -507,7 +507,7 @@ FIELDS: Dict[str, _Codec] = {
     # file_unique_id + file_size (the >100MB skip); find_file_id also reads file_unique_id.
     # Mirror the `video` allowlist so a cached live-photo message keeps its media block.
     "live_photo": _MEDIA_FILE,
-    # Special-media info-block types (issue #23 review fix). _format_special_media
+    # Special-media info-block types. _format_special_media
     # (post_parser.py) and find_file_id_in_message (api_server.py) read a fixed set of
     # type-specific sub-fields; each entry stores EXACTLY those — nothing more, nothing
     # less — so the type's info block renders on a cache hit exactly as for a live Message.
@@ -535,7 +535,7 @@ FIELDS: Dict[str, _Codec] = {
     "giveaway_winners": OBJ({"winner_count": VALUE, "quantity": VALUE, "prize_description": VALUE}),
     "checklist": _CHECKLIST,
     "paid_media": CUSTOM(_snapshot_paid_media, _restore_paid_media),
-    # Rich Messages (Kurigram 2.2.24, #85). Store the canonical tree VERBATIM (JSON-safe
+    # Rich Messages (Kurigram 2.2.24). Store the canonical tree VERBATIM (JSON-safe
     # by construction). Obtained through rich_tree.tree_of — NOT from_pyrogram directly —
     # so the snapshot and the live render share ONE memoised tree per object (parity).
     # None for a non-rich post. Restored directly: all consumers reach it through
@@ -548,8 +548,8 @@ FIELDS: Dict[str, _Codec] = {
 def snapshot_message(message: Any) -> dict:
     """Extract a JSON-serializable snapshot from a pyrogram Message: one key per FIELDS entry.
 
-    Every field is read via getattr(..., None) unless its codec has a read. See the module
-    docstring / issue #23 for the field contract.
+    Every field is read via getattr(..., None) unless its codec has a read; FIELDS is the
+    field contract.
     """
     return _dump_fields(FIELDS, message)
 
