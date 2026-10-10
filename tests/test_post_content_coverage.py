@@ -19,10 +19,11 @@ from pyrogram.enums import MessageEntityType, MessageMediaType, MessageServiceTy
 from pyrogram.types import MessageEntity
 
 import post_parser
+from api_server import find_file_id_in_message
 from message_snapshot import snapshot_message, restore_message
 from post_parser import PostParser, MARKER_QUOTE_END
 from rss_generator import _create_messages_groups
-from url_signer import KeyManager
+from url_signer import KeyManager, generate_media_digest
 
 
 class FakeStr(str):
@@ -352,14 +353,44 @@ def test_untagged_audio_and_voice_are_unchanged(parser):
 
 
 # --------------------------------------------------------------------------- #
-# 8. Animated (TGS) stickers render as text.
+# 8. Animated (TGS) stickers: the thumbnail as an image, else a text line.
 # --------------------------------------------------------------------------- #
-def test_animated_sticker_renders_text_not_img(parser):
+def test_animated_sticker_without_thumbs_renders_text_and_is_not_collected(parser):
     msg = make_message(media=MessageMediaType.STICKER, sticker=SimpleNamespace(
-        file_unique_id="tgs", emoji="🐱", is_video=False, is_animated=True))
+        file_unique_id="tgs", emoji="🐱", is_video=False, is_animated=True, thumbs=None))
     media = parser._generate_html_media(msg)
     assert "Sticker 🐱" in media
     assert "<img" not in media and "<video" not in media
+    assert parser._pending_media_ids == []
+
+
+def test_animated_sticker_with_thumbs_renders_the_thumbnail(parser):
+    msg = make_message(media=MessageMediaType.STICKER, sticker=SimpleNamespace(
+        file_unique_id="tgs", emoji="🐱", is_video=False, is_animated=True,
+        thumbs=[SimpleNamespace(file_id="tgs_thumb", width=128, height=128)]))
+    media = parser._generate_html_media(msg)
+    file = f"testchan/{msg.id}/tgs.thumb"
+    assert f'<img src="http://test.example.com/media/{file}/{generate_media_digest(file)}" alt="Sticker 🐱"' in media
+    assert [fid for _channel, _post, fid, _added in parser._pending_media_ids] == ["tgs.thumb"]
+
+
+async def test_thumbnail_key_resolves_to_the_largest_thumbnail():
+    msg = make_message(media=MessageMediaType.STICKER, sticker=SimpleNamespace(
+        file_unique_id="tgs", file_id="tgs_file", emoji="🐱", is_video=False, is_animated=True,
+        thumbs=[SimpleNamespace(file_id="small", width=100, height=100),
+                SimpleNamespace(file_id="large", width=320, height=320),
+                SimpleNamespace(file_id="medium", width=200, height=200)]))
+    assert await find_file_id_in_message(msg, "tgs.thumb") == "large"
+
+
+async def test_thumbnail_key_without_a_match_is_not_found():
+    bare = make_message(media=MessageMediaType.STICKER, sticker=SimpleNamespace(
+        file_unique_id="tgs", file_id="tgs_file", emoji="🐱", is_video=False, is_animated=True, thumbs=None))
+    assert await find_file_id_in_message(bare, "tgs.thumb") is None
+    thumbed = make_message(media=MessageMediaType.STICKER, sticker=SimpleNamespace(
+        file_unique_id="tgs", file_id="tgs_file", emoji="🐱", is_video=False, is_animated=True,
+        thumbs=[SimpleNamespace(file_id="t", width=128, height=128)]))
+    assert await find_file_id_in_message(thumbed, "other.thumb") is None
 
 
 def test_static_and_video_stickers_keep_their_elements(parser):

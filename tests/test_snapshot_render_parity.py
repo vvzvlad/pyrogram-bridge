@@ -135,6 +135,14 @@ def build_corpus():
     corpus.append(("live_photo", [make_msg(media=MessageMediaType.LIVE_PHOTO,
                                            live_photo=SimpleNamespace(file_unique_id="lp1", file_size=4096))]))
 
+    # --- Animated (TGS) sticker with a thumbnail -------------------------- #
+    # The live render shows the thumbnail; a snapshot that loses thumbs restores to the text line.
+    corpus.append(("sticker_animated_thumb", [make_msg(
+        media=MessageMediaType.STICKER,
+        sticker=SimpleNamespace(file_unique_id="st_tgs_t", emoji="🐱", is_video=False, is_animated=True,
+                                thumbs=[SimpleNamespace(file_id="st_tgs_t_thumb", width=128, height=128)]),
+    )]))
+
     # --- Special-media types (Fix 1) ------------------------------------- #
     corpus.append(("story_photo", [make_msg(
         media=MessageMediaType.STORY,
