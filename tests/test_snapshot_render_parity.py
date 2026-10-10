@@ -5,7 +5,7 @@
 """Render-parity oracle for the snapshot cache (issue #23 review fix).
 
 The core ask of the review: prove that snapshot -> restore preserves EVERYTHING the
-render pipeline reads. The old golden test replays a pickle corpus and never renders a
+render pipeline reads. The old golden test replays a recorded corpus and never renders a
 live Message against its snapshot, so a field dropped from the allowlist (the exact
 bug the reviewer mutation-proved for web_page/sender_chat/... and for the special-media
 types) passes silently.
@@ -22,7 +22,7 @@ caption, a multi-message media group) and for EACH case:
 
 Any field the snapshot fails to preserve makes the two renders diverge and this test go
 red. It is a self-contained live-vs-restored parity oracle; it does NOT depend on the
-frozen pickle goldens.
+frozen goldens.
 """
 import asyncio
 from datetime import datetime

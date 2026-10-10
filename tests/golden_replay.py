@@ -7,21 +7,24 @@ cache-hit path and captures the full generate_channel_rss / generate_channel_htm
 output as an equivalence oracle for every later refactor stage. NO production render
 code is touched here — only a test loader + determinism pins.
 
-The recorded corpus was written by the prod bridge cache (tg_cache._save_*_to_cache):
-  {channel}.cache    -> {'timestamp', 'limit', 'messages': List[Message]}
-  {channel}.chatinfo -> {'timestamp', 'data': {'id', 'title', 'username'}}
-`timestamp` / `limit` are ignored (no freshness check) — this is literally the prod
-cache-hit payload the renderer sees in production.
+The recorded corpus holds the Kurigram objects the prod bridge cache served, one file
+per channel, written as JSON where every value carries its type (see the loader below):
+  {channel}.json -> {"chatinfo": {"id", "title", "username"}, "messages": [<Message>, ...]}
+The loader rebuilds real Kurigram objects from it, so the replay still drives the live
+render path on real posts.
 
 Run `python -m tests.golden_replay` from the repo root to (re)generate the goldens.
 """
+import base64
+import json
 import os
 import re
 import time
-import pickle
+from datetime import datetime
 from types import SimpleNamespace
 
-from pyrogram.types.messages_and_media.message import Str as _PyrogramStr
+import pyrogram
+from pyrogram.types.messages_and_media.message import Str
 
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(TESTS_DIR)
@@ -44,61 +47,54 @@ GOLDEN_SIGNING_KEY = "stage0-golden-fixed-signing-key-0000000000000000"
 
 
 # --------------------------------------------------------------------------- #
-# Replay loader — the literal prod cache-hit path.
+# Replay loader.
 #
-# The corpus is a FROZEN prod recording (no live Telegram to re-record it from), so a
-# library bump must be absorbed by the loader, never by the corpus or the goldens —
-# goldens matching byte-for-byte is exactly the evidence that the bump did not move the
-# render. Kurigram 2.2.26 breaks the plain `pickle.load` of a 2.2.24-era recording twice:
-#   * `Str` (a str subclass carrying .entities) gained ``__slots__ = ("entities",)``, so the
-#     recorded state — a plain ``__dict__`` — can no longer be restored onto it;
-#   * types dropped from the library (e.g. pyrogram.types.user_and_chats.chat_color) can no
-#     longer be imported at all.
-# Both are handled below, and ONLY on the read path.
+# The corpus is a FROZEN prod recording (no live Telegram to re-record it from). Every
+# value is stored with its type, recursively:
+#   None / bool / int / float / str  -> as is
+#   list (pyrogram.types.List too)   -> list of encoded items, loaded as a plain list
+#   Str (a str carrying .entities)   -> {"$str": text, "entities": [...] or null}
+#   enum                             -> {"$enum": class name in pyrogram.enums, "name": member}
+#   datetime                         -> {"$datetime": isoformat()}, recorded under TZ=UTC
+#   bytes                            -> {"$bytes": base64}
+#   pyrogram Object                  -> {"$type": class name in pyrogram.types, attr: value, ...}
+# An Object keeps every __dict__ attribute except `raw` (the render never reads it) and
+# `_client` (the recording never kept it), the None-valued ones included, so hasattr()
+# answers as it does on the live object for every data field. Types are
+# looked up by their PUBLIC name, so a class moving between modules inside Kurigram does
+# not break the load, while a class or enum member the library no longer ships raises out
+# of the loader: there are no stand-ins. (ChatColor, dropped in Kurigram 2.2.26 and never
+# read by the feed, was recorded as null.) The goldens are never regenerated to absorb a
+# library bump: goldens matching byte-for-byte is exactly the evidence that the bump did
+# not move the render.
 # --------------------------------------------------------------------------- #
-class _CompatStr(_PyrogramStr):
-    """`Str` that can still absorb a pre-2.2.26 pickled ``__dict__``.
-
-    A subclass without ``__slots__`` does have a ``__dict__``, but the inherited slot
-    DESCRIPTOR shadows it on every read of ``.entities`` — so the state has to be written
-    into the slot explicitly rather than dumped into the instance dict.
-    """
-
-    def __setstate__(self, state):
-        if isinstance(state, tuple):  # (dict-state, slots-state)
-            state = state[0] or state[1] or {}
-        self.entities = (state or {}).get("entities")
-
-
-class _CorpusUnpickler(pickle.Unpickler):
-    """Unpickler that maps the recorded classes onto what 2.2.26 still provides."""
-
-    def find_class(self, module, name):
-        if name == "Str" and module.endswith("messages_and_media.message"):
-            return _CompatStr
-        try:
-            return super().find_class(module, name)
-        except (ModuleNotFoundError, AttributeError):
-            # A type the library no longer ships. The feed never reads these attributes, so
-            # an inert object with a __dict__ restores the recorded state and nothing else.
-            # __init__ swallows arguments because a dropped ENUM (ReplyColor) is pickled by
-            # value and restored by CALLING the class.
-            return type(name, (), {"__module__": module,
-                                   "__init__": lambda self, *a, **kw: None})
-
-
-def _load_pickle(path):
-    with open(path, "rb") as f:
-        return _CorpusUnpickler(f).load()
+def _decode(value):
+    if isinstance(value, list):
+        return [_decode(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    if "$type" in value:
+        cls = getattr(pyrogram.types, value["$type"])
+        # Restores the state the way Object.__setstate__ does, bypassing properties.
+        obj = cls.__new__(cls)
+        obj.__dict__.update({attr: _decode(item) for attr, item in value.items() if attr != "$type"})
+        return obj
+    if "$str" in value:
+        return Str(value["$str"]).init(_decode(value["entities"]))
+    if "$enum" in value:
+        return getattr(pyrogram.enums, value["$enum"])[value["name"]]
+    if "$datetime" in value:
+        return datetime.fromisoformat(value["$datetime"])
+    return base64.b64decode(value["$bytes"])  # the last tag: any other one raises KeyError
 
 
 def load_recorded(channel):
-    """Unpickle a recorded {channel}.cache / {channel}.chatinfo pair.
+    """Load a recorded {channel}.json.
 
-    Returns (messages: List[Message], chatinfo_data: dict). timestamp/limit ignored."""
-    cache = _load_pickle(os.path.join(RECORDED_DIR, f"{channel}.cache"))
-    chatinfo = _load_pickle(os.path.join(RECORDED_DIR, f"{channel}.chatinfo"))
-    return cache["messages"], chatinfo["data"]
+    Returns (messages: list[Message], chatinfo_data: dict)."""
+    with open(os.path.join(RECORDED_DIR, f"{channel}.json"), encoding="utf-8") as f:
+        recorded = json.load(f)
+    return _decode(recorded["messages"]), recorded["chatinfo"]
 
 
 def patch_tg_cache(monkeypatch, channel):
