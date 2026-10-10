@@ -14,7 +14,7 @@ Guards the three fixes in api_server:
   digest (a signing-oracle output over the secret key).
 
 Also guards the Config dump: media_signing_secret is masked in the startup log and in the
-/health response.
+/health response. So is the proxy password, there and in Kurigram's connect log line.
 
 The /flags endpoint is used as the token-check probe because it needs no Telegram client
 or DB — it exercises the exact same _enforce_token gate every authenticated route uses.
@@ -154,3 +154,64 @@ def test_health_masks_media_signing_secret(monkeypatch, signing_secret):
     assert r.status_code == 200
     assert r.json()["config"]["media_signing_secret"] == api_server.mask_sensitive_value(signing_secret)
     assert signing_secret not in r.text
+
+
+# --------------------------------------------------------------------------- #
+# Proxy password — masked in the Config dump and in Kurigram's connect log line.
+# --------------------------------------------------------------------------- #
+PROXY_PASSWORD = "proxy-pass-9Kq2"
+PROXY = {"scheme": "SOCKS5", "hostname": "proxy.example.lc", "port": 1080,
+         "username": "bridge", "password": PROXY_PASSWORD}
+
+
+def test_startup_log_masks_proxy_password(caplog, monkeypatch):
+    mock_settings = config.get_settings
+    monkeypatch.setattr(config, "get_settings", lambda: {**mock_settings(), "proxy": PROXY})
+    monkeypatch.setattr(uvicorn, "run", lambda *args, **kwargs: None)
+    caplog.set_level(logging.INFO)
+
+    runpy.run_path(api_server.__file__, run_name="__main__")
+
+    assert "proxy.example.lc" in caplog.text  # the proxy line itself is still logged
+    assert PROXY_PASSWORD not in caplog.text
+
+
+def test_health_masks_proxy_password(monkeypatch):
+    monkeypatch.setitem(api_server.Config, "proxy", PROXY)
+
+    async def get_me():
+        return SimpleNamespace(username="u", id=1, phone_number="0", first_name="f", last_name="l")
+
+    monkeypatch.setattr(api_server, "client", SimpleNamespace(client=SimpleNamespace(get_me=get_me, is_connected=True)))
+    monkeypatch.setattr(api_server, "calculate_cache_stats", lambda: {})
+
+    r = TestClient(api_server.app).get(f"/health/{SECRET}")
+
+    assert r.status_code == 200
+    assert r.json()["config"]["proxy"]["hostname"] == "proxy.example.lc"
+    assert PROXY_PASSWORD not in r.text
+
+
+async def test_kurigram_connect_log_masks_proxy_password(caplog):
+    from pyrogram.connection.proxy import SOCKS5Proxy
+    from pyrogram.connection.transport.tcp.tcp import TCP
+
+    caplog.set_level(logging.INFO)
+    # Kurigram's own proxied-connect path, which logs the proxy object before connecting; the
+    # connect itself is refused so nothing reaches the network.
+    tcp = TCP(proxy=SOCKS5Proxy(hostname="proxy.example.lc", port=1080,
+                                username="bridge", password=PROXY_PASSWORD), dc_id=2)
+
+    class _Refused:
+        async def connect(self, **kwargs):
+            raise ConnectionRefusedError("refused")
+
+    async def _build_proxy():
+        return _Refused()
+
+    tcp._build_proxy = _build_proxy
+    with pytest.raises(ConnectionRefusedError):
+        await tcp._connect_via_proxy(("149.154.167.51", 443))
+
+    assert "proxy.example.lc" in caplog.text
+    assert PROXY_PASSWORD not in caplog.text
