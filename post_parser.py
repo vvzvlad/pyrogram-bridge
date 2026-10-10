@@ -78,6 +78,12 @@ _TRAILING_BR_RE = re.compile(r'<br\s*/?>$', re.IGNORECASE)
 # the tag simply stays untrimmed, which is a cosmetic non-issue.
 _TRAILING_BR_WINDOW = 16
 
+# A reply's quote is cut to Config['reply_quote_truncate_chars'] only when its target is a
+# post of the same channel at most this many message ids above it: 2 covers the common
+# "reply to the post right above" while leaving genuine replies to older posts alone.
+# 0 disables the truncation entirely (quotes stay full, as before).
+REPLY_QUOTE_TRUNCATE_DISTANCE = 2
+
 # Pieces of _truncate_quote_html. A quote is pyrogram's `.html`: entity tags, <br> breaks and
 # HTML entities, so the cut has to be counted in what a READER sees, not in string length.
 # A '<' opens a TAG only when a letter follows it and a '>' closes it: pyrogram leaves text
@@ -620,8 +626,6 @@ class PostParser:
                 timeout=30,
             )
 
-            if Config["debug"]: print(message)
-
             if not message or getattr(message, 'empty', False):
                 logger.error(f"post_not_found_or_empty: channel {prepared_channel_id}, post_id {post_id}")
                 return None
@@ -1091,7 +1095,7 @@ class PostParser:
         at the actual neighbouring messages would need feed/API access, which this renderer must
         not have — _format_reply_info is pure.
         """
-        distance = Config['reply_quote_truncate_distance']
+        distance = REPLY_QUOTE_TRUNCATE_DISTANCE
         if distance <= 0:
             return False
         if not _is_channel_chat(getattr(message, 'chat', None)):

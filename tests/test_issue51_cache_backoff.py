@@ -8,8 +8,8 @@ Symptom fixed here: dead media files were retried on every ~15 min sweep for up 
 the same file could download twice at once (live + background), and empty cache dirs piled up.
 
   1. Backoff cap >= the sweep interval, so a dead file is skipped for whole sweeps instead of
-     being re-queued every pass (the retry-storm). Cap is env-tunable (MEDIA_BACKOFF_MAX_S).
-  2. After N consecutive failures the media row is dropped from SQLite (MEDIA_FAILURES_DROP_ROW).
+     being re-queued every pass (the retry-storm).
+  2. After N consecutive failures the media row is dropped from SQLite (_DOWNLOAD_FAILURES_DROP_ROW).
   3. The background worker downloads via _download_deduped (shared with live requests) so one
      file is fetched once, and it does NOT keep its own failure accounting (runner owns it).
   4. makedirs is lazy (inside _download_atomic); the sweep removes leftover empty dirs.
@@ -37,9 +37,9 @@ class _StopLoop(Exception):
 def test_backoff_cap_is_at_least_sweep_interval():
     # The core correctness property of #51: with a cap below the sweep interval the backoff
     # always expires before the next sweep and download_new_files re-queues the dead file
-    # every pass. The cap must therefore be >= cache_sweep_interval regardless of env.
-    assert api_server._DOWNLOAD_BACKOFF_MAX >= float(api_server.Config["cache_sweep_interval"])
-    # Default is 6h when MEDIA_BACKOFF_MAX_S is unset (well above the 900s default sweep).
+    # every pass. The cap must therefore be >= CACHE_SWEEP_INTERVAL_S.
+    assert api_server._DOWNLOAD_BACKOFF_MAX >= float(api_server.CACHE_SWEEP_INTERVAL_S)
+    # The cap is 6h, well above the 900s sweep.
     assert api_server._DOWNLOAD_BACKOFF_MAX >= 900.0
 
 
@@ -53,7 +53,7 @@ def test_capped_dead_file_backoff_exceeds_sweep_interval():
     remaining = api_server._download_backoff_remaining(key)
     # Once at the cap, the remaining backoff strictly exceeds one sweep interval, so the next
     # sweep skips this file rather than re-queueing it.
-    assert remaining > float(api_server.Config["cache_sweep_interval"])
+    assert remaining > float(api_server.CACHE_SWEEP_INTERVAL_S)
     api_server._clear_download_failure(key)
 
 

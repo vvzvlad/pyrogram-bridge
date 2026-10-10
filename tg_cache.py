@@ -40,12 +40,7 @@ CACHE_DIR = os.path.join('data', 'tgcache')
 
 # TTL (hours) for the channel-info cache. Channel title/username/id change rarely,
 # so a long TTL removes the rate-limited GetFullChannel from the feed-poll hot path.
-try:
-    CHAT_CACHE_TTL_HOURS = int(os.getenv("TG_CHAT_CACHE_TTL_HOURS", "12"))
-    if CHAT_CACHE_TTL_HOURS < 1:
-        CHAT_CACHE_TTL_HOURS = 12
-except ValueError:
-    CHAT_CACHE_TTL_HOURS = 12
+CHAT_CACHE_TTL_HOURS = Config["tg_chat_cache_ttl_hours"]
 
 
 def _safe_key(key: Union[str, int]) -> str:

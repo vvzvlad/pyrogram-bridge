@@ -14,6 +14,10 @@ import secrets
 import os
 import time
 
+from config import get_settings
+
+Config = get_settings()
+
 # --- v2 signing scheme -------------------------------------------------------
 # New media URLs are signed with HMAC-SHA256 over a *scoped* message and hex-truncated
 # to 128 bits (32 chars). The scope prefix gives domain separation so a digest can only
@@ -87,19 +91,13 @@ class KeyManager:
         if cls._source_secret is not None:
             return cls._source_secret
 
-        secret = os.environ.get("MEDIA_SIGNING_SECRET")
+        secret = Config["media_signing_secret"]
         if secret:
             cls._source_secret = secret
             return cls._source_secret
 
-        # Reuse the service token. Import get_settings LAZILY and defensively: a
-        # signing-only import must never trigger config's sys.exit on missing TG_* env.
-        token = ""
-        try:
-            from config import get_settings
-            token = (get_settings() or {}).get("token", "") or ""
-        except (Exception, SystemExit):
-            token = ""
+        # Reuse the service token.
+        token = Config["token"]
         if token:
             cls._source_secret = token
             return cls._source_secret
@@ -140,18 +138,12 @@ class KeyManager:
 def media_url_expiry() -> int | None:
     """Absolute expiry (unix seconds) for a freshly generated media URL, or None.
 
-    Controlled by MEDIA_URL_TTL_DAYS: unset / 0 / non-positive -> no expiry (default), so
+    Controlled by MEDIA_URL_TTL_DAYS: unset / 0 -> no expiry (default), so
     the URL shape is unchanged and legitimate late RSS fetches never break. When set, each
     feed regeneration mints a URL that expires TTL days from now.
     """
-    raw = os.environ.get("MEDIA_URL_TTL_DAYS")
-    if not raw or not raw.strip():
-        return None
-    try:
-        days = int(raw)
-    except ValueError:
-        return None
-    if days <= 0:
+    days = Config["media_url_ttl_days"]
+    if days == 0:
         return None
     return int(time.time()) + days * 86400
 
@@ -163,8 +155,7 @@ def _legacy_digests_allowed() -> bool:
     carry the old digest. Operators set MEDIA_ALLOW_LEGACY_DIGEST=false once every feed has
     been re-polled and all URLs regenerated with the v2 scheme.
     """
-    raw = os.environ.get("MEDIA_ALLOW_LEGACY_DIGEST", "true").strip().lower()
-    return raw not in ("false", "0", "no", "off", "disable", "disabled")
+    return Config["media_allow_legacy_digest"]
 
 
 def _generate_legacy_digest(url: str) -> str | None:

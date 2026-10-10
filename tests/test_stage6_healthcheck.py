@@ -65,7 +65,7 @@ def patch_client(monkeypatch):
     return _install
 
 
-THRESHOLD = api_server.Config["tg_ping_unhealthy_after"]  # 250 in mock_config
+THRESHOLD = api_server.PING_UNHEALTHY_AFTER_S  # 250
 
 
 # --------------------------------------------------------------------------- #

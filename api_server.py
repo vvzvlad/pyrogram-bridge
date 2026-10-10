@@ -42,6 +42,9 @@ from telegram_client import (
     safe_get_rich_message,
     get_rich_part_fetch_attempt_count,
     get_rich_part_fetch_failed_count,
+    WATCHDOG_INTERVAL_S,
+    WATCHDOG_PROBE_TIMEOUT_S,
+    WATCHDOG_FAILURES,
 )
 from config import get_settings, setup_logging
 from rss_generator import generate_channel_rss, generate_channel_html, get_render_failed_count
@@ -177,46 +180,52 @@ download_queue = asyncio.Queue(maxsize=100)
 # set is race-free: download_new_files adds the key before put_nowait; the worker discards
 # it in its finally alongside task_done().
 _queued_media: set[tuple[str, int, str]] = set()
-def _env_int(name: str, default: int, minimum: int = 0) -> int:
-    """Parse an int env var for a module-level tunable; fall back to default on absence/garbage."""
-    raw = os.getenv(name)
-    if raw is None or raw.strip() == "":
-        return default
-    try:
-        return max(minimum, int(raw))
-    except ValueError:
-        logger.warning(f"{name} must be an integer, got {raw!r}; using default {default}")
-        return default
+
+# /ping reports TG as unhealthy once the last successful watchdog probe is older than
+# this many seconds. Derived from the watchdog cadence: it is roughly how long the
+# watchdog itself would take to give up and trigger a restart —
+# interval * (failures + 1) + timeout. With 60, 3 and 10 that is 250s, so a
+# transient slow probe never flaps /ping, but a genuinely stuck session (no successful
+# probe for ~4 min) surfaces as 503 before/around the time the watchdog restarts.
+PING_UNHEALTHY_AFTER_S = WATCHDOG_INTERVAL_S * (WATCHDOG_FAILURES + 1) + WATCHDOG_PROBE_TIMEOUT_S
+# Media download timeout scales with file size (large videos): the per-download
+# timeout is clamped to [min, max] seconds, with an effective floor of
+# MEDIA_DOWNLOAD_MIN_SPEED bytes/s (timeout ≈ file_size / min_speed).
+MEDIA_DOWNLOAD_TIMEOUT_MIN_S = 120
+MEDIA_DOWNLOAD_TIMEOUT_MAX_S = 1800
+MEDIA_DOWNLOAD_MIN_SPEED = 256 * 1024
+# Interval (seconds) between cache-sweep passes in cache_media_files. Each pass is a
+# full media_file_ids table scan plus an os.walk of the whole cache tree, so running
+# it every 60s under a "20 days"/"1 hour" retention policy is wasteful.
+CACHE_SWEEP_INTERVAL_S = 900
+# Size of the asyncio default ThreadPoolExecutor. SQLite/python-magic/pickle/os.walk
+# all run via asyncio.to_thread; the interpreter default (min(32, cpu+4)) is only 5-6
+# on a 1-2 CPU container, which starves those under load. 32 gives ample headroom.
+IO_THREAD_POOL_SIZE = 32
+API_HOST = "0.0.0.0"
 
 # --- Failing-download backoff (negative cache) --------------------------------
 # A media file whose download keeps failing (hang/timeout/not-found) must not be
-# retried on every cache sweep (cache_sweep_interval, default 900s), nor keep
+# retried on every cache sweep (CACHE_SWEEP_INTERVAL_S, 900s), nor keep
 # occupying a scarce Pyrogram transmission slot. We remember recent failures per
 # (channel, post_id, file_unique_id) and skip / fast-reject re-attempts until an
 # exponentially growing backoff elapses. Cleared on the first successful download.
 # All access is from the single event-loop thread, so a plain dict needs no lock.
 _DOWNLOAD_BACKOFF_BASE = 60.0     # seconds; backoff after the first failure
-# Cap on the backoff (seconds), env MEDIA_BACKOFF_MAX_S, default 6h. It MUST be >= the
-# cache sweep interval: with a shorter cap the backoff always expires before the next
-# sweep, so download_new_files re-queues the dead file every pass (the retry-storm this
-# fixes — a dead file was retried every ~15 min for up to 20 days). A long cap is safe
-# because the negative cache lives in memory only: the process restart that recovers a
-# hung session (watchdog or media-timeout streak) empties it, so a healed system never
-# holds a stale, long backoff that keeps fast-503'ing a now-downloadable file.
-# Clamp STRICTLY above the sweep interval (+1), so a capped dead file's backoff still
-# has time remaining at the next sweep structurally — not by timing luck — even if
-# MEDIA_BACKOFF_MAX_S is mis-set at/below the sweep interval.
-_DOWNLOAD_BACKOFF_MAX = float(max(
-    _env_int("MEDIA_BACKOFF_MAX_S", 21600, minimum=1),
-    int(Config["cache_sweep_interval"]) + 1,
-))
+# Cap on the backoff (seconds), 6h. It must exceed CACHE_SWEEP_INTERVAL_S: with a shorter
+# cap the backoff always expires before the next sweep, so download_new_files re-queues
+# the dead file every pass (the retry-storm this fixes — a dead file was retried every
+# ~15 min for up to 20 days). A long cap is safe because the negative cache lives in
+# memory only: the process restart that recovers a hung session (watchdog or
+# media-timeout streak) empties it, so a healed system never holds a stale, long backoff
+# that keeps fast-503'ing a now-downloadable file.
+_DOWNLOAD_BACKOFF_MAX = 21600.0
 # After this many CONSECUTIVE failed downloads, drop the media row from SQLite so a
-# genuinely-dead file (deleted post, gone media) stops being re-queued forever. env
-# MEDIA_FAILURES_DROP_ROW, default 15. Best-effort / fire-and-forget: if the post is
-# still in a feed the renderer recreates the row, but the in-memory failure counter
-# survives until success/restart, so a recreated-then-refailing row is dropped again
-# quickly. See _drop_media_row.
-_DOWNLOAD_FAILURES_DROP_ROW = _env_int("MEDIA_FAILURES_DROP_ROW", 15, minimum=1)
+# genuinely-dead file (deleted post, gone media) stops being re-queued forever.
+# Best-effort / fire-and-forget: if the post is still in a feed the renderer recreates
+# the row, but the in-memory failure counter survives until success/restart, so a
+# recreated-then-refailing row is dropped again quickly. See _drop_media_row.
+_DOWNLOAD_FAILURES_DROP_ROW = 15
 # LRU cap on the negative cache. Permanently-404 / deleted files would otherwise leave
 # eternal entries and slowly leak memory on a long-uptime process. We keep at most this
 # many most-recently-failed keys and evict the oldest. Eviction is harmless: a dropped
@@ -471,9 +480,9 @@ async def lifespan(_: FastAPI):
 
     # Enlarge the default threadpool: SQLite/python-magic/pickle/os.walk all run via
     # asyncio.to_thread, and the interpreter default (min(32, cpu+4) = 5-6 on a 1-2 CPU
-    # container) is too small under load. Configurable via IO_THREAD_POOL_SIZE.
+    # container) is too small under load.
     loop = asyncio.get_running_loop()
-    io_executor = ThreadPoolExecutor(max_workers=Config["io_thread_pool_size"], thread_name_prefix="io")
+    io_executor = ThreadPoolExecutor(max_workers=IO_THREAD_POOL_SIZE, thread_name_prefix="io")
     loop.set_default_executor(io_executor)
 
     os.makedirs(MEDIA_CACHE_DIR, exist_ok=True) # Create cache directory
@@ -537,8 +546,9 @@ app = FastAPI(title="Pyrogram Bridge", lifespan=lifespan)
 app.add_middleware(RequestLoggingMiddleware)
 
 def mask_sensitive_value(input_str: str) -> str:
-    """Mask middle part of sensitive value, showing only first and last 4 characters"""
-    if not input_str or len(input_str) < 8:
+    """Mask a sensitive value. A value shorter than 32 characters is hidden entirely; a longer
+    one shows only its first and last 4 characters, so at most a quarter of it is visible."""
+    if not input_str or len(input_str) < 32:
         return '***'
     visible_chars = 4
     return f"{input_str[:visible_chars]}{'*' * (len(input_str) - visible_chars * 2)}{input_str[-visible_chars:]}"
@@ -551,7 +561,7 @@ if __name__ == "__main__":
     
     logger.info("Starting server with configuration:")
     for key, value in Config.items():
-        if any(sensitive in key.lower() for sensitive in ['token', 'tg_api_id', 'tg_api_hash']):
+        if any(sensitive in key.lower() for sensitive in ['token', 'secret', 'tg_api_id', 'tg_api_hash']):
             logger.info(f"    {key}: {mask_sensitive_value(str(value))}")
         else:
             logger.info(f"    {key}: {value}")
@@ -562,7 +572,7 @@ if __name__ == "__main__":
     try:
         uvicorn.run(
             "api_server:app",
-            host=Config["api_host"],
+            host=API_HOST,
             port=Config["api_port"],
             loop="uvloop"
         )
@@ -843,13 +853,13 @@ async def prepare_file_response(file_path: str, request: Request,
 def _media_download_timeout(file_size: int) -> float:
     """Scale the download timeout with file size.
 
-    Effective floor of `media_download_min_speed` bytes/s (timeout ≈ size / min_speed),
-    clamped to [media_download_timeout_min, media_download_timeout_max] seconds.
+    Effective floor of `MEDIA_DOWNLOAD_MIN_SPEED` bytes/s (timeout ≈ size / min_speed),
+    clamped to [MEDIA_DOWNLOAD_TIMEOUT_MIN_S, MEDIA_DOWNLOAD_TIMEOUT_MAX_S] seconds.
     A non-positive/unknown size falls back to the minimum timeout.
     """
-    min_t = Config["media_download_timeout_min"]
-    max_t = Config["media_download_timeout_max"]
-    min_speed = Config["media_download_min_speed"]
+    min_t = MEDIA_DOWNLOAD_TIMEOUT_MIN_S
+    max_t = MEDIA_DOWNLOAD_TIMEOUT_MAX_S
+    min_speed = MEDIA_DOWNLOAD_MIN_SPEED
     if file_size <= 0 or min_speed <= 0:
         return float(min_t)
     return float(min(max_t, max(min_t, file_size // min_speed)))
@@ -984,7 +994,7 @@ async def _download_deduped(channel: Union[str, int], post_id: int, file_unique_
 
     # Waiter timeout: a generous safety net above the maximum per-download timeout (the
     # download is itself internally bounded), so a live download always completes first.
-    waiter_timeout = float(Config["media_download_timeout_max"]) + 120.0
+    waiter_timeout = float(MEDIA_DOWNLOAD_TIMEOUT_MAX_S) + 120.0
     # shield so a timed-out / cancelled waiter does NOT cancel the shared Future that the
     # detached task owns and other waiters depend on.
     return await asyncio.wait_for(asyncio.shield(fut), timeout=waiter_timeout)
@@ -1159,7 +1169,7 @@ async def download_media_file(channel: Union[str, int], post_id: int, file_uniqu
     # path. _download_atomic owns the zero-size check, the race-loser cleanup, and the
     # rename-only-if-absent logic, keeping the "final name = complete file" invariant.
     try:
-        file_path = await _download_atomic(file_id, cache_path, timeout=float(Config["media_download_timeout_min"]))
+        file_path = await _download_atomic(file_id, cache_path, timeout=float(MEDIA_DOWNLOAD_TIMEOUT_MIN_S))
     except asyncio.TimeoutError:
         logger.error(f"Timeout downloading media {file_unique_id}")
         raise HTTPException(status_code=504, detail="Download timeout")
@@ -1390,7 +1400,7 @@ async def background_download_worker():
 
 async def cache_media_files() -> None:
     """Background task for cache management: removes old files and downloads new ones"""
-    delay = Config["cache_sweep_interval"]
+    delay = CACHE_SWEEP_INTERVAL_S
     while True:
         try:
             # Load all media file ID records from SQLite
@@ -1681,7 +1691,7 @@ async def ping() -> JSONResponse:
     # is_connected is None before client.start() and a bool afterwards; coerce so the JSON
     # "connected" field is always a bool (never null) and the pre-start window reports false.
     connected = bool(client.client.is_connected)
-    threshold = Config["tg_ping_unhealthy_after"]
+    threshold = PING_UNHEALTHY_AFTER_S
     # age is None right after boot: the watchdog hasn't run its first probe yet. Treat that
     # as healthy (gate on connected only) so a freshly-started container is not killed before
     # its first probe cycle — otherwise start_period would have to cover a full watchdog interval.
@@ -1720,7 +1730,7 @@ async def health_check(request: Request, token: str | None = None) -> Response:
         
         config_info = {}    
         for config_key, config_value in Config.items():
-            if any(sensitive in config_key.lower() for sensitive in ['token', 'tg_api_id', 'tg_api_hash']):
+            if any(sensitive in config_key.lower() for sensitive in ['token', 'secret', 'tg_api_id', 'tg_api_hash']):
                 config_info[config_key] = mask_sensitive_value(str(config_value)) if config_value else None
             else:
                 config_info[config_key] = config_value
