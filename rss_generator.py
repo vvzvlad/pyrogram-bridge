@@ -315,17 +315,11 @@ def _create_messages_groups(messages: list[Message], group_ids: dict[int, str | 
     # First pass - collect messages and organize into processing groups
     for message in messages:
         try:
-            # Service messages (chat photo/title changes, giveaway launches/results, gifts,
-            # checklist updates, community membership, ...) are bookkeeping, not posts:
-            # post_parser renders them with no body — at most a stock title ("🖼 New chat
-            # photo"), mostly an empty "❓ Unknown Post" entry. A pin does get a quote block, but it only repeats a post already in
-            # the feed, so it stays skipped as before. Skip them all, except CUSTOM_ACTION
-            # with text — the only service type kurigram gives a text (action.message),
-            # which post_parser renders as the post body. An allowlist, so a service type
-            # added by a future kurigram stays out of the feed instead of showing up empty.
+            # Service messages (chat photo/title changes, pins, giveaways, gifts, ...) are
+            # bookkeeping, not posts, so the feed skips them all. CUSTOM_ACTION included: it
+            # is Telegram's placeholder for an action the client's API layer does not know.
             if message.service:
-                if not ('CUSTOM_ACTION' in str(message.service) and message.text):
-                    continue
+                continue
 
             effective_group_id = group_ids.get(message.id, message.media_group_id)
             if effective_group_id:

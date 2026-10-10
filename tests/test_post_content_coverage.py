@@ -68,7 +68,7 @@ def make_message(**overrides):
 
 
 # --------------------------------------------------------------------------- #
-# 2. Service messages: skipped unless post_parser renders them with content.
+# 2. Service messages: the feed skips every one, CUSTOM_ACTION included.
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize("service", [
     MessageServiceType.GIVEAWAY_CREATED, MessageServiceType.GIVEAWAY_COMPLETED,
@@ -89,13 +89,9 @@ def test_restored_service_name_string_is_skipped_too():
     assert _create_messages_groups([restored]) == []
 
 
-def test_custom_action_with_text_is_kept():
+def test_custom_action_with_text_is_skipped():
     msg = make_message(service=MessageServiceType.CUSTOM_ACTION, text="Something happened")
-    assert _create_messages_groups([msg]) == [[msg]]
-
-
-def test_custom_action_without_text_is_skipped():
-    assert _create_messages_groups([make_message(service=MessageServiceType.CUSTOM_ACTION, text=None)]) == []
+    assert _create_messages_groups([msg]) == []
 
 
 def test_custom_action_plain_str_text_renders_escaped(parser):

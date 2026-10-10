@@ -30,7 +30,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from pyrogram.enums import MessageMediaType, MessageServiceType
+from pyrogram.enums import MessageMediaType
 
 from message_snapshot import snapshot_messages, restore_messages
 from tests import golden_replay as gr
@@ -324,11 +324,6 @@ def build_corpus():
         external_reply=SimpleNamespace(message_id=7, chat=None,
                                        origin=SimpleNamespace(type="hidden_user", sender_user_name="Anon")),
     )]))
-    # CUSTOM_ACTION: kurigram puts action.message into .text as a plain str (no .html).
-    corpus.append(("custom_action", [make_msg(
-        service=MessageServiceType.CUSTOM_ACTION,
-        text="Custom <action> text",
-    )]))
 
     # --- Multi-message media group (grouping merge) ----------------------- #
     corpus.append(("media_group", [
@@ -393,7 +388,7 @@ def test_corpus_covers_v9_snapshot_fields():
     names = {n for n, _ in build_corpus()}
     required = {"poll_description_photo", "poll_description_video", "story_caption", "story_deleted",
                 "audio_tags", "sticker_animated", "author_signature", "invoice",
-                "reply_selected_quote", "external_reply", "external_reply_hidden_user", "custom_action"}
+                "reply_selected_quote", "external_reply", "external_reply_hidden_user"}
     assert required <= names
 
 
@@ -413,7 +408,6 @@ def test_parity_cases_render_the_new_content(monkeypatch):
         "reply_selected_quote": "<b>long</b> original",
         "external_reply": "selected <i>words</i>",
         "external_reply_hidden_user": "Reply to Anon, #7",
-        "custom_action": "Custom &lt;action&gt; text",
     }
     for name, needle in expected.items():
         restored = restore_messages(snapshot_messages(corpus[name]))
