@@ -7,6 +7,7 @@ suite order-independent regardless of collection order or invocation directory.
 """
 import os
 import sys
+import tempfile
 import time
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -16,6 +17,14 @@ if ROOT not in sys.path:
 import tests.mock_config as _mock_config
 
 sys.modules['config'] = _mock_config
+
+# The media DB path is ./data/media_file_ids.db, and ./data of a working copy holds the bridge's
+# real state. api_server and post_parser import DB_PATH by value, so point it at a throwaway
+# directory before any test module imports them; the directory is removed when the run ends.
+import file_io
+
+_TEST_DB_DIR = tempfile.TemporaryDirectory(prefix='pyrogram-bridge-tests-')
+file_io.DB_PATH = os.path.join(_TEST_DB_DIR.name, 'media_file_ids.db')
 
 # The Telegram session directory is a constant (telegram_client.SESSION_PATH = "data"). Point it
 # at the test data directory before any test module builds a TelegramClient, so a test run
