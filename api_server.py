@@ -554,6 +554,13 @@ def mask_sensitive_value(input_str: str) -> str:
     return f"{input_str[:visible_chars]}{'*' * (len(input_str) - visible_chars * 2)}{input_str[-visible_chars:]}"
 
 
+def _proxy_for_display(proxy: dict | None) -> dict | None:
+    """The proxy settings as the startup log and /health show them: the password is masked."""
+    if not proxy or not proxy.get("password"):
+        return proxy
+    return {**proxy, "password": mask_sensitive_value(proxy["password"])}
+
+
 if __name__ == "__main__":
     import uvicorn
     
@@ -563,6 +570,8 @@ if __name__ == "__main__":
     for key, value in Config.items():
         if any(sensitive in key.lower() for sensitive in ['token', 'secret', 'tg_api_id', 'tg_api_hash']):
             logger.info(f"    {key}: {mask_sensitive_value(str(value))}")
+        elif key == "proxy":
+            logger.info(f"    {key}: {_proxy_for_display(value)}")
         else:
             logger.info(f"    {key}: {value}")
     
@@ -1733,6 +1742,8 @@ async def health_check(request: Request, token: str | None = None) -> Response:
         for config_key, config_value in Config.items():
             if any(sensitive in config_key.lower() for sensitive in ['token', 'secret', 'tg_api_id', 'tg_api_hash']):
                 config_info[config_key] = mask_sensitive_value(str(config_value)) if config_value else None
+            elif config_key == "proxy":
+                config_info[config_key] = _proxy_for_display(config_value)
             else:
                 config_info[config_key] = config_value
 

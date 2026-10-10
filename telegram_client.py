@@ -8,6 +8,7 @@
 # pylint: disable=f-string-without-interpolation
 # pylance: disable=reportMissingImports, reportMissingModuleSource
 
+import dataclasses
 import logging
 import os
 import asyncio
@@ -30,6 +31,24 @@ kurigram_compat.install()
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+
+class _MaskProxyPassword(logging.Filter):
+    """Kurigram logs the proxy object, password included, on every proxied connect
+    ("Connecting to %s:%s via proxy %s"); this shows it with the password masked."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.args, tuple):
+            record.args = tuple(
+                dataclasses.replace(arg, password="***")
+                if dataclasses.is_dataclass(arg) and not isinstance(arg, type) and getattr(arg, "password", None)
+                else arg
+                for arg in record.args
+            )
+        return True
+
+
+logging.getLogger("pyrogram.connection.transport.tcp.tcp").addFilter(_MaskProxyPassword())
 
 WATCHDOG_INTERVAL_S = 60
 WATCHDOG_PROBE_TIMEOUT_S = 10
