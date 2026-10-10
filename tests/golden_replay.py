@@ -97,11 +97,17 @@ def load_recorded(channel):
     return _decode(recorded["messages"]), recorded["chatinfo"]
 
 
-def patch_tg_cache(monkeypatch, channel):
+def patch_tg_cache(monkeypatch, channel, restored=False):
     """Monkeypatch tg_cache.cached_get_chat_history / cached_get_chat to return the
     recorded objects for `channel`. The feed functions lazy-import tg_cache, so patching
-    the module resolves late and works (mirrors test_stage4_eventloop.py)."""
+    the module resolves late and works (mirrors test_stage4_eventloop.py).
+
+    restored=True serves restore_messages(snapshot_messages(...)) of the recorded objects
+    instead: what a history-cache hit hands to the feed. Returns the served message list."""
     messages, chatinfo = load_recorded(channel)
+    if restored:
+        from message_snapshot import restore_messages, snapshot_messages
+        messages = restore_messages(snapshot_messages(messages))
 
     async def fake_get_chat_history(client, channel_id, limit=20):
         return messages
@@ -112,6 +118,7 @@ def patch_tg_cache(monkeypatch, channel):
 
     monkeypatch.setattr("tg_cache.cached_get_chat_history", fake_get_chat_history, raising=False)
     monkeypatch.setattr("tg_cache.cached_get_chat", fake_get_chat, raising=False)
+    return messages
 
 
 def pin_environment(monkeypatch):

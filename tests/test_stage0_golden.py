@@ -32,18 +32,22 @@ def _read_golden(channel, kind):
         return f.read()
 
 
+# restored=True renders the snapshot -> restore of the recorded posts (what a history-cache
+# hit serves) against the same golden: live == golden and restored == golden mean restored == live.
+@pytest.mark.parametrize("restored", [False, True])
 @pytest.mark.parametrize("channel", gr.CORPUS_CHANNELS)
-def test_rss_golden(channel, golden_env):
-    gr.patch_tg_cache(golden_env, channel)
+def test_rss_golden(channel, restored, golden_env):
+    gr.patch_tg_cache(golden_env, channel, restored=restored)
     actual = gr.capture_rss(channel)
     expected = _read_golden(channel, "rss")
     assert gr.normalize_rss(actual) == gr.normalize_rss(expected), \
         f"RSS feed for {channel} diverged from the golden (render regression)"
 
 
+@pytest.mark.parametrize("restored", [False, True])
 @pytest.mark.parametrize("channel", gr.CORPUS_CHANNELS)
-def test_html_golden(channel, golden_env):
-    gr.patch_tg_cache(golden_env, channel)
+def test_html_golden(channel, restored, golden_env):
+    gr.patch_tg_cache(golden_env, channel, restored=restored)
     actual = gr.capture_html(channel)
     expected = _read_golden(channel, "html")
     assert gr.normalize_html(actual) == gr.normalize_html(expected), \

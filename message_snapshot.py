@@ -29,44 +29,20 @@ import rich_tree
 
 logger = logging.getLogger(__name__)
 
-# Bump when the snapshot schema changes in a backwards-incompatible way; a mismatch
-# makes _load_entry treat the cache file as a miss (old files are simply re-fetched).
-# v2: added the special-media info-block types (story, contact, location, venue, dice,
-# game, giveaway, giveaway_winners, checklist, paid_media) plus live_photo. A v1 file lacks
-# these keys, so a cached special-media / live-photo message would restore with an empty
-# block — invalidate v1 files.
-# v3: added the depth-1 reply_to_message snapshot (reply targets are now resolved at
-# fetch time and persisted). A v2 file lacks the key, so a cached reply message would
-# restore without its quote block — invalidate v2 files (one-time refetch).
-# v4: added document.file_name (needed by the new generic-file render block); a v3 file
-# lacks it, so a cached document post would render a nameless file block — invalidate
-# v3 files (one-time refetch).
-# v5: reply targets now store the FULL text/caption as {'plain','html'} (was: plain text
-# truncated to 300 chars) plus from_user, so the reply block renders the complete quote
-# with its formatting and the author name on a cache hit — invalidate v4 files (one-time
-# refetch).
-# v6: added the `rich_present` marker (Rich Messages, Kurigram 2.2.24, #83/#84). A v5 file
-# lacks it, so a cached rich post would restore with rich_message=None and lose its
-# placeholder title/flag/block — invalidate v5 files (one-off refetch per feed).
-# v7: replaced the `rich_present` boolean (v6) with the serialised `rich_tree` (the full
-# canonical rich-content tree, JSON-safe by construction — Rich Messages phase 2, #85). A
-# v6 file has only the boolean and would restore with an empty rich body — invalidate v6
-# files (one-off refetch per feed). INVARIANT: this bump is REQUIRED by rich_tree.SCHEMA_V
-# (any SCHEMA_V bump must bump SNAPSHOT_VERSION so a stored tree with an older `v` is
-# invalidated here rather than mis-rendered). The dependency is one-way: a SNAPSHOT_VERSION
-# bump on its own (like v8 below) does NOT require touching SCHEMA_V.
-# v8: added `chat.id` to the reply target plus `chat.type` (as its enum NAME) to the message's
-# own chat. Both feed _reply_is_near_own_channel: chat.id is the primary "same channel" signal
-# (a channel that signs posts with the authors' profiles fills from_user and leaves sender_chat
-# None, so without it a cache hit would decide "foreign chat" and print a full quote where a
-# live render truncates), and chat.type keeps the shortening to CHANNEL feeds instead of also
-# hitting replies to people in a group — invalidate v7 files (one-off refetch per feed).
-# v9: added the fields of the post-content coverage pass: poll.description_media (the poll's
-# photo/video was rendered live but lost on a cache hit), story.caption, audio.performer /
-# audio.title, sticker.is_animated, author_signature, invoice (title/description/price), the
-# selected reply fragment `quote` and `external_reply` (a reply to a chat the fetch could not
-# resolve). A v8 file lacks them all, so a cache hit would render those posts differently from
-# a live fetch — invalidate v8 files (one-off refetch per feed).
+# A version mismatch makes _load_entry treat the cache file as a miss, so every channel is
+# re-fetched from Telegram. Bump SNAPSHOT_VERSION only when a file written by the previous
+# code would restore WRONG: a stored value changes its shape or meaning in a way the restore
+# cannot read, or `rich_tree.SCHEMA_V` is bumped. Adding a field does NOT bump it: restore
+# reads every key with `.get`, an old file restores the new field as None and renders
+# without it until the history TTL (6.4–8 h) expires. (forward_origin restores by key
+# presence instead: a new key is absent on an old file, which the render's hasattr/getattr
+# reads already handle.) To change a stored value's shape,
+# prefer a new key next to the old one: old files and a rolled-back build both keep reading
+# the old key, and no bump is needed.
+# The channel-info cache (tg_cache.cached_get_chat) shares this version but restores with
+# SimpleNamespace(**data), not .get, and lives CHAT_CACHE_TTL_HOURS (9.6–12 h): a key added
+# there is ABSENT on an old file, so read it with getattr(..., None) or bump.
+# Version history: `git log -G 'SNAPSHOT_VERSION = ' -- message_snapshot.py`.
 SNAPSHOT_VERSION = 9
 
 
