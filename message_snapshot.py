@@ -10,7 +10,7 @@
 """JSON snapshot / restore for pyrogram Message objects (issue #23).
 
 The history cache no longer pickles live pyrogram objects. On write a plain JSON
-snapshot is extracted from a Message via an explicit allowlist (schema v1); on read
+snapshot is extracted from a Message via an explicit allowlist, the FIELDS table; on read
 a duck-typed CachedMessage is restored that is indistinguishable from a real Message
 to the render pipeline (post_parser.py / rss_generator.py are NOT changed).
 """
@@ -20,7 +20,7 @@ import json
 import logging
 from datetime import datetime
 from types import SimpleNamespace
-from typing import Any, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 from pyrogram.enums import MessageMediaType
 from pyrogram.types.messages_and_media.message import Str
@@ -102,6 +102,22 @@ def _snapshot_str(value: Any) -> Optional[dict]:
     return {"plain": plain, "html": str(html_value)}
 
 
+def _restore_str(d: Optional[Union[dict, str]]) -> Optional[CachedStr]:
+    if d is None:
+        return None
+    # Defensive: a pre-v5 payload (or a hand-built one) may carry a bare string here. It is
+    # escaped for the same live-vs-cache parity reason as in _snapshot_str.
+    if isinstance(d, str):
+        return CachedStr.build(d, html.escape(d))
+    plain = d.get("plain", "")
+    # Uniform policy with _snapshot_str and the bare-string branch above: with no stored html
+    # the plain text is escaped. A stored empty string is honoured, but None is not — a
+    # CachedStr whose .html is None would crash _get_post_text_with_urls (text.html.replace).
+    stored = d.get("html")
+    html_value = stored if stored is not None else html.escape(plain)
+    return CachedStr.build(plain, html_value)
+
+
 def _enum_name(value: Any) -> Any:
     """Return an enum member's ``.name`` (JSON-safe) or the value unchanged."""
     if value is None:
@@ -109,184 +125,208 @@ def _enum_name(value: Any) -> Any:
     return value.name if hasattr(value, "name") else value
 
 
-def _snapshot_obj(obj: Any, keys: List[str]) -> Optional[dict]:
-    """Snapshot the allowlisted ``keys`` off ``obj`` (getattr-only), or None if obj is None."""
-    if obj is None:
+def _restore_media(name: Optional[str]) -> Optional[MessageMediaType]:
+    if name is None:
         return None
-    return {k: getattr(obj, k, None) for k in keys}
+    try:
+        return MessageMediaType[name]
+    except KeyError:
+        # A media type unknown to this kurigram build: warn and drop to None so the 31
+        # post_parser sites that compare against / index by the enum keep working.
+        logger.warning(f"snapshot_unknown_media_type: {name}")
+        return None
 
 
-def _snapshot_chat(chat: Any) -> Optional[dict]:
-    if chat is None:
-        return None
-    usernames = getattr(chat, "usernames", None)
-    snap_usernames = None
-    if usernames:
-        snap_usernames = [
-            {"username": getattr(u, "username", None), "active": getattr(u, "active", None)}
-            for u in usernames
-        ]
+def _restore_datetime(value: Optional[str]) -> Optional[datetime]:
+    return datetime.fromisoformat(value) if value is not None else None
+
+
+# --------------------------------------------------------------------------- #
+# Field codecs. A table maps an attribute name to the codec of that field; snapshot_message
+# and CachedMessage both walk FIELDS, so every stored field is declared once.
+# --------------------------------------------------------------------------- #
+class _Codec:
+    """How one field is stored: ``dump(live value) -> JSON value`` and
+    ``load(JSON value) -> restored value``.
+
+    The live value is the owner's attribute named by the field (None if absent); a codec
+    with ``read`` takes it as ``read(owner)`` instead.
+    """
+
+    def __init__(self, dump: Callable[[Any], Any], load: Callable[[Any], Any], *,
+                 read: Optional[Callable[[Any], Any]] = None):
+        self.dump = dump
+        self.load = load
+        self.read = read
+
+
+def _same(value: Any) -> Any:
+    return value
+
+
+def _dump_fields(fields: Dict[str, _Codec], owner: Any) -> dict:
     return {
-        "id": getattr(chat, "id", None),
-        "username": getattr(chat, "username", None),
-        "title": getattr(chat, "title", None),
-        # ChatType enum -> its name, like `media`/`service` in snapshot_message: an enum is not
-        # JSON-serialisable. _reply_is_near_own_channel needs it to tell a channel feed (where a
-        # neighbouring post really is the entry above) from a group/discussion feed.
-        "type": _enum_name(getattr(chat, "type", None)),
-        "usernames": snap_usernames,
+        name: codec.dump(codec.read(owner) if codec.read is not None else getattr(owner, name, None))
+        for name, codec in fields.items()
     }
 
 
+def _load_fields(fields: Dict[str, _Codec], data: dict, target: Any) -> None:
+    for name, codec in fields.items():
+        setattr(target, name, codec.load(data.get(name)))
+
+
+# Stored and restored as is.
+VALUE = _Codec(_same, _same)
+# A text/caption: stored as {'plain', 'html'}, restored as a CachedStr.
+TEXT = _Codec(_snapshot_str, _restore_str)
+# A field no other kind describes: its own dump and load (and read).
+CUSTOM = _Codec
+
+
+def OBJ(fields: Dict[str, _Codec]) -> _Codec:
+    """A nested object described by its own table, stored as a dict of the allowlisted fields
+    (getattr(..., None), or the field codec's read), or None if the object is None.
+
+    Restored with the FULL key set (None-defaults). Live pyrogram objects always set every
+    attribute in __init__, and the pipeline reads them directly (e.g. rss_generator ~131
+    message.chat.username in an except; post_parser ~1087 u.username / u.active without
+    getattr). So restored objects must carry all keys. None restores as None (the attribute
+    was absent on the live object).
+    """
+    def dump(obj: Any) -> Optional[dict]:
+        return None if obj is None else _dump_fields(fields, obj)
+
+    def load(data: Optional[dict]) -> Optional[SimpleNamespace]:
+        if data is None:
+            return None
+        restored = SimpleNamespace()
+        _load_fields(fields, data, restored)
+        return restored
+
+    return _Codec(dump, load)
+
+
+def LIST(codec: _Codec) -> _Codec:
+    """A list of ``codec`` values. An absent or empty list is stored as None; None restores as None."""
+    return _Codec(lambda items: [codec.dump(item) for item in items] if items else None,
+                  lambda items: None if items is None else [codec.load(item) for item in items])
+
+
+# --------------------------------------------------------------------------- #
+# Shapes several fields share.
+# --------------------------------------------------------------------------- #
+_ENUM_NAME = CUSTOM(_enum_name, _same)
+_PHOTO = OBJ({"file_unique_id": VALUE})
+_MEDIA_FILE = OBJ({"file_unique_id": VALUE, "file_size": VALUE})
+_LOCATION = OBJ({"latitude": VALUE, "longitude": VALUE})
+_CHAT_REF = OBJ({"id": VALUE, "title": VALUE, "username": VALUE})
+_USER_REF = OBJ({"first_name": VALUE, "last_name": VALUE, "username": VALUE})
+
+
+# --------------------------------------------------------------------------- #
+# Irregular fields.
+# --------------------------------------------------------------------------- #
 # forward_origin is the ONE object whose key SET mirrors the live object: the
 # MessageOrigin* classes each carry a DIFFERENT set of attributes and
 # _format_forward_info branches by hasattr (Case 1-5). Presence of a key in the
 # snapshot must mirror presence of the attribute on the source object.
-_FORWARD_ORIGIN_KEYS = ["type", "chat", "sender_user_name", "sender_user", "chat_id", "title"]
+# A codec's read= is not supported here: both presence and value come from the key itself
+# (hasattr / getattr).
+_FORWARD_ORIGIN_FIELDS = {
+    "type": _ENUM_NAME,
+    "chat": _CHAT_REF,
+    "sender_user_name": VALUE,
+    "sender_user": _USER_REF,
+    "chat_id": VALUE,
+    "title": VALUE,
+}
 
 
 def _snapshot_forward_origin(fo: Any) -> Optional[dict]:
     if fo is None:
         return None
-    result: dict = {}
-    for key in _FORWARD_ORIGIN_KEYS:
-        if not hasattr(fo, key):
-            continue
-        value = getattr(fo, key)
-        if key == "type":
-            result[key] = _enum_name(value)
-        elif key == "chat":
-            result[key] = _snapshot_obj(value, ["id", "title", "username"])
-        elif key == "sender_user":
-            result[key] = _snapshot_obj(value, ["first_name", "last_name", "username"])
-        else:
-            result[key] = value
-    return result
+    return {key: codec.dump(getattr(fo, key))
+            for key, codec in _FORWARD_ORIGIN_FIELDS.items() if hasattr(fo, key)}
+
+
+def _restore_forward_origin(d: Optional[dict]) -> Optional[SimpleNamespace]:
+    """Restore forward_origin mirroring ONLY the recorded keys (presence-semantics)."""
+    if d is None:
+        return None
+    ns = SimpleNamespace()
+    for key, value in d.items():
+        setattr(ns, key, _FORWARD_ORIGIN_FIELDS.get(key, VALUE).load(value))
+    return ns
+
+
+# Custom-emoji reactions carry no unicode emoji: emoji is null and the
+# custom_emoji_id is stored as a STRING = str(document_id).
+def _reaction_emoji(reaction: Any) -> Any:
+    return None if getattr(reaction, "custom_emoji_id", None) is not None else getattr(reaction, "emoji", None)
+
+
+_REACTION = OBJ({
+    "emoji": CUSTOM(_same, _same, read=_reaction_emoji),
+    "custom_emoji_id": CUSTOM(lambda cid: str(cid) if cid is not None else None, _same),
+    "count": VALUE,
+    "is_paid": VALUE,
+})
 
 
 def _snapshot_reactions(reactions: Any) -> Optional[list]:
-    if reactions is None:
-        return None
     rlist = getattr(reactions, "reactions", None)
-    if rlist is None:
+    return None if rlist is None else [_REACTION.dump(r) for r in rlist]
+
+
+def _restore_reactions(items: Optional[list]) -> Optional[SimpleNamespace]:
+    if items is None:
         return None
-    out = []
-    for r in rlist:
-        cid = getattr(r, "custom_emoji_id", None)
-        out.append({
-            # Custom-emoji reactions carry no unicode emoji: emoji is null and the
-            # custom_emoji_id is stored as a STRING = str(document_id).
-            "emoji": None if cid is not None else getattr(r, "emoji", None),
-            "custom_emoji_id": str(cid) if cid is not None else None,
-            "count": getattr(r, "count", None),
-            "is_paid": getattr(r, "is_paid", None),
-        })
-    return out
+    # Mirror pyrogram: message.reactions is an object exposing a .reactions list.
+    return SimpleNamespace(reactions=[_REACTION.load(r) for r in items])
 
 
-# The description_media objects post_parser._poll_media_object may pick, in its order. Each
-# keeps file_unique_id (the render URL) and file_size (_save_media_file_ids' >100MB skip).
-_POLL_MEDIA_KEYS = ["photo", "video", "animation", "sticker"]
+_UNWRAPPED_TEXT = CUSTOM(_unwrap_text, _same)
+# options must be namespace objects with a .text string; a bare string would make
+# getattr(option, 'text', '') return '' and render empty options.
+_POLL_OPTIONS = LIST(OBJ({"text": _UNWRAPPED_TEXT}))
+_POLL = OBJ({
+    "question": _UNWRAPPED_TEXT,
+    "options": CUSTOM(_POLL_OPTIONS.dump, lambda items: _POLL_OPTIONS.load(items) or []),
+    # The description_media objects post_parser._poll_media_object may pick, in its order. Each
+    # keeps file_unique_id (the render URL) and file_size (_save_media_file_ids' >100MB skip).
+    "description_media": OBJ({"photo": _MEDIA_FILE, "video": _MEDIA_FILE, "animation": _MEDIA_FILE,
+                              "sticker": _MEDIA_FILE}),
+})
 
 
-def _snapshot_poll(poll: Any) -> Optional[dict]:
-    if poll is None:
+_STICKER = OBJ({"file_unique_id": VALUE, "emoji": VALUE, "is_video": VALUE, "is_animated": VALUE})
+
+
+def _snapshot_sticker(sticker: Any) -> Optional[dict]:
+    """STICKER: the selector reads the flags and only the truthiness of .thumbs (an animated
+    sticker with a thumbnail renders as that image). The thumbnail count is stored; the list
+    is restored as N placeholders, like paid_media's items."""
+    snap = _STICKER.dump(sticker)
+    if snap is not None:
+        snap["thumbs_count"] = len(getattr(sticker, "thumbs", None) or [])
+    return snap
+
+
+def _restore_sticker(d: Optional[dict]) -> Optional[SimpleNamespace]:
+    sticker = _STICKER.load(d)
+    if sticker is None:
         return None
-    options = getattr(poll, "options", None)
-    snap_options = None
-    if options:
-        snap_options = [{"text": _unwrap_text(getattr(o, "text", None))} for o in options]
-    description_media = getattr(poll, "description_media", None)
-    return {
-        "question": _unwrap_text(getattr(poll, "question", None)),
-        "options": snap_options,
-        "description_media": None if description_media is None else {
-            key: _snapshot_obj(getattr(description_media, key, None), ["file_unique_id", "file_size"])
-            for key in _POLL_MEDIA_KEYS
-        },
-    }
+    # thumbs is only tested for truthiness, so N placeholders reproduce it; None when there
+    # are none, as on a live sticker. A file written before thumbs_count restores as None.
+    count = d.get("thumbs_count") or 0
+    sticker.thumbs = [None] * count if count else None
+    return sticker
 
 
-def _snapshot_web_page(wp: Any) -> Optional[dict]:
-    if wp is None:
-        return None
-    return {
-        "type": getattr(wp, "type", None),
-        "url": getattr(wp, "url", None),
-        "display_url": getattr(wp, "display_url", None),
-        "site_name": getattr(wp, "site_name", None),
-        "title": getattr(wp, "title", None),
-        "description": getattr(wp, "description", None),
-        "has_large_media": getattr(wp, "has_large_media", None),
-        "photo": _snapshot_obj(getattr(wp, "photo", None), ["file_unique_id"]),
-    }
+_STORY_MEDIA = OBJ({"video": _MEDIA_FILE, "photo": _MEDIA_FILE})
 
 
-# Reply-target texts are stored IN FULL (and with their .html rendering) precisely BECAUSE the
-# renderer (_format_reply_info) is the one that may shorten a quote: keeping the whole text here
-# makes a cache hit render byte-identically to a live fetch and lets REPLY_QUOTE_TRUNCATE_* be
-# retuned without invalidating the cache. Truncating at snapshot time would do neither.
-
-
-def _snapshot_reply(reply: Any) -> Optional[dict]:
-    """DEPTH-1 snapshot of a resolved reply target (message.reply_to_message).
-
-    Stores ONLY the fields _format_reply_info (post_parser.py) reads: id, text,
-    caption, chat(id), sender_chat(id/title/username), from_user(id/first_name/last_name/username).
-    The reply's own nested reply_to_message is deliberately NOT snapshotted (no recursion).
-
-    `chat` carries the id alone: it exists solely so _reply_is_near_own_channel can tell "same
-    channel" from "another chat" on a cache hit. pyrogram parses `chat` on every Message
-    independently of sender_chat/from_user, which is why it works where sender_chat does not
-    (a channel signing posts with the authors' profiles has from_user set and sender_chat None).
-    """
-    if reply is None:
-        return None
-    return {
-        "id": getattr(reply, "id", None),
-        "text": _snapshot_str(getattr(reply, "text", None)),
-        "caption": _snapshot_str(getattr(reply, "caption", None)),
-        "chat": _snapshot_obj(getattr(reply, "chat", None), ["id"]),
-        "sender_chat": _snapshot_obj(getattr(reply, "sender_chat", None), ["id", "title", "username"]),
-        "from_user": _snapshot_obj(getattr(reply, "from_user", None), ["id", "first_name", "last_name", "username"]),
-    }
-
-
-def _snapshot_quote(quote: Any) -> Optional[dict]:
-    """message.quote (TextQuote): only its text, with the .html rendering of its entities."""
-    if quote is None:
-        return None
-    return {"text": _snapshot_str(getattr(quote, "text", None))}
-
-
-def _snapshot_external_reply(external_reply: Any) -> Optional[dict]:
-    """message.external_reply: what post_parser._format_external_reply_info reads — the target
-    chat + message id (the link) and the origin's author fields (the label)."""
-    if external_reply is None:
-        return None
-    origin = getattr(external_reply, "origin", None)
-    return {
-        "message_id": getattr(external_reply, "message_id", None),
-        "chat": _snapshot_obj(getattr(external_reply, "chat", None), ["id", "title", "username"]),
-        "origin": None if origin is None else {
-            "chat": _snapshot_obj(getattr(origin, "chat", None), ["id", "title", "username"]),
-            "sender_chat": _snapshot_obj(getattr(origin, "sender_chat", None), ["id", "title", "username"]),
-            "sender_user": _snapshot_obj(getattr(origin, "sender_user", None), ["first_name", "last_name", "username"]),
-            "sender_user_name": getattr(origin, "sender_user_name", None),
-        },
-    }
-
-
-# --------------------------------------------------------------------------- #
-# Special-media snapshots (issue #23 review fix).
-#
-# _format_special_media (post_parser.py) and find_file_id_in_message
-# (api_server.py) read a handful of type-specific attributes off the Message that
-# were NOT in schema v1. On a cache hit a restored Message carried media=<enum> but
-# message.<attr>=None, so the special info block silently vanished (render
-# divergence vs. a live Message). Each helper below snapshots EXACTLY the sub-fields
-# the renderer + find_file_id read for that type — nothing more, nothing less.
-# --------------------------------------------------------------------------- #
 def _snapshot_story(story: Any) -> Optional[dict]:
     """STORY: _story_media_object / find_file_id_in_message read story.video and
     story.photo, each by .file_unique_id (video wins over photo). The chosen object is
@@ -296,77 +336,55 @@ def _snapshot_story(story: Any) -> Optional[dict]:
     (a plain str in kurigram) is rendered by _format_special_media. Its markup comes
     separately in caption_entities, so the HTML they produce is stored next to it as
     caption_html (None without entities); "caption" stays a plain str."""
-    if story is None:
+    snap = _STORY_MEDIA.dump(story)
+    if snap is None:
         return None
     caption = getattr(story, "caption", None)
     entities = getattr(story, "caption_entities", None)
+    snap["caption"] = str(caption) if isinstance(caption, str) else None
     # Same fallback as the renderer: an entity unparse cannot handle (a name mention without
     # user data) yields None, so the caption is stored without markup instead of failing the
     # snapshot of the whole channel.
-    caption_html = getattr(Str(caption).init(list(entities)), "html", None) if entities and isinstance(caption, str) else None
-    return {
-        "video": _snapshot_obj(getattr(story, "video", None), ["file_unique_id", "file_size"]),
-        "photo": _snapshot_obj(getattr(story, "photo", None), ["file_unique_id", "file_size"]),
-        "caption": str(caption) if isinstance(caption, str) else None,
-        "caption_html": caption_html,
-    }
+    snap["caption_html"] = getattr(Str(caption).init(list(entities)), "html", None) if entities and isinstance(caption, str) else None
+    return snap
 
 
-def _snapshot_venue(venue: Any) -> Optional[dict]:
-    """VENUE: reads .title, .address and its nested .location (.latitude/.longitude via
-    _format_osm_link)."""
-    if venue is None:
+def _restore_story(d: Optional[dict]) -> Optional[SimpleNamespace]:
+    story = _STORY_MEDIA.load(d)
+    if story is None:
         return None
-    return {
-        "title": getattr(venue, "title", None),
-        "address": getattr(venue, "address", None),
-        "location": _snapshot_obj(getattr(venue, "location", None), ["latitude", "longitude"]),
-    }
+    caption = d.get("caption")
+    caption_html = d.get("caption_html")
+    # The stored markup rides on the caption as a CachedStr; without it the caption stays
+    # a bare str, which the renderer escapes like a live caption without entities.
+    story.caption = CachedStr.build(caption, caption_html) if caption_html is not None else caption
+    # The markup, if any, is already in caption.html. The renderer still reads
+    # caption_entities for a bare-string caption, and a restored object carries every
+    # attribute the renderer reads.
+    story.caption_entities = None
+    return story
 
 
-def _snapshot_giveaway(giveaway: Any) -> Optional[dict]:
-    """GIVEAWAY: reads .quantity, .months, .stars, .until_date (a datetime rendered via
-    strftime) and .description. until_date is stored as isoformat and restored to a
-    datetime so the strftime branch reproduces byte-for-byte."""
-    if giveaway is None:
-        return None
-    until = getattr(giveaway, "until_date", None)
-    return {
-        "quantity": getattr(giveaway, "quantity", None),
-        "months": getattr(giveaway, "months", None),
-        "stars": getattr(giveaway, "stars", None),
-        # Only a real datetime renders (renderer gates on hasattr(.,'strftime')); anything
-        # else is dropped to None so the same "no until date" branch is taken on restore.
-        "until_date": until.isoformat() if hasattr(until, "isoformat") else None,
-        "description": getattr(giveaway, "description", None),
-    }
-
-
-def _snapshot_checklist(checklist: Any) -> Optional[dict]:
-    """CHECKLIST: reads .title (used ONLY when it isinstance str) and .tasks; each task
-    reads .text and the truthiness of .completed_by / .completion_date (→ ☑/☐).
-
-    title is stored only when it is a str (matching the renderer's isinstance gate, which
-    otherwise renders an empty title). completed_by / completion_date are stored as bools
-    (the renderer only tests their truthiness) so a live User/datetime stays JSON-safe."""
-    if checklist is None:
-        return None
-    title = getattr(checklist, "title", None)
-    snap_tasks = []
-    for task in (getattr(checklist, "tasks", None) or []):
-        text = getattr(task, "text", "")
-        # Mirror the renderer: a non-str text is str()-ified. Storing the resolved string
-        # keeps the restored value isinstance-str, reproducing the same rendered bytes.
-        text_str = text if isinstance(text, str) else str(text)
-        snap_tasks.append({
-            "text": text_str,
-            "completed_by": bool(getattr(task, "completed_by", None)),
-            "completion_date": bool(getattr(task, "completion_date", None)),
-        })
-    return {
-        "title": title if isinstance(title, str) else None,
-        "tasks": snap_tasks,
-    }
+# CHECKLIST: reads .title (used ONLY when it isinstance str) and .tasks; each task
+# reads .text and the truthiness of .completed_by / .completion_date (→ ☑/☐).
+#
+# title is stored only when it is a str (matching the renderer's isinstance gate, which
+# otherwise renders an empty title). completed_by / completion_date are stored as bools
+# (the renderer only tests their truthiness) so a live User/datetime stays JSON-safe.
+_AS_BOOL = CUSTOM(bool, _same)
+_CHECKLIST_TASKS = LIST(OBJ({
+    # Mirror the renderer: a non-str text is str()-ified. Storing the resolved string
+    # keeps the restored value isinstance-str, reproducing the same rendered bytes.
+    "text": CUSTOM(lambda text: text if isinstance(text, str) else str(text), _same,
+                   read=lambda task: getattr(task, "text", "")),
+    "completed_by": _AS_BOOL,
+    "completion_date": _AS_BOOL,
+}))
+_CHECKLIST = OBJ({
+    "title": CUSTOM(lambda title: title if isinstance(title, str) else None, _same),
+    "tasks": CUSTOM(lambda tasks: _CHECKLIST_TASKS.dump(tasks) or [],
+                    lambda items: _CHECKLIST_TASKS.load(items) or []),
+})
 
 
 def _snapshot_paid_media(paid_media: Any) -> Optional[dict]:
@@ -385,301 +403,6 @@ def _snapshot_paid_media(paid_media: Any) -> Optional[dict]:
     }
 
 
-def _snapshot_sticker(sticker: Any) -> Optional[dict]:
-    """STICKER: the selector reads the flags and only the truthiness of .thumbs (an animated
-    sticker with a thumbnail renders as that image). The thumbnail count is stored; the list
-    is restored as N placeholders, like paid_media's items."""
-    snap = _snapshot_obj(sticker, ["file_unique_id", "emoji", "is_video", "is_animated"])
-    if snap is not None:
-        snap["thumbs_count"] = len(getattr(sticker, "thumbs", None) or [])
-    return snap
-
-
-def snapshot_message(message: Any) -> dict:
-    """Extract a JSON-serializable snapshot (schema v1) from a pyrogram Message.
-
-    Every field is read via getattr(..., None). See the module docstring / issue #23 for
-    the field contract.
-    """
-    date = getattr(message, "date", None)
-    media = getattr(message, "media", None)
-    service = getattr(message, "service", None)
-    return {
-        "id": getattr(message, "id", None),
-        # isoformat()/fromisoformat() preserve naive/aware exactly as pyrogram stores it.
-        "date": date.isoformat() if date is not None else None,
-        "text": _snapshot_str(getattr(message, "text", None)),
-        "caption": _snapshot_str(getattr(message, "caption", None)),
-        "media": media.name if media is not None else None,
-        "service": service.name if service is not None else None,
-        "media_group_id": getattr(message, "media_group_id", None),
-        "views": getattr(message, "views", None),
-        "show_caption_above_media": getattr(message, "show_caption_above_media", None),
-        "reply_to_message_id": getattr(message, "reply_to_message_id", None),
-        "reply_to_message": _snapshot_reply(getattr(message, "reply_to_message", None)),
-        "quote": _snapshot_quote(getattr(message, "quote", None)),
-        "external_reply": _snapshot_external_reply(getattr(message, "external_reply", None)),
-        "author_signature": getattr(message, "author_signature", None),
-        "empty": getattr(message, "empty", None),
-        "chat": _snapshot_chat(getattr(message, "chat", None)),
-        "sender_chat": _snapshot_obj(getattr(message, "sender_chat", None), ["id", "title", "username"]),
-        "from_user": _snapshot_obj(getattr(message, "from_user", None), ["first_name", "last_name", "username"]),
-        "forward_origin": _snapshot_forward_origin(getattr(message, "forward_origin", None)),
-        "reactions": _snapshot_reactions(getattr(message, "reactions", None)),
-        "poll": _snapshot_poll(getattr(message, "poll", None)),
-        "web_page": _snapshot_web_page(getattr(message, "web_page", None)),
-        "photo": _snapshot_obj(getattr(message, "photo", None), ["file_unique_id"]),
-        "video": _snapshot_obj(getattr(message, "video", None), ["file_unique_id", "file_size"]),
-        # file_size is snapshotted for every type whose selected object flows into
-        # _save_media_file_ids' >100MB skip (MEDIA_SOURCES: document/audio/animation/
-        # video_note select this exact object). Without it a restored >100MB media
-        # would have file_size=None and be wrongly collected on a cache hit (F1).
-        "document": _snapshot_obj(getattr(message, "document", None), ["file_unique_id", "mime_type", "file_size", "file_name"]),
-        "audio": _snapshot_obj(getattr(message, "audio", None), ["file_unique_id", "mime_type", "file_size", "performer", "title"]),
-        "voice": _snapshot_obj(getattr(message, "voice", None), ["file_unique_id", "mime_type"]),
-        "video_note": _snapshot_obj(getattr(message, "video_note", None), ["file_unique_id", "file_size"]),
-        "animation": _snapshot_obj(getattr(message, "animation", None), ["file_unique_id", "file_size"]),
-        "sticker": _snapshot_sticker(getattr(message, "sticker", None)),
-        # LIVE_PHOTO (Kurigram 2.2.23) renders as a video element via the video_loop_400
-        # kind. MEDIA_SOURCES/_get_file_unique_id/_save_media_file_ids read live_photo's
-        # file_unique_id + file_size (the >100MB skip); find_file_id also reads file_unique_id.
-        # Mirror the `video` allowlist so a cached live-photo message keeps its media block.
-        "live_photo": _snapshot_obj(getattr(message, "live_photo", None), ["file_unique_id", "file_size"]),
-        # Special-media info-block types (issue #23 review fix). Each reads a fixed set of
-        # sub-fields in _format_special_media / find_file_id_in_message; snapshot exactly those.
-        "story": _snapshot_story(getattr(message, "story", None)),
-        "contact": _snapshot_obj(getattr(message, "contact", None), ["first_name", "last_name", "phone_number"]),
-        "location": _snapshot_obj(getattr(message, "location", None), ["latitude", "longitude"]),
-        "venue": _snapshot_venue(getattr(message, "venue", None)),
-        "dice": _snapshot_obj(getattr(message, "dice", None), ["emoji", "value"]),
-        "game": _snapshot_obj(getattr(message, "game", None), ["title"]),
-        "invoice": _snapshot_obj(getattr(message, "invoice", None), ["title", "description", "currency", "total_amount"]),
-        "giveaway": _snapshot_giveaway(getattr(message, "giveaway", None)),
-        "giveaway_winners": _snapshot_obj(
-            getattr(message, "giveaway_winners", None), ["winner_count", "quantity", "prize_description"]),
-        "checklist": _snapshot_checklist(getattr(message, "checklist", None)),
-        "paid_media": _snapshot_paid_media(getattr(message, "paid_media", None)),
-        # Rich Messages (Kurigram 2.2.24, #85). Store the canonical tree VERBATIM (JSON-safe
-        # by construction). Obtained through rich_tree.tree_of — NOT from_pyrogram directly —
-        # so the snapshot and the live render share ONE memoised tree per object (parity).
-        # None for a non-rich post; restored into CachedMessage.rich_tree.
-        "rich_tree": rich_tree.tree_of(message),
-    }
-
-
-def _ns(d: Optional[dict], keys: List[str]) -> Optional[SimpleNamespace]:
-    """Restore a nested object with the FULL schema key set (None-defaults).
-
-    Live pyrogram objects always set every attribute in __init__, and the pipeline reads
-    them directly (e.g. rss_generator ~131 message.chat.username in an except; post_parser
-    ~1087 u.username / u.active without getattr). So restored objects must carry all keys.
-    Returns None if ``d`` is None (the attribute was absent on the live object).
-    """
-    if d is None:
-        return None
-    ns = SimpleNamespace()
-    for k in keys:
-        setattr(ns, k, d.get(k))
-    return ns
-
-
-def _restore_chat(d: Optional[dict]) -> Optional[SimpleNamespace]:
-    if d is None:
-        return None
-    usernames = d.get("usernames")
-    restored_usernames = None
-    if usernames is not None:
-        restored_usernames = [_ns(u, ["username", "active"]) for u in usernames]
-    return SimpleNamespace(
-        id=d.get("id"),
-        username=d.get("username"),
-        title=d.get("title"),
-        # Restored as the NAME string, not the enum: readers must compare by name
-        # (_reply_is_near_own_channel does), never by enum identity.
-        type=d.get("type"),
-        usernames=restored_usernames,
-    )
-
-
-def _restore_forward_origin(d: Optional[dict]) -> Optional[SimpleNamespace]:
-    """Restore forward_origin mirroring ONLY the recorded keys (presence-semantics)."""
-    if d is None:
-        return None
-    ns = SimpleNamespace()
-    for key, value in d.items():
-        if key == "chat":
-            setattr(ns, key, _ns(value, ["id", "title", "username"]))
-        elif key == "sender_user":
-            setattr(ns, key, _ns(value, ["first_name", "last_name", "username"]))
-        else:
-            setattr(ns, key, value)
-    return ns
-
-
-def _restore_reactions(items: Optional[list]) -> Optional[SimpleNamespace]:
-    if items is None:
-        return None
-    reactions = [_ns(r, ["emoji", "custom_emoji_id", "count", "is_paid"]) for r in items]
-    # Mirror pyrogram: message.reactions is an object exposing a .reactions list.
-    return SimpleNamespace(reactions=reactions)
-
-
-def _restore_poll(d: Optional[dict]) -> Optional[SimpleNamespace]:
-    if d is None:
-        return None
-    options = d.get("options") or []
-    # options must be namespace objects with a .text string; a bare string would make
-    # getattr(option, 'text', '') return '' and render empty options.
-    restored_options = [SimpleNamespace(text=o.get("text")) for o in options]
-    description_media = d.get("description_media")
-    restored_media = None if description_media is None else SimpleNamespace(**{
-        key: _ns(description_media.get(key), ["file_unique_id", "file_size"]) for key in _POLL_MEDIA_KEYS
-    })
-    return SimpleNamespace(question=d.get("question"), options=restored_options,
-                           description_media=restored_media)
-
-
-def _restore_web_page(d: Optional[dict]) -> Optional[SimpleNamespace]:
-    if d is None:
-        return None
-    return SimpleNamespace(
-        type=d.get("type"),
-        url=d.get("url"),
-        display_url=d.get("display_url"),
-        site_name=d.get("site_name"),
-        title=d.get("title"),
-        description=d.get("description"),
-        has_large_media=d.get("has_large_media"),
-        photo=_ns(d.get("photo"), ["file_unique_id"]),
-    )
-
-
-def _restore_reply(d: Optional[dict]) -> Optional[SimpleNamespace]:
-    """Restore a depth-1 reply target exposing exactly what _format_reply_info reads."""
-    if d is None:
-        return None
-    return SimpleNamespace(
-        id=d.get("id"),
-        text=_restore_str(d.get("text")),
-        caption=_restore_str(d.get("caption")),
-        chat=_ns(d.get("chat"), ["id"]),
-        sender_chat=_ns(d.get("sender_chat"), ["id", "title", "username"]),
-        from_user=_ns(d.get("from_user"), ["id", "first_name", "last_name", "username"]),
-    )
-
-
-def _restore_quote(d: Optional[dict]) -> Optional[SimpleNamespace]:
-    if d is None:
-        return None
-    return SimpleNamespace(text=_restore_str(d.get("text")))
-
-
-def _restore_external_reply(d: Optional[dict]) -> Optional[SimpleNamespace]:
-    if d is None:
-        return None
-    origin = d.get("origin")
-    return SimpleNamespace(
-        message_id=d.get("message_id"),
-        chat=_ns(d.get("chat"), ["id", "title", "username"]),
-        origin=None if origin is None else SimpleNamespace(
-            chat=_ns(origin.get("chat"), ["id", "title", "username"]),
-            sender_chat=_ns(origin.get("sender_chat"), ["id", "title", "username"]),
-            sender_user=_ns(origin.get("sender_user"), ["first_name", "last_name", "username"]),
-            sender_user_name=origin.get("sender_user_name"),
-        ),
-    )
-
-
-def _restore_media(name: Optional[str]) -> Optional[MessageMediaType]:
-    if name is None:
-        return None
-    try:
-        return MessageMediaType[name]
-    except KeyError:
-        # A media type unknown to this kurigram build: warn and drop to None so the 31
-        # post_parser sites that compare against / index by the enum keep working.
-        logger.warning(f"snapshot_unknown_media_type: {name}")
-        return None
-
-
-def _restore_str(d: Optional[Union[dict, str]]) -> Optional[CachedStr]:
-    if d is None:
-        return None
-    # Defensive: a pre-v5 payload (or a hand-built one) may carry a bare string here. It is
-    # escaped for the same live-vs-cache parity reason as in _snapshot_str.
-    if isinstance(d, str):
-        return CachedStr.build(d, html.escape(d))
-    plain = d.get("plain", "")
-    # Uniform policy with _snapshot_str and the bare-string branch above: with no stored html
-    # the plain text is escaped. A stored empty string is honoured, but None is not — a
-    # CachedStr whose .html is None would crash _get_post_text_with_urls (text.html.replace).
-    stored = d.get("html")
-    html_value = stored if stored is not None else html.escape(plain)
-    return CachedStr.build(plain, html_value)
-
-
-# --------------------------------------------------------------------------- #
-# Special-media restores (issue #23 review fix). Mirror the snapshot helpers above:
-# rebuild each object so the exact attributes _format_special_media /
-# find_file_id_in_message read exist, restoring the special block on a cache hit.
-# --------------------------------------------------------------------------- #
-def _restore_story(d: Optional[dict]) -> Optional[SimpleNamespace]:
-    if d is None:
-        return None
-    caption = d.get("caption")
-    caption_html = d.get("caption_html")
-    return SimpleNamespace(
-        video=_ns(d.get("video"), ["file_unique_id", "file_size"]),
-        photo=_ns(d.get("photo"), ["file_unique_id", "file_size"]),
-        # The stored markup rides on the caption as a CachedStr; without it the caption stays
-        # a bare str, which the renderer escapes like a live caption without entities.
-        caption=CachedStr.build(caption, caption_html) if caption_html is not None else caption,
-        # The markup, if any, is already in caption.html. The renderer still reads
-        # caption_entities for a bare-string caption, and a restored object carries every
-        # attribute the renderer reads.
-        caption_entities=None,
-    )
-
-
-def _restore_venue(d: Optional[dict]) -> Optional[SimpleNamespace]:
-    if d is None:
-        return None
-    return SimpleNamespace(
-        title=d.get("title"),
-        address=d.get("address"),
-        location=_ns(d.get("location"), ["latitude", "longitude"]),
-    )
-
-
-def _restore_giveaway(d: Optional[dict]) -> Optional[SimpleNamespace]:
-    if d is None:
-        return None
-    until = d.get("until_date")
-    return SimpleNamespace(
-        quantity=d.get("quantity"),
-        months=d.get("months"),
-        stars=d.get("stars"),
-        # Restore a datetime so hasattr(until_date, 'strftime') holds exactly as on a live
-        # object; None (no/invalid date) restores as None and the strftime branch is skipped.
-        until_date=datetime.fromisoformat(until) if until is not None else None,
-        description=d.get("description"),
-    )
-
-
-def _restore_checklist(d: Optional[dict]) -> Optional[SimpleNamespace]:
-    if d is None:
-        return None
-    restored_tasks = [
-        SimpleNamespace(
-            text=t.get("text"),
-            completed_by=t.get("completed_by"),
-            completion_date=t.get("completion_date"),
-        )
-        for t in (d.get("tasks") or [])
-    ]
-    return SimpleNamespace(title=d.get("title"), tasks=restored_tasks)
-
-
 def _restore_paid_media(d: Optional[dict]) -> Optional[SimpleNamespace]:
     if d is None:
         return None
@@ -688,15 +411,147 @@ def _restore_paid_media(d: Optional[dict]) -> Optional[SimpleNamespace]:
     return SimpleNamespace(stars_amount=d.get("stars_amount"), media=[None] * count)
 
 
-def _restore_sticker(d: Optional[dict]) -> Optional[SimpleNamespace]:
-    sticker = _ns(d, ["file_unique_id", "emoji", "is_video", "is_animated"])
-    if sticker is None:
-        return None
-    # thumbs is only tested for truthiness, so N placeholders reproduce it; None when there
-    # are none, as on a live sticker. A file written before thumbs_count restores as None.
-    count = d.get("thumbs_count") or 0
-    sticker.thumbs = [None] * count if count else None
-    return sticker
+# --------------------------------------------------------------------------- #
+# The stored fields of a Message: snapshot_message stores one key per entry and
+# CachedMessage restores one attribute per entry.
+# --------------------------------------------------------------------------- #
+FIELDS: Dict[str, _Codec] = {
+    "id": VALUE,
+    # isoformat()/fromisoformat() preserve naive/aware exactly as pyrogram stores it.
+    "date": CUSTOM(lambda date: date.isoformat() if date is not None else None, _restore_datetime),
+    "text": TEXT,
+    "caption": TEXT,
+    "media": CUSTOM(_enum_name, _restore_media),
+    # service restored as a plain string; all consumers use truthiness and
+    # `'X' in str(service)`.
+    "service": _ENUM_NAME,
+    "media_group_id": VALUE,
+    "views": VALUE,
+    "show_caption_above_media": VALUE,
+    "reply_to_message_id": VALUE,
+    # DEPTH-1 snapshot of a resolved reply target: ONLY the fields _format_reply_info
+    # (post_parser.py) reads. The reply's own nested reply_to_message is deliberately NOT
+    # snapshotted (no recursion).
+    #
+    # Reply-target texts are stored IN FULL (and with their .html rendering) precisely BECAUSE the
+    # renderer (_format_reply_info) is the one that may shorten a quote: keeping the whole text here
+    # makes a cache hit render byte-identically to a live fetch and lets REPLY_QUOTE_TRUNCATE_* be
+    # retuned without invalidating the cache. Truncating at snapshot time would do neither.
+    "reply_to_message": OBJ({
+        "id": VALUE,
+        "text": TEXT,
+        "caption": TEXT,
+        # `chat` carries the id alone: it exists solely so _reply_is_near_own_channel can tell
+        # "same channel" from "another chat" on a cache hit. pyrogram parses `chat` on every
+        # Message independently of sender_chat/from_user, which is why it works where
+        # sender_chat does not (a channel signing posts with the authors' profiles has
+        # from_user set and sender_chat None).
+        "chat": OBJ({"id": VALUE}),
+        "sender_chat": _CHAT_REF,
+        "from_user": OBJ({"id": VALUE, "first_name": VALUE, "last_name": VALUE, "username": VALUE}),
+    }),
+    # message.quote (TextQuote): only its text, with the .html rendering of its entities.
+    "quote": OBJ({"text": TEXT}),
+    # message.external_reply: what post_parser._format_external_reply_info reads — the target
+    # chat + message id (the link) and the origin's author fields (the label).
+    "external_reply": OBJ({
+        "message_id": VALUE,
+        "chat": _CHAT_REF,
+        "origin": OBJ({"chat": _CHAT_REF, "sender_chat": _CHAT_REF, "sender_user": _USER_REF,
+                       "sender_user_name": VALUE}),
+    }),
+    "author_signature": VALUE,
+    "empty": CUSTOM(_same, bool),
+    "chat": OBJ({
+        "id": VALUE,
+        "username": VALUE,
+        "title": VALUE,
+        # ChatType enum -> its name, like `media`/`service`: an enum is not JSON-serialisable.
+        # _reply_is_near_own_channel needs it to tell a channel feed (where a neighbouring
+        # post really is the entry above) from a group/discussion feed. Restored as the NAME
+        # string, not the enum: readers must compare by name (_reply_is_near_own_channel
+        # does), never by enum identity.
+        "type": _ENUM_NAME,
+        "usernames": LIST(OBJ({"username": VALUE, "active": VALUE})),
+    }),
+    "sender_chat": _CHAT_REF,
+    "from_user": _USER_REF,
+    "forward_origin": CUSTOM(_snapshot_forward_origin, _restore_forward_origin),
+    "reactions": CUSTOM(_snapshot_reactions, _restore_reactions),
+    "poll": _POLL,
+    "web_page": OBJ({
+        "type": VALUE,
+        "url": VALUE,
+        "display_url": VALUE,
+        "site_name": VALUE,
+        "title": VALUE,
+        "description": VALUE,
+        "has_large_media": VALUE,
+        "photo": _PHOTO,
+    }),
+    "photo": _PHOTO,
+    "video": _MEDIA_FILE,
+    # file_size is snapshotted for every type whose selected object flows into
+    # _save_media_file_ids' >100MB skip (MEDIA_SOURCES: document/audio/animation/
+    # video_note select this exact object). Without it a restored >100MB media
+    # would have file_size=None and be wrongly collected on a cache hit (F1).
+    "document": OBJ({"file_unique_id": VALUE, "mime_type": VALUE, "file_size": VALUE, "file_name": VALUE}),
+    "audio": OBJ({"file_unique_id": VALUE, "mime_type": VALUE, "file_size": VALUE, "performer": VALUE,
+                  "title": VALUE}),
+    "voice": OBJ({"file_unique_id": VALUE, "mime_type": VALUE}),
+    "video_note": _MEDIA_FILE,
+    "animation": _MEDIA_FILE,
+    "sticker": CUSTOM(_snapshot_sticker, _restore_sticker),
+    # LIVE_PHOTO (Kurigram 2.2.23) renders as a video element via the video_loop_400
+    # kind. MEDIA_SOURCES/_get_file_unique_id/_save_media_file_ids read live_photo's
+    # file_unique_id + file_size (the >100MB skip); find_file_id also reads file_unique_id.
+    # Mirror the `video` allowlist so a cached live-photo message keeps its media block.
+    "live_photo": _MEDIA_FILE,
+    # Special-media info-block types (issue #23 review fix). _format_special_media
+    # (post_parser.py) and find_file_id_in_message (api_server.py) read a fixed set of
+    # type-specific sub-fields; each entry stores EXACTLY those — nothing more, nothing
+    # less — so the type's info block renders on a cache hit exactly as for a live Message.
+    "story": CUSTOM(_snapshot_story, _restore_story),
+    "contact": OBJ({"first_name": VALUE, "last_name": VALUE, "phone_number": VALUE}),
+    "location": _LOCATION,
+    # VENUE: the nested .location is read via _format_osm_link.
+    "venue": OBJ({"title": VALUE, "address": VALUE, "location": _LOCATION}),
+    "dice": OBJ({"emoji": VALUE, "value": VALUE}),
+    "game": OBJ({"title": VALUE}),
+    "invoice": OBJ({"title": VALUE, "description": VALUE, "currency": VALUE, "total_amount": VALUE}),
+    "giveaway": OBJ({
+        "quantity": VALUE,
+        "months": VALUE,
+        "stars": VALUE,
+        # until_date (a datetime rendered via strftime) is stored as isoformat and restored to
+        # a datetime, so hasattr(until_date, 'strftime') holds exactly as on a live object and
+        # the strftime branch reproduces byte-for-byte. Only a real datetime renders (renderer
+        # gates on hasattr(.,'strftime')); anything else is dropped to None so the same
+        # "no until date" branch is taken on restore.
+        "until_date": CUSTOM(lambda until: until.isoformat() if hasattr(until, "isoformat") else None,
+                             _restore_datetime),
+        "description": VALUE,
+    }),
+    "giveaway_winners": OBJ({"winner_count": VALUE, "quantity": VALUE, "prize_description": VALUE}),
+    "checklist": _CHECKLIST,
+    "paid_media": CUSTOM(_snapshot_paid_media, _restore_paid_media),
+    # Rich Messages (Kurigram 2.2.24, #85). Store the canonical tree VERBATIM (JSON-safe
+    # by construction). Obtained through rich_tree.tree_of — NOT from_pyrogram directly —
+    # so the snapshot and the live render share ONE memoised tree per object (parity).
+    # None for a non-rich post. Restored directly: all consumers reach it through
+    # rich_tree.tree_of, which reads this `rich_tree` attribute on a CachedMessage. This
+    # makes the cache-hit render byte-identical to the live one.
+    "rich_tree": CUSTOM(_same, _same, read=lambda message: rich_tree.tree_of(message)),
+}
+
+
+def snapshot_message(message: Any) -> dict:
+    """Extract a JSON-serializable snapshot from a pyrogram Message: one key per FIELDS entry.
+
+    Every field is read via getattr(..., None) unless its codec has a read. See the module
+    docstring / issue #23 for the field contract.
+    """
+    return _dump_fields(FIELDS, message)
 
 
 class CachedMessage:
@@ -710,61 +565,8 @@ class CachedMessage:
 
     def __init__(self, data: dict):
         self._snapshot = data
-        self.id = data.get("id")
-        date = data.get("date")
-        self.date = datetime.fromisoformat(date) if date is not None else None
-        self.text = _restore_str(data.get("text"))
-        self.caption = _restore_str(data.get("caption"))
-        self.media = _restore_media(data.get("media"))
-        # service restored as a plain string; all consumers use truthiness and
-        # `'X' in str(service)`.
-        self.service = data.get("service")
-        self.media_group_id = data.get("media_group_id")
-        self.views = data.get("views")
-        self.show_caption_above_media = data.get("show_caption_above_media")
-        self.reply_to_message_id = data.get("reply_to_message_id")
-        self.reply_to_message = _restore_reply(data.get("reply_to_message"))
-        self.quote = _restore_quote(data.get("quote"))
-        self.external_reply = _restore_external_reply(data.get("external_reply"))
-        self.author_signature = data.get("author_signature")
-        self.empty = bool(data.get("empty"))
-        self.chat = _restore_chat(data.get("chat"))
-        self.sender_chat = _ns(data.get("sender_chat"), ["id", "title", "username"])
-        self.from_user = _ns(data.get("from_user"), ["first_name", "last_name", "username"])
-        self.forward_origin = _restore_forward_origin(data.get("forward_origin"))
-        self.reactions = _restore_reactions(data.get("reactions"))
-        self.poll = _restore_poll(data.get("poll"))
-        self.web_page = _restore_web_page(data.get("web_page"))
-        self.photo = _ns(data.get("photo"), ["file_unique_id"])
-        self.video = _ns(data.get("video"), ["file_unique_id", "file_size"])
-        self.document = _ns(data.get("document"), ["file_unique_id", "mime_type", "file_size", "file_name"])
-        self.audio = _ns(data.get("audio"), ["file_unique_id", "mime_type", "file_size", "performer", "title"])
-        self.voice = _ns(data.get("voice"), ["file_unique_id", "mime_type"])
-        self.video_note = _ns(data.get("video_note"), ["file_unique_id", "file_size"])
-        self.animation = _ns(data.get("animation"), ["file_unique_id", "file_size"])
-        self.sticker = _restore_sticker(data.get("sticker"))
-        # LIVE_PHOTO: restored like `video` so the video_loop_400 media block renders on a
-        # cache hit (file_unique_id → URL; file_size → the >100MB collection skip).
-        self.live_photo = _ns(data.get("live_photo"), ["file_unique_id", "file_size"])
-        # Special-media info-block types (issue #23 review fix): restored so the type's
-        # info block renders on a cache hit exactly as for a live Message.
-        self.story = _restore_story(data.get("story"))
-        self.contact = _ns(data.get("contact"), ["first_name", "last_name", "phone_number"])
-        self.location = _ns(data.get("location"), ["latitude", "longitude"])
-        self.venue = _restore_venue(data.get("venue"))
-        self.dice = _ns(data.get("dice"), ["emoji", "value"])
-        self.game = _ns(data.get("game"), ["title"])
-        self.invoice = _ns(data.get("invoice"), ["title", "description", "currency", "total_amount"])
-        self.giveaway = _restore_giveaway(data.get("giveaway"))
-        self.giveaway_winners = _ns(
-            data.get("giveaway_winners"), ["winner_count", "quantity", "prize_description"])
-        self.checklist = _restore_checklist(data.get("checklist"))
-        self.paid_media = _restore_paid_media(data.get("paid_media"))
-        # Rich Messages (Kurigram 2.2.24, #85): restore the canonical tree directly. All
-        # consumers reach it through rich_tree.tree_of, which reads this `rich_tree`
-        # attribute on a CachedMessage (and rich_message stays None — the live objects are
-        # not snapshotted). This makes the cache-hit render byte-identical to the live one.
-        self.rich_tree = data.get("rich_tree")
+        _load_fields(FIELDS, data, self)
+        # rich_message stays None — the live objects are not snapshotted; the tree is in rich_tree.
         self.rich_message = None
 
     def __str__(self) -> str:
