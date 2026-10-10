@@ -6,7 +6,7 @@
 # pylint: disable=missing-function-docstring, missing-class-docstring, too-many-return-statements
 # pylint: disable=too-many-branches, too-many-statements
 
-"""Normalised rich-content tree (phase 2 of the Rich Messages epic, #83 / #85).
+"""Normalised rich-content tree.
 
 The rich tree is the SINGLE canonical representation of a rich message inside the
 bridge: a plain, JSON-serialisable dict that every consumer (HTML render, title,
@@ -47,7 +47,7 @@ logger = logging.getLogger(__name__)
 # Bumping this REQUIRES bumping message_snapshot.SNAPSHOT_VERSION (see module docstring).
 SCHEMA_V = 1
 
-# Recursion / size guards (policy constants, #83 R7).
+# Recursion / size guards (policy constants).
 MAX_RICH_DEPTH = 20      # real nesting is <=5; deeper -> placeholder node (bomb guard)
 MAX_RICH_NODES = 2000    # table cells COUNT as nodes; over the limit -> truncation
 MAX_SPAN = 20            # colspan/rowspan clamp — a layout bomb never reaches the reader
@@ -111,7 +111,7 @@ def tree_of(message: Any) -> Optional[dict]:
 
 
 def invalidate_tree_memo(message: Any) -> None:
-    """Clear the memoised rich tree on a message (phase 3, #86).
+    """Clear the memoised rich tree on a message.
 
     ``enrich_rich_parts`` / the /media re-fetch cascade replace ``message.rich_message`` with
     the fully-fetched object. Without clearing the memo, :func:`tree_of` would keep returning
@@ -349,7 +349,7 @@ def _adapt_table(obj, depth, budget):
     for raw_row in (getattr(obj, "cells", None) or []):
         # Charge one slot PER ROW (not only per cell): sparse rows (cells=[[],[],…]) would
         # otherwise run the inner loop zero times, never call budget.take(), and let millions
-        # of empty rows through with truncated=False (DoS cap, review F1).
+        # of empty rows through with truncated=False (DoS cap).
         if budget.take():
             break
         row = []
@@ -494,7 +494,7 @@ def _adapt_rt(rt: Any, budget: _Budget, depth: int = 0) -> Any:
         # node slot. Without this a single paragraph/heading/cell carrying a huge RichText
         # list would balloon the tree past MAX_RICH_NODES with truncated=False, and that
         # bloated tree would persist in the snapshot and be re-rendered/re-sanitised on
-        # every feed request (DoS cap, review F1). Once the budget is exhausted the list is
+        # every feed request (DoS cap). Once the budget is exhausted the list is
         # cut and from_pyrogram appends the single top-level truncated marker.
         out = []
         for x in rt:

@@ -5,7 +5,7 @@
 # pylint: disable=broad-exception-caught, logging-fstring-interpolation, line-too-long
 # pylint: disable=missing-function-docstring
 
-"""A single wrapper over Kurigram's ``RichMessage._parse`` (Rich Messages epic, #83 / #84).
+"""A single wrapper over Kurigram's ``RichMessage._parse``.
 
 Kurigram 2.2.26 (MTProto layer 229) parses ``message.rich_message``, and ``Message._parse``
 calls ``RichMessage._parse`` UNCONDITIONALLY for every message
@@ -13,11 +13,11 @@ calls ``RichMessage._parse`` UNCONDITIONALLY for every message
 that one call. It does two jobs:
 
   * recovers the ``part`` flag — LOAD-BEARING, not defensive. The high-level type drops it
-    (rich_message.py keeps only ``blocks``/``is_rtl``), and phase 3 (#86) needs it to know
-    which posts to re-fetch in full. Nothing else can recover it after the parse.
+    (rich_message.py keeps only ``blocks``/``is_rtl``), and the GetRichMessage re-fetch needs
+    it to know which posts to fetch in full. Nothing else can recover it after the parse.
   * fails soft on the whole message. Anything raising under the parse (a block, the vector
     comprehensions, ``.rtl``) would otherwise take down the entire get_messages/history
-    call. Instead we emit a ``part=True`` sentinel with empty blocks, which the phase-3
+    call. Instead we emit a ``part=True`` sentinel with empty blocks, which the
     re-fetch recognises and REPAIRS.
 
 HISTORY — removed in the 2.2.24 -> 2.2.26 bump: a second wrapper over ``RichBlock._parse``
@@ -48,7 +48,7 @@ logger = logging.getLogger(__name__)
 # /health so a silent rich-parse regression becomes observable to the operator.
 _counter_lock = threading.Lock()
 _rich_msg_parse_failed = 0    # whole-message parse failures (ERROR)
-_rich_part_seen = 0           # partial rich messages observed (WARNING) — phase-3 signal
+_rich_part_seen = 0           # partial rich messages observed (WARNING)
 
 
 def _incr_msg_parse_failed() -> None:
@@ -73,7 +73,7 @@ def get_rich_part_seen_count() -> int:
     """Partial (``part=True``) rich messages seen since process start.
 
     Lives in production PERMANENTLY (not just on the test stand): a growing value is the
-    signal to (re)open phase 3 — enrichment of partial rich content via GetRichMessage.
+    signal to revisit the enrichment of partial rich content via GetRichMessage.
     """
     with _counter_lock:
         return _rich_part_seen
@@ -120,7 +120,7 @@ async def _wrapped_richmessage_parse(client, rich_message=None, users=None, chat
     except Exception as e:
         # Failure outside any single block (vector comprehension / .rtl). Emit a sentinel
         # so the whole get_messages/history call survives. part=True + empty blocks lets
-        # phase 3 recognise and REPAIR such posts via a re-fetch.
+        # the GetRichMessage re-fetch recognise and REPAIR such posts.
         _incr_msg_parse_failed()
         part = bool(getattr(rich_message, "part", None))
         # Best-effort attribution: _parse's signature carries no channel/id; surface what
@@ -178,7 +178,7 @@ def _describe_chats(chats: Any) -> str:
 def has_parse_failures(rich_message) -> bool:
     """True if this rich message is the wrapper's failed-parse sentinel.
 
-    Used by the phase 2/3 download path to decide 503-transient vs 404-permanent for
+    Used by the /media download path to decide 503-transient vs 404-permanent for
     missing rich media. Only the message contour sets ``parse_failed``, and only on the
     top-level object, so this is a flat check — the recursive block walk went with the
     block contour (see the module docstring).
