@@ -8,7 +8,8 @@ COPY requirements.txt .
 # container start (`setpriv: not found`) if a future base bump drops it.
 RUN apt-get update && apt-get install -y libmagic-dev git curl util-linux --no-install-recommends && apt-get clean && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir -r requirements.txt
-COPY *.py .
+# The trailing slash is required by the classic (non-BuildKit) builder for a multi-file COPY.
+COPY *.py ./
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
