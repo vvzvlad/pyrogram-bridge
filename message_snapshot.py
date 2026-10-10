@@ -23,6 +23,7 @@ from types import SimpleNamespace
 from typing import Any, List, Optional, Union
 
 from pyrogram.enums import MessageMediaType
+from pyrogram.types.messages_and_media.message import Str
 
 import rich_tree
 
@@ -316,14 +317,22 @@ def _snapshot_story(story: Any) -> Optional[dict]:
     also the one _save_media_file_ids reads .file_size off for the >100MB skip, so
     file_size is snapshotted too (else a >100MB story media would be collected on a
     cache hit — F1). The render URL is still built from file_unique_id. The caption
-    (a plain str in kurigram) is rendered by _format_special_media."""
+    (a plain str in kurigram) is rendered by _format_special_media. Its markup comes
+    separately in caption_entities, so the HTML they produce is stored next to it as
+    caption_html (None without entities); "caption" stays a plain str."""
     if story is None:
         return None
     caption = getattr(story, "caption", None)
+    entities = getattr(story, "caption_entities", None)
+    # Same fallback as the renderer: an entity unparse cannot handle (a name mention without
+    # user data) yields None, so the caption is stored without markup instead of failing the
+    # snapshot of the whole channel.
+    caption_html = getattr(Str(caption).init(list(entities)), "html", None) if entities and isinstance(caption, str) else None
     return {
         "video": _snapshot_obj(getattr(story, "video", None), ["file_unique_id", "file_size"]),
         "photo": _snapshot_obj(getattr(story, "photo", None), ["file_unique_id", "file_size"]),
         "caption": str(caption) if isinstance(caption, str) else None,
+        "caption_html": caption_html,
     }
 
 
@@ -631,10 +640,18 @@ def _restore_str(d: Optional[Union[dict, str]]) -> Optional[CachedStr]:
 def _restore_story(d: Optional[dict]) -> Optional[SimpleNamespace]:
     if d is None:
         return None
+    caption = d.get("caption")
+    caption_html = d.get("caption_html")
     return SimpleNamespace(
         video=_ns(d.get("video"), ["file_unique_id", "file_size"]),
         photo=_ns(d.get("photo"), ["file_unique_id", "file_size"]),
-        caption=d.get("caption"),
+        # The stored markup rides on the caption as a CachedStr; without it the caption stays
+        # a bare str, which the renderer escapes like a live caption without entities.
+        caption=CachedStr.build(caption, caption_html) if caption_html is not None else caption,
+        # The markup, if any, is already in caption.html. The renderer still reads
+        # caption_entities for a bare-string caption, and a restored object carries every
+        # attribute the renderer reads.
+        caption_entities=None,
     )
 
 

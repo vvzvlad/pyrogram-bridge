@@ -19,6 +19,7 @@ from datetime import datetime
 from types import SimpleNamespace
 from typing import Union, Dict, Any, List, Optional, Callable, Tuple
 from pyrogram.types import Message
+from pyrogram.types.messages_and_media.message import Str
 from pyrogram.enums import MessageMediaType
 from sanitizer import sanitize_html
 import rich_tree
@@ -2009,6 +2010,30 @@ class PostParser:
         osm_url = f"https://www.openstreetmap.org/?mlat={latitude}&mlon={longitude}#map=16/{latitude}/{longitude}"
         return f'<a href="{osm_url}">{latitude:.5f}, {longitude:.5f}</a>'
 
+    def _story_caption_html(self, story) -> Optional[str]:
+        """A story's caption as HTML with its markup, rendered like post text, or None.
+
+        Kurigram gives the caption as a plain str and its markup separately in
+        caption_entities. A caption restored from the cache is a CachedStr whose .html holds
+        that markup already. A caption without entities is escaped (Kurigram's unparse
+        would return it unescaped). The result is stripped, not the source text: entity
+        offsets count from the original caption.
+        """
+        caption = getattr(story, 'caption', None)
+        if not isinstance(caption, str) or not caption.strip():
+            return None
+        caption_html = getattr(caption, 'html', None)
+        if caption_html is None:
+            entities = getattr(story, 'caption_entities', None)
+            # Kurigram parses story entities without user data, so a name mention
+            # (TEXT_MENTION) has user=None and unparse raises AttributeError; getattr turns
+            # that into None and the caption falls back to escaped text, as without entities.
+            caption_html = getattr(Str(caption).init(list(entities)), 'html', None) if entities else None
+            if caption_html is None:
+                caption_html = html.escape(caption)
+        caption_html = caption_html.strip().replace('\n', '<br>')
+        return self._add_hyperlinks_to_raw_urls(caption_html)
+
     def _format_special_media(self, message: Message) -> Union[str, None]:
         """Render an info block for media types that carry no downloadable file.
 
@@ -2017,7 +2042,8 @@ class PostParser:
         caption / "unavailable" line (its media itself is rendered elsewhere). Each block is
         gated on message.media so unrelated messages never render these. All new
         Message attributes are accessed via getattr only (older objects/mocks do not
-        define them) and ALL user-controlled strings go through html.escape.
+        define them) and ALL user-controlled strings go through html.escape, except a story
+        caption with entities, which is rendered from them like post text.
         """
         try:
             media = getattr(message, 'media', None)
@@ -2102,13 +2128,12 @@ class PostParser:
             elif media == MessageMediaType.STORY:
                 # The story's photo/video is rendered by _generate_html_media; this block adds
                 # its caption and, when no media is left (deleted / inaccessible story), says so
-                # instead of leaving the post empty. The caption is a plain str in kurigram.
+                # instead of leaving the post empty.
                 lines = []
                 if _story_media_object(message)[0] is None:
                     lines.append("📖 Story unavailable — it was deleted or is not accessible")
-                caption = getattr(getattr(message, 'story', None), 'caption', None)
-                if isinstance(caption, str) and caption.strip():
-                    lines.append(html.escape(caption.strip()).replace('\n', '<br>'))
+                if caption_html := self._story_caption_html(getattr(message, 'story', None)):
+                    lines.append(caption_html)
                 if lines:
                     block = '<br>'.join(lines)
 

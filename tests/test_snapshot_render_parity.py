@@ -30,7 +30,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from pyrogram.enums import MessageMediaType
+from pyrogram.enums import MessageEntityType, MessageMediaType
+from pyrogram.types import MessageEntity
 
 from message_snapshot import snapshot_messages, restore_messages
 from tests import golden_replay as gr
@@ -282,6 +283,16 @@ def build_corpus():
         media=MessageMediaType.STORY,
         story=SimpleNamespace(video=None, photo=None, caption=None, deleted=True),
     )]))
+
+    # Story caption with a link: its markup comes from caption_entities, not from the caption.
+    corpus.append(("story_caption_link", [make_msg(
+        media=MessageMediaType.STORY,
+        story=SimpleNamespace(video=None, photo=SimpleNamespace(file_unique_id="sto_l", file_size=10),
+                              caption="see docs",
+                              caption_entities=[MessageEntity(type=MessageEntityType.TEXT_LINK, offset=4,
+                                                              length=4, url="https://example.com/docs")]),
+    )]))
+
     corpus.append(("audio_tags", [make_msg(media=MessageMediaType.AUDIO,
                                            audio=SimpleNamespace(file_unique_id="au_t", mime_type="audio/mpeg",
                                                                  file_size=100, performer="Justice", title="D.A.N.C.E."))]))
@@ -402,6 +413,7 @@ def test_parity_cases_render_the_new_content(monkeypatch):
         "poll_description_video": "/pdm_v/",
         "story_caption": "Story &lt;caption&gt;<br>second line",
         "story_deleted": "Story unavailable",
+        "story_caption_link": 'see <a href="https://example.com/docs">docs</a>',
         "audio_tags": "🎵 Justice — D.A.N.C.E.<br>",
         "sticker_animated": "Sticker 🐱",
         "invoice": "Price: 12.50 USD",
