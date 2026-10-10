@@ -8,7 +8,7 @@ A post answering the post right above it used to reprint that post in full, so t
 RSS entries read as half the same text (t.me/univelis/1472 quoted whole inside /1473), while
 Telegram itself shows only a short preview there. The quote is therefore cut — but ONLY when
 all three conditions hold: the feed is a CHANNEL, the target belongs to that same channel, and
-it is at most `reply_quote_truncate_distance` ids above the post. Every other reply (a group or
+it is at most `REPLY_QUOTE_TRUNCATE_DISTANCE` ids above the post. Every other reply (a group or
 discussion feed, a foreign channel, a user's message, an older post) keeps the full quote,
 because there the quoted text is the only place the reader can see what is being answered.
 
@@ -132,7 +132,7 @@ def test_target_without_sender_chat_and_without_from_user_is_own_channel():
 # Everything else keeps the full quote.
 # --------------------------------------------------------------------------- #
 def test_distance_beyond_the_threshold_keeps_the_full_quote():
-    # 1473 - 1470 = 3 > reply_quote_truncate_distance (2): an older post is not something the
+    # 1473 - 1470 = 3 > REPLY_QUOTE_TRUNCATE_DISTANCE (2): an older post is not something the
     # reader has just seen, so the answer must still show what it answers.
     out = _parser()._format_reply_info(_message(_own_channel_reply(msg_id=1470)))
 
@@ -436,7 +436,7 @@ def test_zero_chars_disables_truncation(monkeypatch):
 
 
 def test_zero_distance_disables_truncation(monkeypatch):
-    monkeypatch.setitem(post_parser.Config, 'reply_quote_truncate_distance', 0)
+    monkeypatch.setattr(post_parser, 'REPLY_QUOTE_TRUNCATE_DISTANCE', 0)
     out = _parser()._format_reply_info(_message(_own_channel_reply()))
 
     assert "…" not in out
@@ -444,7 +444,7 @@ def test_zero_distance_disables_truncation(monkeypatch):
 
 
 def test_wider_distance_setting_is_honoured(monkeypatch):
-    monkeypatch.setitem(post_parser.Config, 'reply_quote_truncate_distance', 5)
+    monkeypatch.setattr(post_parser, 'REPLY_QUOTE_TRUNCATE_DISTANCE', 5)
     out = _parser()._format_reply_info(_message(_own_channel_reply(msg_id=1470)))
 
     assert "…" in out

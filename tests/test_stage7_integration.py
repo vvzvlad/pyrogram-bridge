@@ -154,7 +154,7 @@ class _FakeTelegramClient:
 
 
 async def test_ping_prompt_and_rpc_free_while_slow_op_pending(monkeypatch):
-    threshold = api_server.Config["tg_ping_unhealthy_after"]
+    threshold = api_server.PING_UNHEALTHY_AFTER_S
     fake = _FakeTelegramClient(age=threshold - 10, is_connected=True)
     monkeypatch.setattr(api_server, "client", fake)
 
@@ -184,7 +184,7 @@ async def test_ping_prompt_and_rpc_free_while_slow_op_pending(monkeypatch):
 
 
 async def test_ping_reports_degraded_promptly_while_slow_op_pending(monkeypatch):
-    threshold = api_server.Config["tg_ping_unhealthy_after"]
+    threshold = api_server.PING_UNHEALTHY_AFTER_S
     fake = _FakeTelegramClient(age=threshold + 100, is_connected=True)  # stale probe
     monkeypatch.setattr(api_server, "client", fake)
 

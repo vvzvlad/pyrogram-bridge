@@ -19,6 +19,7 @@ import logging
 import pytest
 
 import api_server
+import telegram_client
 from telegram_client import TelegramClient
 
 
@@ -72,7 +73,7 @@ def test_backoff_failure_counter_increments():
 async def test_timeout_streak_triggers_single_restart(monkeypatch):
     c = TelegramClient()
     reasons = _patch_exit_process(monkeypatch)
-    threshold = c.media_timeout_restart_threshold
+    threshold = telegram_client.MEDIA_TIMEOUT_EXIT_THRESHOLD
 
     # One short of the threshold: no exit yet.
     for _ in range(threshold - 1):
@@ -104,7 +105,7 @@ async def test_no_exit_while_shutting_down(monkeypatch):
     reasons = _patch_exit_process(monkeypatch)
     c._shutting_down = True  # an intentional shutdown is underway
 
-    for _ in range(c.media_timeout_restart_threshold):
+    for _ in range(telegram_client.MEDIA_TIMEOUT_EXIT_THRESHOLD):
         c.note_download_timeout()
 
     # Streak reached the threshold but the process does not exit during a shutdown.
@@ -235,7 +236,7 @@ def test_backoff_capped_at_max():
 async def test_watchdog_exits_after_n_failed_probes(monkeypatch):
     c = TelegramClient()
     reasons = _patch_exit_process(monkeypatch)
-    c.watchdog_interval = 0
+    monkeypatch.setattr(telegram_client, "WATCHDOG_INTERVAL_S", 0)
     probes = []
 
     async def failing_get_me():
@@ -249,15 +250,15 @@ async def test_watchdog_exits_after_n_failed_probes(monkeypatch):
         await asyncio.wait_for(c._watchdog_loop(), timeout=5)
 
     # The N-th consecutive failed probe exits the process, not an earlier one.
-    assert len(probes) == c.watchdog_failures
-    assert reasons == [f"watchdog: {c.watchdog_failures} consecutive failed probes"]
+    assert len(probes) == telegram_client.WATCHDOG_FAILURES
+    assert reasons == [f"watchdog: {telegram_client.WATCHDOG_FAILURES} consecutive failed probes"]
 
 
 @pytest.mark.asyncio
 async def test_watchdog_loop_crash_exits(monkeypatch):
     c = TelegramClient()
     reasons = _patch_exit_process(monkeypatch)
-    c.watchdog_interval = 0
+    monkeypatch.setattr(telegram_client, "WATCHDOG_INTERVAL_S", 0)
 
     class _BrokenClient:
         """A failed probe whose diagnostics raise: an error outside the per-probe handling."""
@@ -281,7 +282,7 @@ async def test_watchdog_loop_crash_exits(monkeypatch):
 async def test_watchdog_saves_session_and_save_error_is_not_a_probe_failure(monkeypatch):
     c = TelegramClient()
     reasons = _patch_exit_process(monkeypatch)
-    c.watchdog_interval = 0
+    monkeypatch.setattr(telegram_client, "WATCHDOG_INTERVAL_S", 0)
     saves = []
     probes = []
 
@@ -291,7 +292,7 @@ async def test_watchdog_saves_session_and_save_error_is_not_a_probe_failure(monk
 
     async def failing_save():
         saves.append(True)
-        if len(saves) > c.watchdog_failures:
+        if len(saves) > telegram_client.WATCHDOG_FAILURES:
             c._shutting_down = True  # ends the loop after one more probe than the exit threshold
         raise OSError("disk full")
 
@@ -301,7 +302,7 @@ async def test_watchdog_saves_session_and_save_error_is_not_a_probe_failure(monk
     await asyncio.wait_for(c._watchdog_loop(), timeout=5)
 
     # Every successful probe saved the session, and a failed save never counted as a failed probe.
-    assert len(saves) == len(probes) == c.watchdog_failures + 1
+    assert len(saves) == len(probes) == telegram_client.WATCHDOG_FAILURES + 1
     assert c._wd_probe_fail_count == 0
     assert reasons == []
 

@@ -31,6 +31,23 @@ kurigram_compat.install()
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
+WATCHDOG_INTERVAL_S = 60
+WATCHDOG_PROBE_TIMEOUT_S = 10
+WATCHDOG_FAILURES = 3
+WATCHDOG_HEARTBEAT_EVERY = 30
+# Max concurrent Telegram file transmissions (Pyrogram get_file/save_file
+# semaphores). Kurigram's default is 1, which lets a single hung download block
+# ALL media downloads process-wide; 3 aligns with HTTP_DOWNLOAD_SEMAPHORE. This is
+# only a blast-radius limiter — the real cure for a zombie media connection is the
+# download-timeout-triggered restart below.
+MAX_CONCURRENT_TRANSMISSIONS = 3
+# After this many CONSECUTIVE media-download timeouts, exit the process so the
+# container restart rebuilds the (zombie) media-DC connection. Any successful download
+# resets the streak, so this only fires on a genuine death loop, not on the odd
+# slow large-video timeout. The watchdog cannot catch this — it probes the main DC.
+MEDIA_TIMEOUT_EXIT_THRESHOLD = 5
+SESSION_PATH = "data"
+
 # --------------------------------------------------------------------------- #
 # Rich Messages phase 3 (#83 / #86): part=True full-content re-fetch.
 # --------------------------------------------------------------------------- #
@@ -165,9 +182,9 @@ class TelegramClient:
             name="pyro_bridge",
             api_id=settings["tg_api_id"],
             api_hash=settings["tg_api_hash"],
-            workdir=settings["session_path"],
+            workdir=SESSION_PATH,
             proxy=settings["proxy"],  # MTProto proxy config, None if not set
-            max_concurrent_transmissions=settings["tg_max_concurrent_transmissions"],
+            max_concurrent_transmissions=MAX_CONCURRENT_TRANSMISSIONS,
         )
         self._shutting_down = False  # Guard to prevent re-triggering restart during shutdown
         # Consecutive media-download timeouts. A zombie media-DC connection makes every
@@ -176,13 +193,8 @@ class TelegramClient:
         # rebuilds the connection. Any successful download resets it (see note_download_ok /
         # note_download_timeout).
         self._download_timeout_streak = 0
-        self.media_timeout_restart_threshold = settings["media_timeout_restart_threshold"]
         self._watchdog_task = None
         self.watchdog_enabled = settings["tg_watchdog_enabled"]
-        self.watchdog_interval = settings["tg_watchdog_interval"]
-        self.watchdog_timeout = settings["tg_watchdog_timeout"]
-        self.watchdog_failures = settings["tg_watchdog_failures"]
-        self.watchdog_heartbeat_every = settings["tg_watchdog_heartbeat_every"]
         # Watchdog diagnostics counters (cumulative for the process lifetime)
         self._wd_probe_count = 0          # successful liveness probes
         self._wd_probe_fail_count = 0     # failed liveness probes
@@ -191,10 +203,10 @@ class TelegramClient:
 
     def _ensure_session_directory(self):
         try:
-            os.makedirs(settings["session_path"], exist_ok=True)
-            logger.debug(f'Session directory created/verified: {settings["session_path"]}')
+            os.makedirs(SESSION_PATH, exist_ok=True)
+            logger.debug(f'Session directory created/verified: {SESSION_PATH}')
         except Exception as e:
-            logger.error(f'Failed to create session directory {settings["session_path"]}: {str(e)}')
+            logger.error(f'Failed to create session directory {SESSION_PATH}: {str(e)}')
             raise
 
     def _setup_connection_handlers(self):
@@ -238,17 +250,17 @@ class TelegramClient:
         """
         consecutive_failures = 0
         logger.info(
-            f"watchdog: started (interval={self.watchdog_interval}s, timeout={self.watchdog_timeout}s, "
-            f"failures={self.watchdog_failures}, heartbeat_every={self.watchdog_heartbeat_every} probes)"
+            f"watchdog: started (interval={WATCHDOG_INTERVAL_S}s, timeout={WATCHDOG_PROBE_TIMEOUT_S}s, "
+            f"failures={WATCHDOG_FAILURES}, heartbeat_every={WATCHDOG_HEARTBEAT_EVERY} probes)"
         )
         try:
             while True:
-                await asyncio.sleep(self.watchdog_interval)
+                await asyncio.sleep(WATCHDOG_INTERVAL_S)
                 if self._shutting_down:
                     break
                 probe_started = time.monotonic()
                 try:
-                    me = await asyncio.wait_for(self.client.get_me(), timeout=self.watchdog_timeout)
+                    me = await asyncio.wait_for(self.client.get_me(), timeout=WATCHDOG_PROBE_TIMEOUT_S)
                     latency_ms = (time.monotonic() - probe_started) * 1000
                     self._wd_probe_count += 1
                     self._wd_last_ok_monotonic = time.monotonic()
@@ -262,7 +274,7 @@ class TelegramClient:
                         logger.debug(f"watchdog: probe ok (latency={latency_ms:.0f}ms, probe #{self._wd_probe_count})")
                     # Periodic proof-of-life heartbeat at INFO, so the ABSENCE of heartbeats in the
                     # logs is itself a signal that the watchdog died.
-                    if self.watchdog_heartbeat_every > 0 and self._wd_probe_count % self.watchdog_heartbeat_every == 0:
+                    if WATCHDOG_HEARTBEAT_EVERY > 0 and self._wd_probe_count % WATCHDOG_HEARTBEAT_EVERY == 0:
                         logger.info(
                             f"watchdog: heartbeat — probes={self._wd_probe_count}, "
                             f"probe_failures={self._wd_probe_fail_count}, "
@@ -287,13 +299,13 @@ class TelegramClient:
                     else:
                         last_ok = "never"
                     logger.warning(
-                        f"watchdog: liveness probe FAILED ({consecutive_failures}/{self.watchdog_failures}) "
+                        f"watchdog: liveness probe FAILED ({consecutive_failures}/{WATCHDOG_FAILURES}) "
                         f"after {latency_ms:.0f}ms: {type(e).__name__}: {e} "
                         f"(is_connected={self.client.is_connected}, last_ok={last_ok}, "
                         f"total_failures={self._wd_probe_fail_count})"
                     )
-                    if consecutive_failures >= self.watchdog_failures:
-                        self._exit_process(f"watchdog: {self.watchdog_failures} consecutive failed probes")
+                    if consecutive_failures >= WATCHDOG_FAILURES:
+                        self._exit_process(f"watchdog: {WATCHDOG_FAILURES} consecutive failed probes")
         except asyncio.CancelledError:
             logger.info(
                 f"watchdog: stopped (probes={self._wd_probe_count}, probe_failures={self._wd_probe_fail_count})"
@@ -354,15 +366,15 @@ class TelegramClient:
         """
         self._download_timeout_streak += 1
         logger.warning(
-            f"media_download_timeout: streak {self._download_timeout_streak}/{self.media_timeout_restart_threshold}"
+            f"media_download_timeout: streak {self._download_timeout_streak}/{MEDIA_TIMEOUT_EXIT_THRESHOLD}"
         )
-        if self._download_timeout_streak < self.media_timeout_restart_threshold:
+        if self._download_timeout_streak < MEDIA_TIMEOUT_EXIT_THRESHOLD:
             return
         self._download_timeout_streak = 0
         if self._shutting_down:
             return
         self._exit_process(
-            f"media download: {self.media_timeout_restart_threshold} consecutive timeouts "
+            f"media download: {MEDIA_TIMEOUT_EXIT_THRESHOLD} consecutive timeouts "
             f"(the main-DC watchdog cannot see this)"
         )
 

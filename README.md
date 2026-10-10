@@ -294,7 +294,8 @@ from localhost, every request would look local — put the proxy's address in
 ## Configuration
 
 Everything is configured with environment variables. Only `TG_API_ID` and `TG_API_HASH` are
-required; the bridge does not start without them.
+required; the bridge does not start without them. An invalid value of any variable stops the
+start too; the log shows the variable's name and the value.
 
 ### Basics
 
@@ -305,12 +306,9 @@ required; the bridge does not start without them.
 | `PYROGRAM_BRIDGE_URL` | — | Public base URL of the bridge, e.g. `https://pgbridge.example.com`. Media links in feeds are built from it; without it they are relative (`/media/…`), and pictures load only if the reader resolves them against the bridge's address. |
 | `TOKEN` | — | Access token, see [Access token](#access-token). |
 | `API_PORT` | `8000` | HTTP port inside the container. |
-| `API_HOST` | `0.0.0.0` | Address to listen on. |
 | `TRUSTED_PROXIES` | — | Comma-separated addresses of reverse proxies whose `X-Real-IP` / `X-Forwarded-For` are trusted. |
 | `TZ` | `UTC` | Time zone of the dates shown in posts. |
 | `LOG_LEVEL` | `INFO` | Log level. |
-| `DEBUG` | `false` | Print the raw Telegram message to stdout on every single-post request. |
-| `SESSION_PATH` | `data` | Directory of the Telegram session file, relative to `/app`. |
 
 ### Feed content
 
@@ -319,8 +317,7 @@ required; the bridge does not start without them.
 | `TIME_BASED_MERGE` | `false` | Merge posts published a few seconds apart, see [Merging posts](#merging-posts). |
 | `SHOW_POST_FLAGS` | `false` | Show each post's flags at the end of the entry. |
 | `SHOW_BRIDGE_LINK` | `false` | Add an "Open in Bridge" link to each post (the post page with `debug=true`). The link contains `TOKEN`, so everyone who reads the feed sees the token. |
-| `REPLY_QUOTE_TRUNCATE_CHARS` | `200` | When a post replies to a neighbouring post of the same channel, keep only this many visible characters of the quote — otherwise the reader shows post A in full and then post B with all of A quoted inside it. `0` keeps quotes in full. Replies to other channels, to users or to older posts are never shortened. |
-| `REPLY_QUOTE_TRUNCATE_DISTANCE` | `2` | How far apart (in message ids) the reply and its target may be for the quote to be shortened; 2 covers "a reply to the post right above", even after an album. `0` disables shortening. Both values apply at render time, no cache clearing needed. |
+| `REPLY_QUOTE_TRUNCATE_CHARS` | `200` | When a post replies to a neighbouring post of the same channel, keep only this many visible characters of the quote — otherwise the reader shows post A in full and then post B with all of A quoted inside it. `0` keeps quotes in full. Replies to other channels, to users or to older posts are never shortened. Applies at render time, no cache clearing needed. |
 
 ### Media links
 
@@ -355,25 +352,6 @@ without a policy the first exit does.
 | Variable | Default | Description |
 | --- | --- | --- |
 | `TG_WATCHDOG_ENABLED` | `true` | Turn the watchdog on or off. With it off, a hang of the main Telegram session is not detected at all, and the session file is not saved periodically: after an exit on a streak of media-download timeouts the bridge has to look up again every channel it learned since its start. |
-| `TG_WATCHDOG_INTERVAL` | `60` | Seconds between checks. |
-| `TG_WATCHDOG_TIMEOUT` | `10` | Timeout of one check, seconds. |
-| `TG_WATCHDOG_FAILURES` | `3` | Consecutive failed checks before a restart. |
-| `TG_WATCHDOG_HEARTBEAT_EVERY` | `30` | Log an INFO heartbeat every N successful checks. |
-| `TG_PING_UNHEALTHY_AFTER` | `250` | `/ping` reports unhealthy when the last successful check is older than this many seconds. The default is derived from the three values above: interval × (failures + 1) + timeout. |
-
-### Media downloads and cache
-
-| Variable | Default | Description |
-| --- | --- | --- |
-| `MEDIA_DOWNLOAD_TIMEOUT_MIN` | `120` | Download timeout for regular files, and the floor for large ones, seconds. |
-| `MEDIA_DOWNLOAD_TIMEOUT_MAX` | `1800` | Download timeout cap for the largest videos, seconds. |
-| `MEDIA_DOWNLOAD_MIN_SPEED` | `262144` | Assumed minimum download speed, bytes/s; a large file's timeout ≈ size / this speed, clamped to the two values above. |
-| `TG_MAX_CONCURRENT_TRANSMISSIONS` | `3` | Simultaneous file downloads from Telegram. |
-| `MEDIA_TIMEOUT_RESTART_THRESHOLD` | `5` | Consecutive download timeouts after which the bridge exits and Docker restarts the container (the watchdog cannot see a dead media connection). |
-| `MEDIA_BACKOFF_MAX_S` | `21600` | Upper bound of the growing pause before re-trying a file that keeps failing to download, seconds. |
-| `MEDIA_FAILURES_DROP_ROW` | `15` | Failed downloads in a row after which a file is forgotten. |
-| `CACHE_SWEEP_INTERVAL` | `900` | Seconds between passes of the background media downloader and cache cleaner; at least 60. |
-| `IO_THREAD_POOL_SIZE` | `32` | Threads for blocking I/O (SQLite, file system). |
 
 ### Caching and delays
 
@@ -413,6 +391,29 @@ docker run --rm -v <stack>_pyrogram_bridge:/data busybox chown -R 1000:1000 /dat
 gone: the bridge no longer restarts the Telegram client inside the process but exits and leaves
 the restart to Docker, and lost connections are only logged. If they are still set, they are
 silently ignored. Make sure the container has a restart policy, see [Watchdog](#watchdog).
+
+These variables are gone as well; their settings are now built into the code with the former
+defaults: `TG_WATCHDOG_INTERVAL`, `TG_WATCHDOG_TIMEOUT`, `TG_WATCHDOG_FAILURES`,
+`TG_WATCHDOG_HEARTBEAT_EVERY`, `TG_PING_UNHEALTHY_AFTER`, `MEDIA_TIMEOUT_RESTART_THRESHOLD`,
+`TG_MAX_CONCURRENT_TRANSMISSIONS`, `MEDIA_DOWNLOAD_TIMEOUT_MIN`, `MEDIA_DOWNLOAD_TIMEOUT_MAX`,
+`MEDIA_DOWNLOAD_MIN_SPEED`, `MEDIA_BACKOFF_MAX_S`, `MEDIA_FAILURES_DROP_ROW`,
+`CACHE_SWEEP_INTERVAL`, `IO_THREAD_POOL_SIZE`, `API_HOST`, `SESSION_PATH`,
+`REPLY_QUOTE_TRUNCATE_DISTANCE` and `DEBUG`. If they are still set, they are ignored.
+
+With a non-default `SESSION_PATH`, move the session file `pyro_bridge.session` to `data/` (the
+data volume, `/app/data`) before upgrading; otherwise the bridge does not find the session and
+does not log in to Telegram.
+
+Without `API_HOST` the bridge always listens on `0.0.0.0`. If you set `API_HOST=127.0.0.1` to
+keep the port off the network (host networking or a run without Docker), close it another way.
+
+Values are now checked strictly: a value that used to be accepted or silently replaced now stops
+the start, and the log names the variable and the value. Booleans take only `true`, `True`,
+`false` and `False` (`0`, `1`, `yes`, `no`, `off`, `FALSE` used to work or were silently read as
+false). `TRUSTED_PROXIES` takes IP addresses only (a subnet or a host name never matched
+anyway). `LOG_LEVEL` takes standard level names only. A number out of range no longer falls back
+to the default. `TG_PROXY_PORT` is checked even without `TG_PROXY_HOST`. Check your values
+before upgrading.
 
 ## Development
 

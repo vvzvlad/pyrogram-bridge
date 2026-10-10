@@ -5,35 +5,22 @@
 # pylint: disable=broad-exception-caught, global-statement, missing-function-docstring, missing-class-docstring
 # pylint: disable=logging-fstring-interpolation, line-too-long
 
-import os
 import time
 import asyncio
 import logging
 from contextlib import asynccontextmanager
 
+from config import get_settings
+
 logger = logging.getLogger(__name__)
 
-
-def _parse_int_env(name: str, default: int, minimum: int) -> int:
-    """Parse an int env var, falling back to default on missing/invalid/out-of-range value."""
-    raw = os.getenv(name)
-    if raw is None or raw.strip() == "":
-        return default
-    try:
-        value = int(raw)
-    except ValueError:
-        logger.warning(f"tg_throttle: {name} is not a valid integer ({raw!r}); using default {default}")
-        return default
-    if value < minimum:
-        logger.warning(f"tg_throttle: {name}={value} below minimum {minimum}; using default {default}")
-        return default
-    return value
+Config = get_settings()
 
 
 # Global throttle for live Telegram MTProto RPC calls. Serializes bursts (e.g. miniflux
 # batching ~47 feeds at once) so they do not trip Telegram's FLOOD_WAIT (420).
-_CONCURRENCY = _parse_int_env("TG_RPC_CONCURRENCY", 1, 1)               # max concurrent Telegram RPCs
-_MIN_INTERVAL = _parse_int_env("TG_RPC_MIN_INTERVAL_MS", 500, 0) / 1000.0  # min gap between RPC starts (seconds)
+_CONCURRENCY = Config["tg_rpc_concurrency"]                    # max concurrent Telegram RPCs
+_MIN_INTERVAL = Config["tg_rpc_min_interval_ms"] / 1000.0     # min gap between RPC starts (seconds)
 
 _sem = asyncio.Semaphore(_CONCURRENCY)
 _lock = asyncio.Lock()
