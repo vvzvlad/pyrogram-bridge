@@ -400,6 +400,16 @@ def _snapshot_paid_media(paid_media: Any) -> Optional[dict]:
     }
 
 
+def _snapshot_sticker(sticker: Any) -> Optional[dict]:
+    """STICKER: the selector reads the flags and only the truthiness of .thumbs (an animated
+    sticker with a thumbnail renders as that image). The thumbnail count is stored; the list
+    is restored as N placeholders, like paid_media's items."""
+    snap = _snapshot_obj(sticker, ["file_unique_id", "emoji", "is_video", "is_animated"])
+    if snap is not None:
+        snap["thumbs_count"] = len(getattr(sticker, "thumbs", None) or [])
+    return snap
+
+
 def snapshot_message(message: Any) -> dict:
     """Extract a JSON-serializable snapshot (schema v1) from a pyrogram Message.
 
@@ -444,7 +454,7 @@ def snapshot_message(message: Any) -> dict:
         "voice": _snapshot_obj(getattr(message, "voice", None), ["file_unique_id", "mime_type"]),
         "video_note": _snapshot_obj(getattr(message, "video_note", None), ["file_unique_id", "file_size"]),
         "animation": _snapshot_obj(getattr(message, "animation", None), ["file_unique_id", "file_size"]),
-        "sticker": _snapshot_obj(getattr(message, "sticker", None), ["file_unique_id", "emoji", "is_video", "is_animated"]),
+        "sticker": _snapshot_sticker(getattr(message, "sticker", None)),
         # LIVE_PHOTO (Kurigram 2.2.23) renders as a video element via the video_loop_400
         # kind. MEDIA_SOURCES/_get_file_unique_id/_save_media_file_ids read live_photo's
         # file_unique_id + file_size (the >100MB skip); find_file_id also reads file_unique_id.
@@ -685,6 +695,17 @@ def _restore_paid_media(d: Optional[dict]) -> Optional[SimpleNamespace]:
     return SimpleNamespace(stars_amount=d.get("stars_amount"), media=[None] * count)
 
 
+def _restore_sticker(d: Optional[dict]) -> Optional[SimpleNamespace]:
+    sticker = _ns(d, ["file_unique_id", "emoji", "is_video", "is_animated"])
+    if sticker is None:
+        return None
+    # thumbs is only tested for truthiness, so N placeholders reproduce it; None when there
+    # are none, as on a live sticker. A file written before thumbs_count restores as None.
+    count = d.get("thumbs_count") or 0
+    sticker.thumbs = [None] * count if count else None
+    return sticker
+
+
 class CachedMessage:
     """Duck-typed stand-in for a pyrogram Message, restored from a snapshot dict.
 
@@ -728,7 +749,7 @@ class CachedMessage:
         self.voice = _ns(data.get("voice"), ["file_unique_id", "mime_type"])
         self.video_note = _ns(data.get("video_note"), ["file_unique_id", "file_size"])
         self.animation = _ns(data.get("animation"), ["file_unique_id", "file_size"])
-        self.sticker = _ns(data.get("sticker"), ["file_unique_id", "emoji", "is_video", "is_animated"])
+        self.sticker = _restore_sticker(data.get("sticker"))
         # LIVE_PHOTO: restored like `video` so the video_loop_400 media block renders on a
         # cache hit (file_unique_id → URL; file_size → the >100MB collection skip).
         self.live_photo = _ns(data.get("live_photo"), ["file_unique_id", "file_size"])

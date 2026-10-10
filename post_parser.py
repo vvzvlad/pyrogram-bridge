@@ -333,15 +333,28 @@ def _select_document(message):
     return document, 'file'
 
 
+# Suffix of the media key an animated sticker's thumbnail is served under. Kurigram gives the
+# thumbnail the sticker's own file_unique_id, so without it the thumbnail would share the .tgs
+# file's URL, cache file, MIME entry and download backoff. A dot is outside the file_unique_id
+# alphabet (URL-safe base64), so the key never matches a real one.
+# api_server.find_file_id_in_message resolves the key back to the thumbnail.
+STICKER_THUMB_SUFFIX = '.thumb'
+
+
 def _select_sticker(message):
-    """STICKER selector: video stickers loop as <video> ('video_loop_200'), animated
-    (TGS) stickers become a text line ('sticker_text') because their file is gzipped
-    Lottie JSON that no <img> can display, image stickers render as <img>
-    ('img_200_sticker')."""
+    """STICKER selector: video stickers loop as <video> ('video_loop_200'), image stickers
+    render as <img> ('img_200_sticker'). An animated (TGS) sticker is gzipped Lottie JSON
+    that no <img> can display: with a thumbnail it renders that static image as <img>
+    ('img_200_sticker') under the thumbnail key, without one it becomes a text line
+    ('sticker_text')."""
     sticker = message.sticker
     if getattr(sticker, 'is_video', False):
         return sticker, 'video_loop_200'
     if getattr(sticker, 'is_animated', False):
+        if getattr(sticker, 'thumbs', None):
+            thumb = SimpleNamespace(file_unique_id=f"{sticker.file_unique_id}{STICKER_THUMB_SUFFIX}",
+                                    file_size=None)
+            return thumb, 'img_200_sticker'
         return sticker, 'sticker_text'
     return sticker, 'img_200_sticker'
 
@@ -2184,7 +2197,7 @@ class PostParser:
                 # of the old truthy-attribute if/elif ladder. paid_media has no table
                 # entry and is deliberately NOT collected (paid content).
                 selector = MEDIA_SOURCES.get(message.media)
-                selected_obj = selector(message)[0] if selector is not None else None
+                selected_obj, kind = selector(message) if selector is not None else (None, None)
 
                 # Registry §3.13: the ">100MB don't cache" rule applies to ANY selected
                 # media object, not just message.video (the old code guarded only the
@@ -2195,7 +2208,8 @@ class PostParser:
 
                 file_unique_id = getattr(selected_obj, 'file_unique_id', '') or ''
 
-                if file_unique_id:
+                # A sticker rendered as a text line shows no file, so there is nothing to download.
+                if file_unique_id and kind != 'sticker_text':
                     added_ts = datetime.now().timestamp()
                     # Thread-safe: just append; the caller persists the batch.
                     self._pending_media_ids.append((channel_username, message.id, file_unique_id, added_ts))

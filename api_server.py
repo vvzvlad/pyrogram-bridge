@@ -51,7 +51,7 @@ from kurigram_compat import (
     get_rich_part_seen_count,
     has_parse_failures,
 )
-from post_parser import PostParser
+from post_parser import PostParser, STICKER_THUMB_SUFFIX
 from url_signer import verify_media_digest
 from file_io import (DB_PATH, init_db_sync, get_all_media_file_ids_sync,
                      update_media_file_access_sync, update_media_file_access_bulk_sync,
@@ -659,6 +659,13 @@ async def find_file_id_in_message(message: Message, file_unique_id: str) -> Unio
         media_found.append(f"sticker ({message.sticker.file_unique_id})")
         if message.sticker.file_unique_id == file_unique_id:
             return message.sticker.file_id
+        # An animated sticker is shown by its thumbnail, keyed as the sticker's file_unique_id
+        # plus STICKER_THUMB_SUFFIX; the largest thumbnail is downloaded. No thumbnail falls
+        # through to the "not found" warning below.
+        if file_unique_id.endswith(STICKER_THUMB_SUFFIX):
+            thumbs = getattr(message.sticker, 'thumbs', None)
+            if thumbs and file_unique_id.removesuffix(STICKER_THUMB_SUFFIX) == message.sticker.file_unique_id:
+                return max(thumbs, key=lambda thumb: thumb.width * thumb.height).file_id
     if message.web_page and message.web_page.photo:
         media_found.append(f"web_page.photo ({message.web_page.photo.file_unique_id})")
         if message.web_page.photo.file_unique_id == file_unique_id:
