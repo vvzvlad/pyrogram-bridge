@@ -15,7 +15,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from pyrogram.enums import MessageMediaType, MessageServiceType
+from pyrogram.enums import MessageEntityType, MessageMediaType, MessageServiceType
+from pyrogram.types import MessageEntity
 
 import post_parser
 from message_snapshot import snapshot_message, restore_message
@@ -287,6 +288,38 @@ def test_story_with_media_and_no_caption_adds_no_block(parser):
     msg = make_message(media=MessageMediaType.STORY,
                        story=SimpleNamespace(video=SimpleNamespace(file_unique_id="sv"), photo=None))
     assert parser._format_special_media(msg) is None
+
+
+def test_story_caption_text_link_renders_an_anchor(parser):
+    msg = make_message(media=MessageMediaType.STORY, story=SimpleNamespace(
+        video=None, photo=SimpleNamespace(file_unique_id="sp"), caption="see docs",
+        caption_entities=[MessageEntity(type=MessageEntityType.TEXT_LINK, offset=4, length=4,
+                                        url="https://example.com/docs")]))
+    body = parser._generate_html_body(msg)
+    assert '<div class="message-special">see <a href="https://example.com/docs">docs</a></div>' in body
+
+
+@pytest.mark.parametrize("entities", [None, []], ids=["none", "empty"])
+def test_story_caption_without_entities_stays_escaped(parser, entities):
+    # Kurigram's unparse returns a caption without entities unescaped, and crashes on None.
+    msg = make_message(media=MessageMediaType.STORY, story=SimpleNamespace(
+        video=None, photo=SimpleNamespace(file_unique_id="sp"), caption="a <b> & c",
+        caption_entities=entities))
+    body = parser._generate_html_body(msg)
+    assert '<div class="message-special">a &lt;b&gt; &amp; c</div>' in body
+
+
+def test_story_caption_name_mention_falls_back_to_escaped_text(parser):
+    # Kurigram parses story entities without user data: a name mention has user=None and
+    # its unparse raises. The caption falls back to escaped text, live and on a cache hit,
+    # and the snapshot does not fail.
+    msg = make_message(media=MessageMediaType.STORY, story=SimpleNamespace(
+        video=None, photo=SimpleNamespace(file_unique_id="sp"), caption="hi <Bob>",
+        caption_entities=[MessageEntity(type=MessageEntityType.TEXT_MENTION, offset=3, length=5,
+                                        user=None)]))
+    expected = '<div class="message-special">hi &lt;Bob&gt;</div>'
+    assert expected in parser._generate_html_body(msg)
+    assert expected in parser._generate_html_body(restore_message(snapshot_message(msg)))
 
 
 # --------------------------------------------------------------------------- #
