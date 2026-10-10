@@ -313,7 +313,7 @@ def _story_media_object(message):
 
 
 # --------------------------------------------------------------------------- #
-# Single source of truth for media handling (render-pipeline refactor, stage 5).
+# Single source of truth for media handling (tests/test_stage5_media_table.py).
 #
 # MEDIA_SOURCES maps a media type to a selector returning (media object, render
 # kind). It replaces the three hand-synced ladders that used to live in
@@ -435,8 +435,8 @@ class RenderCtx:
 # _generate_html_media is preserved (audio emits TWO items: <audio> tag + <br>;
 # pdf emits its two-append div block). Bodies are lifted VERBATIM from the old
 # if/elif branches, including the `src="{url}"style=` concatenation artifacts —
-# byte-for-byte fidelity is the stage-5a contract. The one post-stage-5 addition
-# is _render_file (generic non-image documents), which replaced a broken <img>
+# byte-for-byte fidelity is the contract (tests/test_stage5_media_table.py). The one later
+# addition is _render_file (generic non-image documents), which replaced a broken <img>
 # and therefore has no pre-refactor bytes to preserve.
 def _render_img_400(ctx: 'RenderCtx') -> List[str]:
     return [f'<img src="{ctx.url}" style="max-width:100%; width:auto; height:auto;'
@@ -630,7 +630,7 @@ class PostParser:
                 logger.error(f"post_not_found_or_empty: channel {prepared_channel_id}, post_id {post_id}")
                 return None
 
-            # Rich part=True enrichment (#86): if this single post is a partial rich message,
+            # Rich part=True enrichment: if this single post is a partial rich message,
             # re-fetch its full content via GetRichMessage before rendering (one post -> at
             # most one re-fetch). INTENTIONALLY applied to BOTH output types: /json exposes the
             # rich tree just like /html, so both consumers must see the full content. Neither is
@@ -664,7 +664,7 @@ class PostParser:
                     except Exception as e:
                         # A broken album neighbor must not take down the page — fall back to
                         # rendering just the requested message (same guarantee the feed path
-                        # gives via its degraded placeholder, issue #60). Any media file-ids
+                        # gives via its degraded placeholder). Any media file-ids
                         # collected before the failure stay pending and are picked up by the
                         # fallback path's flush (flush runs once per request on every path).
                         logger.error(f"media_group_render_failed: channel {prepared_channel_id}, post_id {post_id}, error_type {type(e).__name__}, error {e}; falling back to single message")
@@ -884,7 +884,7 @@ class PostParser:
         title = None
         title = self._service_message_title(message)
         if title is None: title = self._generate_base_title(message)
-        # Rich posts (Kurigram 2.2.24, #85): derive the title from the rich tree only when
+        # Rich posts (Kurigram 2.2.24): derive the title from the rich tree only when
         # the base title is empty (a rich post may carry no plain text). Prefer the first
         # heading / first non-empty paragraph (truncated like any title); fall back to a
         # generic label. Gated via tree_of so a cache hit behaves identically to live.
@@ -1200,8 +1200,8 @@ class PostParser:
         """message.quote (the fragment of the target the reply selected) when it holds text, else None.
 
         A TextQuote exposes `.text` (a Str with .html) exactly like a reply target does, so
-        _format_reply_quote renders it unchanged. The isinstance check also keeps a mock's
-        auto-created attribute from passing for a quote.
+        _format_reply_quote renders it unchanged. The isinstance check rejects a missing or
+        non-text value.
         """
         text_quote = getattr(message, 'quote', None)
         text = getattr(text_quote, 'text', None)
@@ -1286,7 +1286,7 @@ class PostParser:
         if message.forward_origin:
             flags.append("fwd")
 
-        # Add "rich" flag for Rich Messages posts (Kurigram 2.2.24, layer 227, #85).
+        # Add "rich" flag for Rich Messages posts (Kurigram 2.2.24, layer 227).
         # Gated via tree_of so a cache hit (rich_message=None, rich_tree set) matches live.
         rich_tree_obj = rich_tree.tree_of(message)
         if rich_tree_obj is not None:
@@ -1571,7 +1571,7 @@ class PostParser:
     def _sanitize_html(self, html_raw: str) -> str:
         # Delegate to the single project-wide bleach config (sanitizer.sanitize_html).
         # This drops the former fail-open branch: sanitize_html is fail-closed and
-        # html.escape()s on any bleach error (registry §3.2).
+        # html.escape()s on any bleach error.
         return sanitize_html(html_raw)
 
     def _format_forward_info(self, message: Message) -> Union[str, None]:
@@ -1640,7 +1640,7 @@ class PostParser:
         reply_html = self._format_reply_info(message)
         media_html = self._generate_html_media(message)
 
-        # Rich content (Kurigram 2.2.24, #85). tree_of is the single entry (works for a
+        # Rich content (Kurigram 2.2.24). tree_of is the single entry (works for a
         # live Message via rich_message and for a restored CachedMessage via its stored rich_tree).
         # A non-rich post has tree=None -> rich_html='' and the block below is a no-op, so
         # golden output stays byte-identical.
@@ -1649,8 +1649,8 @@ class PostParser:
         if tree is not None and tree.get("blocks"):
             rich_html = rich_tree.render_html(tree, self._rich_url_builder(message))
             # Rich blocks are the authoritative content — suppress the plain text_html to
-            # avoid duplicating it (rich posts carry their body in the blocks; see the #84
-            # stand dump). media_html is empty for rich posts (media arrives via blocks).
+            # avoid duplicating it (rich posts carry their body in the blocks). media_html is
+            # empty for rich posts (media arrives via blocks).
             text_html = None
 
         content_body.append(f'<div class="post">')
@@ -1681,7 +1681,8 @@ class PostParser:
         # Rich content div in the media position; only emitted for a non-empty tree so an
         # empty/failed tree does not pollute parity/golden bytes (its placard is owned by
         # _format_special_media). The `part` placard renders AFTER the rich content,
-        # independently of phase 3 (an honest "partial post" hint if part ever arrives).
+        # independently of the GetRichMessage re-fetch (an honest "partial post" hint if part
+        # ever arrives).
         if rich_html:
             content_body.append(f'<div class="rich-content">{rich_html}</div>')
             content_body.append("<br>")
@@ -1796,7 +1797,7 @@ class PostParser:
                         elif kind in ('img_200_sticker', 'sticker_text'):
                             ctx.emoji = getattr(message.sticker, 'emoji', '')
                         content_media.extend(renderer(ctx))
-            # Registry §3.14: close the message-media container in EVERY branch. It used
+            # Close the message-media container in EVERY branch. It used
             # to be closed only when a URL was built (or the username guard fired), so a
             # None file_unique_id (e.g. WEB_PAGE without photo) left an open <div> that
             # html5lib later swallowed the following posts into.
@@ -1948,8 +1949,8 @@ class PostParser:
                 reactions_html = reactions_html.rstrip()
                 # An empty reactions object (reactions.reactions == []) produces no
                 # spans; appending the empty string would emit a leading
-                # '&nbsp;&nbsp;|&nbsp;&nbsp;' separator in the footer. Skip it
-                # (registry §3.15). Affects single posts too.
+                # '&nbsp;&nbsp;|&nbsp;&nbsp;' separator in the footer. Skip it.
+                # Affects single posts too.
                 if reactions_html:
                     first_line_parts.append(reactions_html)
 
@@ -2066,7 +2067,7 @@ class PostParser:
             media = getattr(message, 'media', None)
             block = None
 
-            # Rich posts (Kurigram 2.2.24, #85): the rich content is rendered inline in
+            # Rich posts (Kurigram 2.2.24): the rich content is rendered inline in
             # _generate_html_body. This branch is the SINGLE owner of the fallback placard,
             # shown ONLY for an EMPTY tree (a failed/sentinel parse or a genuinely empty rich
             # message) so the reader sees an honest note instead of a blank post. A non-empty
@@ -2211,7 +2212,7 @@ class PostParser:
     def _save_media_file_ids(self, message: Message) -> None:
         """Collect a media file-id record for later bulk persistence.
 
-        IMPORTANT (4.2): this runs inside the render thread, so it must NOT touch
+        IMPORTANT: this runs inside the render thread, so it must NOT touch
         asyncio or the DB. It only appends to self._pending_media_ids; the caller
         flushes the batch via _flush_pending_media_ids() after rendering.
         """
@@ -2228,7 +2229,7 @@ class PostParser:
                 selector = MEDIA_SOURCES.get(message.media)
                 selected_obj, kind = selector(message) if selector is not None else (None, None)
 
-                # Registry §3.13: the ">100MB don't cache" rule applies to ANY selected
+                # The ">100MB don't cache" rule applies to ANY selected
                 # media object, not just message.video (the old code guarded only the
                 # video type here, plus the newer live_photo/story/poll sources).
                 file_size = getattr(selected_obj, 'file_size', None)
@@ -2243,9 +2244,9 @@ class PostParser:
                     # Thread-safe: just append; the caller persists the batch.
                     self._pending_media_ids.append((channel_username, message.id, file_unique_id, added_ts))
 
-            # Rich media (Kurigram 2.2.24, #85): photos/videos/audio embedded in rich blocks.
+            # Rich media (Kurigram 2.2.24): photos/videos/audio embedded in rich blocks.
             # Collected via the tree (works for both live and restored CachedMessage). The >100MB
-            # skip rule (registry §3.13) is applied per media node, mirroring the block above.
+            # skip rule is applied per media node, mirroring the block above.
             tree = rich_tree.tree_of(message)
             if tree is not None:
                 for media in rich_tree.iter_tree_media(tree):

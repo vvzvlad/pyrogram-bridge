@@ -24,7 +24,7 @@ from config import get_settings
 
 import kurigram_compat
 # Install the defensive Rich* parse wrappers BEFORE any Client is created / any message is
-# parsed (phase 1 of the Rich Messages epic, #83/#84). No-op on a Kurigram without Rich*
+# parsed. No-op on a Kurigram without Rich*
 # classes, so a rollback to 2.2.23 does not crash-loop the container.
 kurigram_compat.install()
 
@@ -49,17 +49,17 @@ MEDIA_TIMEOUT_EXIT_THRESHOLD = 5
 SESSION_PATH = "data"
 
 # --------------------------------------------------------------------------- #
-# Rich Messages phase 3 (#83 / #86): part=True full-content re-fetch.
+# Rich Messages: part=True full-content re-fetch.
 # --------------------------------------------------------------------------- #
 # Per-call timeout (seconds) for the raw messages.GetRichMessage re-fetch. Deliberately
 # short and well under Config["tg_rpc_timeout"]: a partial rich message is a cheap-to-degrade
 # enrichment, so a slow DC must NOT hold the global RPC gate — the feed breaker trips on the
 # first timeout and the render proceeds with the partial tree + part plaque (fixed on the
-# next re-fetch after the history TTL). Justified by #83: enrichment must never starve feeds.
+# next re-fetch after the history TTL). Enrichment must never starve feeds.
 RICH_ENRICH_RPC_TIMEOUT = 5
 
 # Re-fetch attempt / failure counters, surfaced read-only to /health (same pattern as the
-# #84 kurigram_compat degradation counters). Process-wide, lock-guarded: feeds may re-fetch
+# kurigram_compat degradation counters). Process-wide, lock-guarded: feeds may re-fetch
 # concurrently. A growing failed/attempt ratio flags a DC or throttle problem otherwise
 # invisible to the reader (part plaques would just silently persist).
 _rich_fetch_lock = threading.Lock()
@@ -102,7 +102,7 @@ def reset_rich_fetch_counters() -> None:
 class RichFetchResult(NamedTuple):
     """Typed outcome of a single ``safe_get_rich_message`` re-fetch.
 
-    ``rich_message`` is the parsed high-level object on success (possibly a #84 parse_failed
+    ``rich_message`` is the parsed high-level object on success (possibly a kurigram_compat parse_failed
     SENTINEL — a part post whose fuller vectors still crashed), else None. ``outcome`` makes
     a FloodWait DISTINGUISHABLE from a plain timeout DISTINGUISHABLE from a generic error, so
     the feed breaker can react correctly (a global throttle and a slow DC both stop enrichment
@@ -134,7 +134,7 @@ async def safe_get_rich_message(client: Client, chat_id, msg_id,
     which the download classifier would blacken into a PERMANENT 404 with row deletion.
 
     Pipeline: resolve_peer(chat_id) -> invoke(GetRichMessage(peer, id)) -> messages.Messages ->
-    ``.messages[0].rich_message`` -> the #84-patched ``types.RichMessage._parse`` (recovers the
+    ``.messages[0].rich_message`` -> the kurigram_compat-patched ``types.RichMessage._parse`` (recovers the
     ``part`` flag; a parse crash degrades to a sentinel).
     """
     _incr_rich_fetch_attempt()
@@ -154,7 +154,7 @@ async def safe_get_rich_message(client: Client, chat_id, msg_id,
             _incr_rich_fetch_failed()
             logger.warning(f"rich_part_fetch_failed: no rich_message on {chat_id}/{msg_id}")
             return RichFetchResult(None, "error")
-        # The #84 message-contour wrapper never raises (crash -> sentinel), but guard anyway.
+        # The kurigram_compat message-contour wrapper never raises (crash -> sentinel), but guard anyway.
         parsed = await types.RichMessage._parse(client, raw_rich)
         if parsed is None:
             _incr_rich_fetch_failed()
