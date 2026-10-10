@@ -283,8 +283,10 @@ async def test_watchdog_saves_session_and_save_error_is_not_a_probe_failure(monk
     reasons = _patch_exit_process(monkeypatch)
     c.watchdog_interval = 0
     saves = []
+    probes = []
 
     async def ok_get_me():
+        probes.append(True)
         return type("Me", (), {"id": 1})()
 
     async def failing_save():
@@ -299,7 +301,7 @@ async def test_watchdog_saves_session_and_save_error_is_not_a_probe_failure(monk
     await asyncio.wait_for(c._watchdog_loop(), timeout=5)
 
     # Every successful probe saved the session, and a failed save never counted as a failed probe.
-    assert len(saves) == c.watchdog_failures + 1
+    assert len(saves) == len(probes) == c.watchdog_failures + 1
     assert c._wd_probe_fail_count == 0
     assert reasons == []
 
