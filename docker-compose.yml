@@ -14,13 +14,11 @@ services:
       # TG_PROXY_PORT: 1080           # MTProto proxy SOCKS5 port (default: 1080)
       # TG_PROXY_USERNAME: XXX        # SOCKS5 username (optional)
       # TG_PROXY_PASSWORD: XXX        # SOCKS5 password (optional)
-      # TG_WATCHDOG_ENABLED: "True"   # Active liveness watchdog: detects 'zombie' sessions and restarts in-process (default: True)
+      # TG_WATCHDOG_ENABLED: "True"   # Active liveness watchdog: detects 'zombie' sessions and exits the process so the restart policy brings the container back (default: True)
       # TG_WATCHDOG_INTERVAL: 60      # Seconds between liveness probes (default: 60)
       # TG_WATCHDOG_TIMEOUT: 10       # Seconds to wait for each get_me probe (default: 10)
       # TG_WATCHDOG_FAILURES: 3       # Consecutive failed probes before restart (default: 3)
       # TG_WATCHDOG_HEARTBEAT_EVERY: 30 # Emit an INFO watchdog heartbeat every N successful probes (default: 30)
-      # TG_DISCONNECT_FLAP_LIMIT: 3   # Disconnect events within the flap window before an in-process restart (default: 3)
-      # TG_DISCONNECT_FLAP_WINDOW: 120 # Flap detection window in seconds (default: 120)
       # TG_CHAT_CACHE_TTL_HOURS: 12   # TTL for cached channel info (title/username/id); removes GetFullChannel from the poll hot path (default: 12)
       # TG_RPC_CONCURRENCY: 1         # Max concurrent live Telegram RPC calls — global throttle (default: 1)
       # TG_RPC_MIN_INTERVAL_MS: 500   # Minimum gap between live Telegram RPC starts, ms (default: 500)
@@ -30,7 +28,7 @@ services:
       # MEDIA_DOWNLOAD_MIN_SPEED: 262144  # Assumed floor download speed, bytes/s — large-video timeout ≈ file_size / this, clamped to [MIN,MAX] (default: 262144 = 256 KB/s)
       # IO_THREAD_POOL_SIZE: 32           # Size of the asyncio default threadpool for blocking I/O (SQLite/python-magic/pickle/os.walk); raise on a busy 1-2 CPU box (default: 32)
       # TG_MAX_CONCURRENT_TRANSMISSIONS: 3   # Max concurrent Telegram file transmissions (Pyrogram get_file semaphore). Kurigram default is 1, so one hung download blocks ALL media (default: 3)
-      # MEDIA_TIMEOUT_RESTART_THRESHOLD: 5   # Consecutive media-download timeouts before an in-process restart rebuilds the zombie media-DC connection (the main-DC watchdog can't see this) (default: 5)
+      # MEDIA_TIMEOUT_RESTART_THRESHOLD: 5   # Consecutive media-download timeouts before the process exits so the container restart rebuilds the zombie media-DC connection (the main-DC watchdog can't see this) (default: 5)
       # MEDIA_SIGNING_SECRET: XXX            # Secret for signing media URLs (HMAC-SHA256 v2, HKDF-derived). If unset, falls back to TOKEN, then to an auto-generated key file. Set this or TOKEN so media URLs survive data-volume recreation (the key file is wiped with the volume)
       # MEDIA_ALLOW_LEGACY_DIGEST: "true"    # Also accept old pre-v2 (SHA-1/8-char) media digests so already-delivered URLs keep working after upgrade. Set false once all feeds have been re-polled (default: true)
       # MEDIA_URL_TTL_DAYS: 0                # Optional signed expiry (days) on media URLs. Unset/0 = no expiry (default) — RSS readers fetch late, a hard expiry would break them
@@ -64,7 +62,8 @@ services:
       # filesystem, so it answers instantly even while a TG RPC is hung — unlike the old
       # /rss?limit=1 check, which could exceed the 5s timeout on a cold cache and get the
       # container restarted mid-download (corrupted temp files). TG liveness is now judged
-      # by the in-process watchdog, which /ping reports via its last-probe age.
+      # by the bridge's own watchdog, which exits the process on a hung session (the restart
+      # policy above brings the container back); /ping reports its last-probe age.
       test: ["CMD", "curl", "-sf", "http://127.0.0.1:80/ping"]
       interval: 5m
       timeout: 5s

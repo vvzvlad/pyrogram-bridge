@@ -458,3 +458,23 @@ def test_sweeper_cleans_part_and_tmp_not_fresh(tmp_path):
     assert fresh_part.exists()        # too new to sweep
     assert normal.exists()            # ordinary cached file untouched
     assert removed >= 3
+
+
+def test_sweeper_cleans_stale_kurigram_temp_of_part(tmp_path):
+    """A process exit mid-download leaves Kurigram's `X.part.{32 hex}.temp` download file
+    behind; the sweeper removes it once older than the 1h threshold and keeps a fresh one."""
+    cache = tmp_path / "cache"
+    post = cache / "chan" / "10"
+    post.mkdir(parents=True)
+
+    stale = time.time() - 4000  # older than the 1h (3600s) threshold
+    hexid = "0" * 32
+
+    old_temp = post / f"file.part.{hexid}.temp"; old_temp.write_bytes(b"x"); os.utime(old_temp, (stale, stale))
+    fresh_temp = post / f"file2.part.{hexid}.temp"; fresh_temp.write_bytes(b"x")  # fresh mtime
+
+    _, removed = api_server.remove_old_cached_files_sync([], str(cache))
+
+    assert not old_temp.exists()      # stale leftover swept
+    assert fresh_temp.exists()        # may belong to a download still in flight
+    assert removed == 1

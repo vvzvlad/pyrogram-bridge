@@ -35,8 +35,8 @@ the feed's filters with buttons.
 - **Gentle on Telegram** — channel info and history are cached and live calls are throttled;
   a FloodWait turns into HTTP 429 with `Retry-After`; feeds answer `ETag`/`Last-Modified`
   conditional requests with 304.
-- **Self-healing** — an in-process watchdog restarts a stuck Telegram session, and `/ping`
-  serves the container healthcheck.
+- **Self-healing** — when the Telegram session hangs, the bridge exits and Docker restarts the
+  container; `/ping` serves the container healthcheck.
 
 ## Quick start (Docker)
 
@@ -344,19 +344,21 @@ required; the bridge does not start without them.
 
 ### Watchdog
 
-The watchdog periodically checks that the Telegram session is actually alive and restarts it
-in-process when it is not.
+The watchdog periodically checks that the Telegram session is actually alive. When the session
+hangs, the bridge exits the process and Docker restarts the container.
+
+So the container must have a restart policy: `restart: unless-stopped`, `always`, or
+`on-failure` without a retry limit. Docker does not reset the `on-failure:N` counter between
+automatic restarts, so it gives the bridge only N restarts and the next exit leaves it down;
+without a policy the first exit does.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `TG_WATCHDOG_ENABLED` | `true` | Turn the watchdog on or off. |
+| `TG_WATCHDOG_ENABLED` | `true` | Turn the watchdog on or off. With it off, a hang of the main Telegram session is not detected at all, and the session file is not saved periodically: after an exit on a streak of media-download timeouts the bridge has to look up again every channel it learned since its start. |
 | `TG_WATCHDOG_INTERVAL` | `60` | Seconds between checks. |
 | `TG_WATCHDOG_TIMEOUT` | `10` | Timeout of one check, seconds. |
 | `TG_WATCHDOG_FAILURES` | `3` | Consecutive failed checks before a restart. |
-| `TG_WATCHDOG_RESTART_TIMEOUT` | `90` | Timeout of the restart itself, seconds. |
 | `TG_WATCHDOG_HEARTBEAT_EVERY` | `30` | Log an INFO heartbeat every N successful checks. |
-| `TG_DISCONNECT_FLAP_LIMIT` | `3` | Disconnects within the window that trigger a restart. |
-| `TG_DISCONNECT_FLAP_WINDOW` | `120` | That window, seconds. |
 | `TG_PING_UNHEALTHY_AFTER` | `250` | `/ping` reports unhealthy when the last successful check is older than this many seconds. The default is derived from the three values above: interval × (failures + 1) + timeout. |
 
 ### Media downloads and cache
@@ -367,7 +369,7 @@ in-process when it is not.
 | `MEDIA_DOWNLOAD_TIMEOUT_MAX` | `1800` | Download timeout cap for the largest videos, seconds. |
 | `MEDIA_DOWNLOAD_MIN_SPEED` | `262144` | Assumed minimum download speed, bytes/s; a large file's timeout ≈ size / this speed, clamped to the two values above. |
 | `TG_MAX_CONCURRENT_TRANSMISSIONS` | `3` | Simultaneous file downloads from Telegram. |
-| `MEDIA_TIMEOUT_RESTART_THRESHOLD` | `5` | Consecutive download timeouts after which the Telegram client is restarted (the watchdog cannot see a dead media connection). |
+| `MEDIA_TIMEOUT_RESTART_THRESHOLD` | `5` | Consecutive download timeouts after which the bridge exits and Docker restarts the container (the watchdog cannot see a dead media connection). |
 | `MEDIA_BACKOFF_MAX_S` | `21600` | Upper bound of the growing pause before re-trying a file that keeps failing to download, seconds. |
 | `MEDIA_FAILURES_DROP_ROW` | `15` | Failed downloads in a row after which a file is forgotten. |
 | `CACHE_SWEEP_INTERVAL` | `900` | Seconds between passes of the background media downloader and cache cleaner; at least 60. |
@@ -406,6 +408,11 @@ handed over once by hand (the real volume name is in `docker volume ls`):
 ```bash
 docker run --rm -v <stack>_pyrogram_bridge:/data busybox chown -R 1000:1000 /data
 ```
+
+`TG_WATCHDOG_RESTART_TIMEOUT`, `TG_DISCONNECT_FLAP_LIMIT` and `TG_DISCONNECT_FLAP_WINDOW` are
+gone: the bridge no longer restarts the Telegram client inside the process but exits and leaves
+the restart to Docker, and lost connections are only logged. If they are still set, they are
+silently ignored. Make sure the container has a restart policy, see [Watchdog](#watchdog).
 
 ## Development
 

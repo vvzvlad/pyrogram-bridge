@@ -8,14 +8,36 @@ Root cause recap: Kurigram serializes downloads through a single get_file slot; 
 zombie media-DC connection makes every download time out while the main-DC watchdog
 stays green, so downloads jam forever. The fix adds (a) a negative-cache backoff so a
 repeatedly-failing file is not hammered, and (b) a consecutive-timeout streak that
-reuses the existing in-process restart to rebuild the media connection.
+exits the process, so the container restart rebuilds the media connection.
+
+Also covers the main-DC side of the same recovery: the watchdog exits the process after
+N failed probes or when its loop crashes, while disconnect events are only logged.
 """
 import asyncio
+import logging
 
 import pytest
 
 import api_server
 from telegram_client import TelegramClient
+
+
+class _ProcessExited(BaseException):
+    """Raised by the fake _exit_process in place of os._exit. Not an Exception, so, like the
+    real exit, it cannot be swallowed by the code's `except Exception` handlers."""
+
+
+def _patch_exit_process(monkeypatch):
+    """Replace TelegramClient._exit_process: the real os._exit(1) would kill pytest without a
+    report. Returns the list of reasons it was called with."""
+    reasons = []
+
+    def fake_exit_process(self, reason):
+        reasons.append(reason)
+        raise _ProcessExited(reason)
+
+    monkeypatch.setattr(TelegramClient, "_exit_process", fake_exit_process)
+    return reasons
 
 
 # --------------------------------------------------------------------------- #
@@ -44,31 +66,26 @@ def test_backoff_failure_counter_increments():
 
 
 # --------------------------------------------------------------------------- #
-# Download-timeout streak -> single media-connection restart
+# Download-timeout streak -> single process exit
 # --------------------------------------------------------------------------- #
 @pytest.mark.asyncio
 async def test_timeout_streak_triggers_single_restart(monkeypatch):
     c = TelegramClient()
-    calls = []
-
-    async def fake_restart(reason: str = "unspecified"):
-        calls.append(reason)
-
-    monkeypatch.setattr(c, "_restart_client", fake_restart)
+    reasons = _patch_exit_process(monkeypatch)
     threshold = c.media_timeout_restart_threshold
 
-    # One short of the threshold: no restart scheduled yet.
+    # One short of the threshold: no exit yet.
     for _ in range(threshold - 1):
         c.note_download_timeout()
-    assert c._media_recovery_task is None
+    assert reasons == []
     assert c._download_timeout_streak == threshold - 1
 
-    # The threshold-th timeout schedules exactly one restart and resets the streak.
-    c.note_download_timeout()
+    # The threshold-th timeout resets the streak and exits exactly once.
+    with pytest.raises(_ProcessExited):
+        c.note_download_timeout()
     assert c._download_timeout_streak == 0
-    assert c._media_recovery_task is not None
-    await c._media_recovery_task
-    assert calls == ["media download timeout streak"]
+    assert len(reasons) == 1
+    assert reasons[0].startswith("media download:")
 
 
 @pytest.mark.asyncio
@@ -82,26 +99,20 @@ async def test_success_resets_streak():
 
 
 @pytest.mark.asyncio
-async def test_no_restart_while_already_restarting(monkeypatch):
+async def test_no_exit_while_shutting_down(monkeypatch):
     c = TelegramClient()
-    calls = []
-
-    async def fake_restart(reason: str = "unspecified"):
-        calls.append(reason)
-
-    monkeypatch.setattr(c, "_restart_client", fake_restart)
-    c._restarting = True  # a restart is already underway
+    reasons = _patch_exit_process(monkeypatch)
+    c._shutting_down = True  # an intentional shutdown is underway
 
     for _ in range(c.media_timeout_restart_threshold):
         c.note_download_timeout()
 
-    # Streak reached the threshold but no new restart is scheduled during a restart.
-    assert c._media_recovery_task is None
-    assert calls == []
+    # Streak reached the threshold but the process does not exit during a shutdown.
+    assert reasons == []
 
 
 # --------------------------------------------------------------------------- #
-# Integration: jam -> auto-recovery -> negative cache cleared (Fix 1)
+# Integration: a hung download times out and frees its transmission slot
 # --------------------------------------------------------------------------- #
 @pytest.mark.asyncio
 async def test_hung_download_times_out_and_frees_slot(monkeypatch):
@@ -132,80 +143,6 @@ async def test_hung_download_times_out_and_frees_slot(monkeypatch):
     slot.release()
     # The timeout was counted toward the restart streak.
     assert c._download_timeout_streak == 1
-
-
-@pytest.mark.asyncio
-async def test_streak_escalates_once_and_verified_restart_clears_cache(monkeypatch):
-    """Full self-heal chain: a timeout streak reaching the threshold escalates to EXACTLY ONE
-    restart, and the verified restart CLEARS the download negative cache (Fix 1)."""
-    c = TelegramClient()
-
-    # Pre-arm the negative cache with a persistently-failing file.
-    key = ("selfheal_chan", 7, "fid_jam")
-    api_server._download_failures.pop(key, None)
-    api_server._record_download_failure(key)
-    assert api_server._download_backoff_remaining(key) > 0.0
-
-    # Wire the REAL self-heal hook and drive a REAL _restart_client with only the network
-    # layer mocked, so the whole chain (streak -> one restart -> verify ok -> cache clear) runs.
-    c.set_restart_callback(api_server._clear_all_download_failures)
-    monkeypatch.setattr(c, "_start_watchdog", lambda: None)
-    monkeypatch.setattr(c.client, "is_connected", True)
-
-    restart_calls = []
-
-    async def fake_client_restart():
-        restart_calls.append(True)
-
-    async def fake_get_me():
-        return type("Me", (), {"id": 42})()
-
-    monkeypatch.setattr(c.client, "restart", fake_client_restart)
-    monkeypatch.setattr(c.client, "get_me", fake_get_me)
-
-    threshold = c.media_timeout_restart_threshold
-    for _ in range(threshold - 1):
-        c.note_download_timeout()
-    assert c._media_recovery_task is None  # one short of threshold: nothing scheduled yet
-
-    c.note_download_timeout()  # threshold-th timeout schedules exactly one restart
-    assert c._media_recovery_task is not None
-    await c._media_recovery_task
-
-    # (b) escalated to EXACTLY ONE underlying client.restart().
-    assert restart_calls == [True]
-    # (c) the verified restart cleared the negative cache -> the file loads again immediately.
-    assert api_server._download_backoff_remaining(key) == 0.0
-    assert len(api_server._download_failures) == 0
-
-
-@pytest.mark.asyncio
-async def test_failed_verify_does_not_clear_cache(monkeypatch):
-    """The cache-clear hook must fire ONLY on a verified restart: if verify_get_me fails, the
-    backoff must survive (a still-broken media DC should not drop the protective backoff)."""
-    c = TelegramClient()
-    key = ("selfheal_chan", 8, "fid_still_broken")
-    api_server._download_failures.pop(key, None)
-    api_server._record_download_failure(key)
-
-    c.set_restart_callback(api_server._clear_all_download_failures)
-    monkeypatch.setattr(c, "_start_watchdog", lambda: None)
-    monkeypatch.setattr(c.client, "is_connected", True)
-
-    async def fake_client_restart():
-        return None
-
-    async def failing_get_me():
-        raise RuntimeError("media DC still dead")
-
-    monkeypatch.setattr(c.client, "restart", fake_client_restart)
-    monkeypatch.setattr(c.client, "get_me", failing_get_me)
-
-    await c._restart_client(reason="test failed verify")
-
-    # verify_get_me failed -> callback NOT fired -> backoff still armed.
-    assert api_server._download_backoff_remaining(key) > 0.0
-    api_server._clear_download_failure(key)
 
 
 # --------------------------------------------------------------------------- #
@@ -292,52 +229,107 @@ def test_backoff_capped_at_max():
 
 
 # --------------------------------------------------------------------------- #
-# Restart-verified callback is best-effort (try/except at telegram_client.py:250-254)
+# Main-DC watchdog and disconnect handler -> process exit
 # --------------------------------------------------------------------------- #
 @pytest.mark.asyncio
-async def test_restart_callback_error_does_not_abort(monkeypatch, caplog):
-    """A registered restart-verified callback that RAISES must not abort recovery: the error is
-    swallowed + logged, and the restart still completes normally (watchdog re-armed, no SIGTERM
-    fallback, _restarting reset). This test FAILS if the try/except around the callback is
-    removed — the exception would then propagate to the outer handler, skip the watchdog re-arm
-    and trigger the process-restart fallback instead."""
+async def test_watchdog_exits_after_n_failed_probes(monkeypatch):
     c = TelegramClient()
+    reasons = _patch_exit_process(monkeypatch)
+    c.watchdog_interval = 0
+    probes = []
 
-    def exploding_callback():
-        raise RuntimeError("boom in verified-restart callback")
+    async def failing_get_me():
+        probes.append(True)
+        raise ConnectionError("probe failed")
 
-    c.set_restart_callback(exploding_callback)
+    monkeypatch.setattr(c.client, "get_me", failing_get_me)
 
-    # Drive a VERIFIED restart: connected client, restart + get_me both succeed so verify_ok is
-    # True and the callback fires.
-    monkeypatch.setattr(c.client, "is_connected", True)
+    with pytest.raises(_ProcessExited):
+        # Bounded: with interval 0 a broken exit would spin this loop forever.
+        await asyncio.wait_for(c._watchdog_loop(), timeout=5)
 
-    async def fake_client_restart():
-        return None
+    # The N-th consecutive failed probe exits the process, not an earlier one.
+    assert len(probes) == c.watchdog_failures
+    assert reasons == [f"watchdog: {c.watchdog_failures} consecutive failed probes"]
 
-    async def fake_get_me():
-        return type("Me", (), {"id": 42})()
 
-    monkeypatch.setattr(c.client, "restart", fake_client_restart)
-    monkeypatch.setattr(c.client, "get_me", fake_get_me)
+@pytest.mark.asyncio
+async def test_watchdog_loop_crash_exits(monkeypatch):
+    c = TelegramClient()
+    reasons = _patch_exit_process(monkeypatch)
+    c.watchdog_interval = 0
 
-    # Observe the success path (watchdog re-arm) vs the failure path (SIGTERM fallback) without
-    # actually killing the test process.
-    watchdog_rearmed = []
-    monkeypatch.setattr(c, "_start_watchdog", lambda: watchdog_rearmed.append(True))
-    sigterm_calls = []
-    monkeypatch.setattr(c, "_restart_app", lambda: sigterm_calls.append(True))
+    class _BrokenClient:
+        """A failed probe whose diagnostics raise: an error outside the per-probe handling."""
+        @property
+        def is_connected(self):
+            raise RuntimeError("boom")
 
-    with caplog.at_level("WARNING"):
-        await c._restart_client(reason="test callback raises")
+        async def get_me(self):
+            raise ConnectionError("probe failed")
 
-    # (a) Recovery completed on the SUCCESS path despite the callback raising: watchdog re-armed,
-    # no process-restart fallback, restart flag cleared.
-    assert watchdog_rearmed == [True]
-    assert sigterm_calls == []
-    assert c._restarting is False
-    # (b) The callback error was logged (not silently dropped).
-    assert any(
-        "callback raised" in r.getMessage() and "RuntimeError" in r.getMessage()
-        for r in caplog.records
-    )
+    monkeypatch.setattr(c, "client", _BrokenClient())
+
+    with pytest.raises(_ProcessExited):
+        # Bounded: with interval 0 a broken exit would spin this loop forever.
+        await asyncio.wait_for(c._watchdog_loop(), timeout=5)
+
+    assert reasons == ["watchdog loop crashed: RuntimeError: boom"]
+
+
+@pytest.mark.asyncio
+async def test_watchdog_saves_session_and_save_error_is_not_a_probe_failure(monkeypatch):
+    c = TelegramClient()
+    reasons = _patch_exit_process(monkeypatch)
+    c.watchdog_interval = 0
+    saves = []
+
+    async def ok_get_me():
+        return type("Me", (), {"id": 1})()
+
+    async def failing_save():
+        saves.append(True)
+        if len(saves) > c.watchdog_failures:
+            c._shutting_down = True  # ends the loop after one more probe than the exit threshold
+        raise OSError("disk full")
+
+    monkeypatch.setattr(c.client, "get_me", ok_get_me)
+    monkeypatch.setattr(c.client.storage, "save", failing_save)
+
+    await asyncio.wait_for(c._watchdog_loop(), timeout=5)
+
+    # Every successful probe saved the session, and a failed save never counted as a failed probe.
+    assert len(saves) == c.watchdog_failures + 1
+    assert c._wd_probe_fail_count == 0
+    assert reasons == []
+
+
+def test_exit_process_exits_with_code_1(monkeypatch, caplog):
+    import telegram_client
+    codes = []
+
+    def fake_exit(code):
+        codes.append(code)
+        raise _ProcessExited()
+
+    monkeypatch.setattr(telegram_client.os, "_exit", fake_exit)
+    with caplog.at_level(logging.CRITICAL, logger="telegram_client"), pytest.raises(_ProcessExited):
+        TelegramClient()._exit_process("why")
+
+    # Code 1: an `on-failure` restart policy restarts the container only on a non-zero code.
+    assert codes == [1]
+    assert any("reason='why'" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_disconnects_are_only_logged(monkeypatch, caplog):
+    c = TelegramClient()
+    reasons = _patch_exit_process(monkeypatch)
+
+    with caplog.at_level(logging.WARNING, logger="telegram_client"):
+        for _ in range(10):
+            await c._on_disconnect(c.client, None)
+
+    lost = [r for r in caplog.records if r.getMessage() == "connection_handler: connection lost"]
+    assert len(lost) == 10
+    assert reasons == []

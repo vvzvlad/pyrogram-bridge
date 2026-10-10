@@ -200,9 +200,9 @@ _DOWNLOAD_BACKOFF_BASE = 60.0     # seconds; backoff after the first failure
 # cache sweep interval: with a shorter cap the backoff always expires before the next
 # sweep, so download_new_files re-queues the dead file every pass (the retry-storm this
 # fixes — a dead file was retried every ~15 min for up to 20 days). A long cap is safe
-# because a VERIFIED self-heal restart clears the whole negative cache outright (see
-# _clear_all_download_failures), so a healed system never holds a stale, long backoff
-# that keeps fast-503'ing a now-downloadable file.
+# because the negative cache lives in memory only: the process restart that recovers a
+# hung session (watchdog or media-timeout streak) empties it, so a healed system never
+# holds a stale, long backoff that keeps fast-503'ing a now-downloadable file.
 # Clamp STRICTLY above the sweep interval (+1), so a capped dead file's backoff still
 # has time remaining at the next sweep structurally — not by timing luck — even if
 # MEDIA_BACKOFF_MAX_S is mis-set at/below the sweep interval.
@@ -300,21 +300,6 @@ def _clear_download_failure(key: tuple[str, int, str]) -> None:
     """Forget any recorded failure for `key` after a successful download."""
     if _download_failures.pop(key, None) is not None:
         logger.info(f"download_backoff_cleared: {key[0]}/{key[1]}/{key[2]} recovered")
-
-def _clear_all_download_failures() -> None:
-    """Drop the entire download negative cache. Registered with telegram_client and invoked
-    ONLY after a VERIFIED self-heal restart (verify_get_me OK). _restart_client() rebuilds
-    the WHOLE client — all DCs, including the media DC — so every per-file backoff is stale
-    and a previously-failing file may now download. Without this a file that reached the
-    backoff cap would keep fast-503'ing for up to _DOWNLOAD_BACKOFF_MAX after recovery, and
-    nothing would retry it (the sweeper skips backed-off keys, get_media fast-503s them), so
-    it could not self-heal until the backoff expired — defeating the self-heal's purpose.
-    The retry-storm risk if the restart did not actually help is bounded: each re-download is
-    timeout-bounded and simply re-arms its backoff."""
-    n = len(_download_failures)
-    _download_failures.clear()
-    if n:
-        logger.warning(f"download_backoff_cleared_all: dropped {n} entries after verified self-heal restart")
 
 # --------------------------------------------------------------------------- #
 # Rich part=True re-fetch memo for the /media download cascade (#86).
@@ -514,12 +499,6 @@ async def lifespan(_: FastAPI):
             logger.info(f"legacy_media_file_ids_removed: {legacy_media_ids}")
         except OSError as e:
             logger.warning(f"legacy_media_file_ids_remove_error: {e}")
-
-    # Wire the self-heal restart -> negative-cache clear hook. telegram_client owns the
-    # restart; the negative cache lives here. Registering a plain callback (rather than
-    # importing api_server from telegram_client) keeps the dependency one-way and avoids a
-    # circular import. The hook fires ONLY on a verified restart — see _restart_client.
-    client.set_restart_callback(_clear_all_download_failures)
 
     await client.start()
     # Supervise the background tasks: if either dies (not via cancellation) it is logged
@@ -1236,8 +1215,11 @@ def remove_old_cached_files_sync(media_files: list, cache_dir: str) -> tuple[lis
         for file in files:
             is_large_video_temp = file.startswith("temp_")
             # Match the partial-download suffixes: the new `.part.{32 hex}` and the legacy
-            # `.tmp.{32 hex}` (old stubs may still be on disk after the rename to .part.).
-            is_race_temp = bool(re.match(r'^.+\.(part|tmp)\.[0-9a-f]{32}$', file))
+            # `.tmp.{32 hex}` (old stubs may still be on disk after the rename to .part.),
+            # plus Kurigram's own download file under such a name (`X.part.{32 hex}.temp`):
+            # Kurigram removes it only in its own except, so a process exit mid-download
+            # leaves it behind.
+            is_race_temp = bool(re.match(r'^.+\.(part|tmp)\.[0-9a-f]{32}(\.temp)?$', file))
             if not (is_large_video_temp or is_race_temp):
                 continue
             file_path = os.path.join(root, file)
@@ -1699,9 +1681,8 @@ async def ping() -> JSONResponse:
     #
     # The staleness branch (age >= threshold => degraded) is only meaningful while the watchdog
     # is running to refresh age. With the watchdog DISABLED (TG_WATCHDOG_ENABLED=false) nothing
-    # refreshes age — yet a disconnect-flap restart can still stamp it once (see _restart_client,
-    # which runs before the watchdog-enabled gate), after which age only grows. Letting that
-    # stale age drive /ping to 503 would spuriously fail the container healthcheck on a live
+    # stamps age (only watchdog probes do), so it stays None. The gate does not rely on that: a
+    # stale age driving /ping to 503 would spuriously fail the container healthcheck on a live
     # connection and trigger an autoheal restart. So gate staleness on the watchdog being on;
     # with it off, /ping is a pure connectivity check (no zombie-session detection — that
     # TG-liveness signal only exists while the watchdog runs).
