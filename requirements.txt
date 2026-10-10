@@ -15,13 +15,10 @@ python-multipart==0.0.20
 #     block/text type renders as "Unsupported block" until it is mapped there;
 #   - confirm pyrogram.types.Object did NOT gain __slots__ (the wrapper attaches `part`
 #     and `parse_failed` via setattr, and Object.default serialises them into /raw_json);
-#   - expect the frozen pickled corpus (tests/test_data/recorded/, not re-recordable — there
-#     is no live Telegram here) to break on slotted or deleted classes: 2.2.26 gave `Str`
-#     (the str subclass in message.py, NOT Object) __slots__ and deleted several colour and
-#     keyboard-button types. tests/golden_replay._CorpusUnpickler absorbs both, but NOT the
-#     same way: a deleted class is stubbed automatically and silently (a blanket except), so
-#     it needs nothing from you, while a newly SLOTTED class needs its own __setstate__ shim
-#     there, like _CompatStr. Either way the fix goes in the loader, never in a golden.
+#   - expect the frozen recorded corpus (tests/test_data/recorded/*.json, not re-recordable —
+#     there is no live Telegram here) to fail loudly when a recorded class or enum member is
+#     deleted or renamed: tests/golden_replay._decode looks every type up by its public name
+#     and has no stand-ins. Fix it in the loader or in the corpus file, never in a golden.
 #   - re-check pyrogram/parser/html.py::unparse for new VALUELESS attributes: today
 #     ' expandable' on <blockquote> is the only one, and post_parser._QUOTE_TAG_TAIL_RE
 #     hardcodes that name (a bare word cannot be told from prose like '<Word here>'). A
