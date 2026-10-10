@@ -119,10 +119,7 @@ def get_settings() -> dict[str, Any]:
         "tg_watchdog_interval": _parse_int_env("TG_WATCHDOG_INTERVAL", 60),
         "tg_watchdog_timeout": _parse_int_env("TG_WATCHDOG_TIMEOUT", 10),
         "tg_watchdog_failures": _parse_int_env("TG_WATCHDOG_FAILURES", 3),
-        "tg_watchdog_restart_timeout": _parse_int_env("TG_WATCHDOG_RESTART_TIMEOUT", 90),
         "tg_watchdog_heartbeat_every": _parse_int_env("TG_WATCHDOG_HEARTBEAT_EVERY", 30),
-        "tg_disconnect_flap_limit": _parse_int_env("TG_DISCONNECT_FLAP_LIMIT", 3),
-        "tg_disconnect_flap_window": _parse_int_env("TG_DISCONNECT_FLAP_WINDOW", 120),
         # /ping reports TG as unhealthy once the last successful watchdog probe is older than
         # this many seconds. Default is derived from the watchdog cadence: it is roughly how
         # long the watchdog itself would take to give up and trigger a restart —
@@ -156,8 +153,8 @@ def get_settings() -> dict[str, Any]:
         # only a blast-radius limiter — the real cure for a zombie media connection is the
         # download-timeout-triggered restart below.
         "tg_max_concurrent_transmissions": _parse_int_env("TG_MAX_CONCURRENT_TRANSMISSIONS", 3),
-        # After this many CONSECUTIVE media-download timeouts, force an in-process client
-        # restart to rebuild the (zombie) media-DC connection. Any successful download
+        # After this many CONSECUTIVE media-download timeouts, exit the process so the
+        # container restart rebuilds the (zombie) media-DC connection. Any successful download
         # resets the streak, so this only fires on a genuine death loop, not on the odd
         # slow large-video timeout. The watchdog cannot catch this — it probes the main DC.
         "media_timeout_restart_threshold": _parse_int_env("MEDIA_TIMEOUT_RESTART_THRESHOLD", 5),
