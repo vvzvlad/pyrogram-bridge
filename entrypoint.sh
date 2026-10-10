@@ -6,10 +6,10 @@
 # data volume. The image layer is chown'd to `app` at build time, but that only
 # affects the image — a pre-existing named volume mounted at /app/data keeps
 # whatever ownership it had on disk. Installs that started on the old root image
-# (before #64) have root-owned files there (media_file_ids.db, pyro_bridge.session,
+# have root-owned files there (media_file_ids.db, pyro_bridge.session,
 # cache/, tgcache/, media_digest.key). Once we drop to uid 1000 those become
 # unwritable and SQLite fails with "attempt to write a readonly database" in
-# init_db_sync during startup, crash-looping the container (issue #82).
+# init_db_sync during startup, crash-looping the container.
 #
 # All writable runtime state lives under /app/data (DB, session, cache/, tgcache/,
 # key), so a single recursive chown of that one directory migrates every existing
@@ -33,7 +33,7 @@ chown -R app:app /app/data
 # this is defence-in-depth for any library that writes under $HOME.
 export HOME=/home/app
 
-# Drop root and exec the app as uid/gid 1000 (user `app`), preserving #64's
+# Drop root and exec the app as uid/gid 1000 (user `app`), preserving the
 # non-root runtime intent. setpriv ships with util-linux (pinned in the Dockerfile).
 # --init-groups sets the supplementary groups from app's /etc/group membership.
 exec setpriv --reuid=app --regid=app --init-groups "$@"

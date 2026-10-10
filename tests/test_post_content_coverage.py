@@ -15,13 +15,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from pyrogram.enums import MessageMediaType, MessageServiceType
+from pyrogram.enums import MessageEntityType, MessageMediaType, MessageServiceType
+from pyrogram.types import MessageEntity
 
 import post_parser
+from api_server import find_file_id_in_message
 from message_snapshot import snapshot_message, restore_message
 from post_parser import PostParser, MARKER_QUOTE_END
 from rss_generator import _create_messages_groups
-from url_signer import KeyManager
+from url_signer import KeyManager, generate_media_digest
 
 
 class FakeStr(str):
@@ -68,7 +70,7 @@ def make_message(**overrides):
 
 
 # --------------------------------------------------------------------------- #
-# 2. Service messages: skipped unless post_parser renders them with content.
+# 2. Service messages: the feed skips every one, CUSTOM_ACTION included.
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize("service", [
     MessageServiceType.GIVEAWAY_CREATED, MessageServiceType.GIVEAWAY_COMPLETED,
@@ -89,13 +91,9 @@ def test_restored_service_name_string_is_skipped_too():
     assert _create_messages_groups([restored]) == []
 
 
-def test_custom_action_with_text_is_kept():
+def test_custom_action_with_text_is_skipped():
     msg = make_message(service=MessageServiceType.CUSTOM_ACTION, text="Something happened")
-    assert _create_messages_groups([msg]) == [[msg]]
-
-
-def test_custom_action_without_text_is_skipped():
-    assert _create_messages_groups([make_message(service=MessageServiceType.CUSTOM_ACTION, text=None)]) == []
+    assert _create_messages_groups([msg]) == []
 
 
 def test_custom_action_plain_str_text_renders_escaped(parser):
@@ -293,6 +291,38 @@ def test_story_with_media_and_no_caption_adds_no_block(parser):
     assert parser._format_special_media(msg) is None
 
 
+def test_story_caption_text_link_renders_an_anchor(parser):
+    msg = make_message(media=MessageMediaType.STORY, story=SimpleNamespace(
+        video=None, photo=SimpleNamespace(file_unique_id="sp"), caption="see docs",
+        caption_entities=[MessageEntity(type=MessageEntityType.TEXT_LINK, offset=4, length=4,
+                                        url="https://example.com/docs")]))
+    body = parser._generate_html_body(msg)
+    assert '<div class="message-special">see <a href="https://example.com/docs">docs</a></div>' in body
+
+
+@pytest.mark.parametrize("entities", [None, []], ids=["none", "empty"])
+def test_story_caption_without_entities_stays_escaped(parser, entities):
+    # Kurigram's unparse returns a caption without entities unescaped, and crashes on None.
+    msg = make_message(media=MessageMediaType.STORY, story=SimpleNamespace(
+        video=None, photo=SimpleNamespace(file_unique_id="sp"), caption="a <b> & c",
+        caption_entities=entities))
+    body = parser._generate_html_body(msg)
+    assert '<div class="message-special">a &lt;b&gt; &amp; c</div>' in body
+
+
+def test_story_caption_name_mention_falls_back_to_escaped_text(parser):
+    # Kurigram parses story entities without user data: a name mention has user=None and
+    # its unparse raises. The caption falls back to escaped text, live and on a cache hit,
+    # and the snapshot does not fail.
+    msg = make_message(media=MessageMediaType.STORY, story=SimpleNamespace(
+        video=None, photo=SimpleNamespace(file_unique_id="sp"), caption="hi <Bob>",
+        caption_entities=[MessageEntity(type=MessageEntityType.TEXT_MENTION, offset=3, length=5,
+                                        user=None)]))
+    expected = '<div class="message-special">hi &lt;Bob&gt;</div>'
+    assert expected in parser._generate_html_body(msg)
+    assert expected in parser._generate_html_body(restore_message(snapshot_message(msg)))
+
+
 # --------------------------------------------------------------------------- #
 # 7. Audio performer — title.
 # --------------------------------------------------------------------------- #
@@ -323,14 +353,44 @@ def test_untagged_audio_and_voice_are_unchanged(parser):
 
 
 # --------------------------------------------------------------------------- #
-# 8. Animated (TGS) stickers render as text.
+# 8. Animated (TGS) stickers: the thumbnail as an image, else a text line.
 # --------------------------------------------------------------------------- #
-def test_animated_sticker_renders_text_not_img(parser):
+def test_animated_sticker_without_thumbs_renders_text_and_is_not_collected(parser):
     msg = make_message(media=MessageMediaType.STICKER, sticker=SimpleNamespace(
-        file_unique_id="tgs", emoji="🐱", is_video=False, is_animated=True))
+        file_unique_id="tgs", emoji="🐱", is_video=False, is_animated=True, thumbs=None))
     media = parser._generate_html_media(msg)
     assert "Sticker 🐱" in media
     assert "<img" not in media and "<video" not in media
+    assert parser._pending_media_ids == []
+
+
+def test_animated_sticker_with_thumbs_renders_the_thumbnail(parser):
+    msg = make_message(media=MessageMediaType.STICKER, sticker=SimpleNamespace(
+        file_unique_id="tgs", emoji="🐱", is_video=False, is_animated=True,
+        thumbs=[SimpleNamespace(file_id="tgs_thumb", width=128, height=128)]))
+    media = parser._generate_html_media(msg)
+    file = f"testchan/{msg.id}/tgs.thumb"
+    assert f'<img src="http://test.example.com/media/{file}/{generate_media_digest(file)}" alt="Sticker 🐱"' in media
+    assert [fid for _channel, _post, fid, _added in parser._pending_media_ids] == ["tgs.thumb"]
+
+
+async def test_thumbnail_key_resolves_to_the_largest_thumbnail():
+    msg = make_message(media=MessageMediaType.STICKER, sticker=SimpleNamespace(
+        file_unique_id="tgs", file_id="tgs_file", emoji="🐱", is_video=False, is_animated=True,
+        thumbs=[SimpleNamespace(file_id="small", width=100, height=100),
+                SimpleNamespace(file_id="large", width=320, height=320),
+                SimpleNamespace(file_id="medium", width=200, height=200)]))
+    assert await find_file_id_in_message(msg, "tgs.thumb") == "large"
+
+
+async def test_thumbnail_key_without_a_match_is_not_found():
+    bare = make_message(media=MessageMediaType.STICKER, sticker=SimpleNamespace(
+        file_unique_id="tgs", file_id="tgs_file", emoji="🐱", is_video=False, is_animated=True, thumbs=None))
+    assert await find_file_id_in_message(bare, "tgs.thumb") is None
+    thumbed = make_message(media=MessageMediaType.STICKER, sticker=SimpleNamespace(
+        file_unique_id="tgs", file_id="tgs_file", emoji="🐱", is_video=False, is_animated=True,
+        thumbs=[SimpleNamespace(file_id="t", width=128, height=128)]))
+    assert await find_file_id_in_message(thumbed, "other.thumb") is None
 
 
 def test_static_and_video_stickers_keep_their_elements(parser):

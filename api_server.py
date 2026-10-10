@@ -42,6 +42,9 @@ from telegram_client import (
     safe_get_rich_message,
     get_rich_part_fetch_attempt_count,
     get_rich_part_fetch_failed_count,
+    WATCHDOG_INTERVAL_S,
+    WATCHDOG_PROBE_TIMEOUT_S,
+    WATCHDOG_FAILURES,
 )
 from config import get_settings, setup_logging
 from rss_generator import generate_channel_rss, generate_channel_html, get_render_failed_count
@@ -51,7 +54,7 @@ from kurigram_compat import (
     get_rich_part_seen_count,
     has_parse_failures,
 )
-from post_parser import PostParser
+from post_parser import PostParser, STICKER_THUMB_SUFFIX
 from url_signer import verify_media_digest
 from file_io import (DB_PATH, init_db_sync, get_all_media_file_ids_sync,
                      update_media_file_access_sync, update_media_file_access_bulk_sync,
@@ -177,46 +180,52 @@ download_queue = asyncio.Queue(maxsize=100)
 # set is race-free: download_new_files adds the key before put_nowait; the worker discards
 # it in its finally alongside task_done().
 _queued_media: set[tuple[str, int, str]] = set()
-def _env_int(name: str, default: int, minimum: int = 0) -> int:
-    """Parse an int env var for a module-level tunable; fall back to default on absence/garbage."""
-    raw = os.getenv(name)
-    if raw is None or raw.strip() == "":
-        return default
-    try:
-        return max(minimum, int(raw))
-    except ValueError:
-        logger.warning(f"{name} must be an integer, got {raw!r}; using default {default}")
-        return default
+
+# /ping reports TG as unhealthy once the last successful watchdog probe is older than
+# this many seconds. Derived from the watchdog cadence: it is roughly how long the
+# watchdog itself would take to give up and trigger a restart —
+# interval * (failures + 1) + timeout. With 60, 3 and 10 that is 250s, so a
+# transient slow probe never flaps /ping, but a genuinely stuck session (no successful
+# probe for ~4 min) surfaces as 503 before/around the time the watchdog restarts.
+PING_UNHEALTHY_AFTER_S = WATCHDOG_INTERVAL_S * (WATCHDOG_FAILURES + 1) + WATCHDOG_PROBE_TIMEOUT_S
+# Media download timeout scales with file size (large videos): the per-download
+# timeout is clamped to [min, max] seconds, with an effective floor of
+# MEDIA_DOWNLOAD_MIN_SPEED bytes/s (timeout ≈ file_size / min_speed).
+MEDIA_DOWNLOAD_TIMEOUT_MIN_S = 120
+MEDIA_DOWNLOAD_TIMEOUT_MAX_S = 1800
+MEDIA_DOWNLOAD_MIN_SPEED = 256 * 1024
+# Interval (seconds) between cache-sweep passes in cache_media_files. Each pass is a
+# full media_file_ids table scan plus an os.walk of the whole cache tree, so running
+# it every 60s under a "20 days"/"1 hour" retention policy is wasteful.
+CACHE_SWEEP_INTERVAL_S = 900
+# Size of the asyncio default ThreadPoolExecutor. SQLite/python-magic/pickle/os.walk
+# all run via asyncio.to_thread; the interpreter default (min(32, cpu+4)) is only 5-6
+# on a 1-2 CPU container, which starves those under load. 32 gives ample headroom.
+IO_THREAD_POOL_SIZE = 32
+API_HOST = "0.0.0.0"
 
 # --- Failing-download backoff (negative cache) --------------------------------
 # A media file whose download keeps failing (hang/timeout/not-found) must not be
-# retried on every cache sweep (cache_sweep_interval, default 900s), nor keep
+# retried on every cache sweep (CACHE_SWEEP_INTERVAL_S, 900s), nor keep
 # occupying a scarce Pyrogram transmission slot. We remember recent failures per
 # (channel, post_id, file_unique_id) and skip / fast-reject re-attempts until an
 # exponentially growing backoff elapses. Cleared on the first successful download.
 # All access is from the single event-loop thread, so a plain dict needs no lock.
 _DOWNLOAD_BACKOFF_BASE = 60.0     # seconds; backoff after the first failure
-# Cap on the backoff (seconds), env MEDIA_BACKOFF_MAX_S, default 6h. It MUST be >= the
-# cache sweep interval: with a shorter cap the backoff always expires before the next
-# sweep, so download_new_files re-queues the dead file every pass (the retry-storm this
-# fixes — a dead file was retried every ~15 min for up to 20 days). A long cap is safe
-# because a VERIFIED self-heal restart clears the whole negative cache outright (see
-# _clear_all_download_failures), so a healed system never holds a stale, long backoff
+# Cap on the backoff (seconds), 6h. It must exceed CACHE_SWEEP_INTERVAL_S: with a shorter
+# cap the backoff always expires before the next sweep, so download_new_files re-queues
+# the dead file every pass (the retry-storm this fixes — a dead file was retried every
+# ~15 min for up to 20 days). A long cap is safe because the negative cache lives in
+# memory only: the process restart that recovers a hung session (watchdog or
+# media-timeout streak) empties it, so a healed system never holds a stale, long backoff
 # that keeps fast-503'ing a now-downloadable file.
-# Clamp STRICTLY above the sweep interval (+1), so a capped dead file's backoff still
-# has time remaining at the next sweep structurally — not by timing luck — even if
-# MEDIA_BACKOFF_MAX_S is mis-set at/below the sweep interval.
-_DOWNLOAD_BACKOFF_MAX = float(max(
-    _env_int("MEDIA_BACKOFF_MAX_S", 21600, minimum=1),
-    int(Config["cache_sweep_interval"]) + 1,
-))
+_DOWNLOAD_BACKOFF_MAX = 21600.0
 # After this many CONSECUTIVE failed downloads, drop the media row from SQLite so a
-# genuinely-dead file (deleted post, gone media) stops being re-queued forever. env
-# MEDIA_FAILURES_DROP_ROW, default 15. Best-effort / fire-and-forget: if the post is
-# still in a feed the renderer recreates the row, but the in-memory failure counter
-# survives until success/restart, so a recreated-then-refailing row is dropped again
-# quickly. See _drop_media_row.
-_DOWNLOAD_FAILURES_DROP_ROW = _env_int("MEDIA_FAILURES_DROP_ROW", 15, minimum=1)
+# genuinely-dead file (deleted post, gone media) stops being re-queued forever.
+# Best-effort / fire-and-forget: if the post is still in a feed the renderer recreates
+# the row, but the in-memory failure counter survives until success/restart, so a
+# recreated-then-refailing row is dropped again quickly. See _drop_media_row.
+_DOWNLOAD_FAILURES_DROP_ROW = 15
 # LRU cap on the negative cache. Permanently-404 / deleted files would otherwise leave
 # eternal entries and slowly leak memory on a long-uptime process. We keep at most this
 # many most-recently-failed keys and evict the oldest. Eviction is harmless: a dropped
@@ -301,23 +310,8 @@ def _clear_download_failure(key: tuple[str, int, str]) -> None:
     if _download_failures.pop(key, None) is not None:
         logger.info(f"download_backoff_cleared: {key[0]}/{key[1]}/{key[2]} recovered")
 
-def _clear_all_download_failures() -> None:
-    """Drop the entire download negative cache. Registered with telegram_client and invoked
-    ONLY after a VERIFIED self-heal restart (verify_get_me OK). _restart_client() rebuilds
-    the WHOLE client — all DCs, including the media DC — so every per-file backoff is stale
-    and a previously-failing file may now download. Without this a file that reached the
-    backoff cap would keep fast-503'ing for up to _DOWNLOAD_BACKOFF_MAX after recovery, and
-    nothing would retry it (the sweeper skips backed-off keys, get_media fast-503s them), so
-    it could not self-heal until the backoff expired — defeating the self-heal's purpose.
-    The retry-storm risk if the restart did not actually help is bounded: each re-download is
-    timeout-bounded and simply re-arms its backoff."""
-    n = len(_download_failures)
-    _download_failures.clear()
-    if n:
-        logger.warning(f"download_backoff_cleared_all: dropped {n} entries after verified self-heal restart")
-
 # --------------------------------------------------------------------------- #
-# Rich part=True re-fetch memo for the /media download cascade (#86).
+# Rich part=True re-fetch memo for the /media download cascade.
 # --------------------------------------------------------------------------- #
 # A reader burst over ONE part post carrying N media must not fire N identical GetRichMessage
 # RPCs. The re-fetch result (the enriched rich message, or None on failure) is cached per
@@ -335,13 +329,13 @@ _rich_refetch_inflight: "dict[tuple[str, int], asyncio.Future]" = {}
 
 
 async def _rich_refetch_for_download(channel: Union[str, int], post_id: int) -> Any:
-    """ONE bare, memoised + coalesced GetRichMessage re-fetch for the /media cascade (#86).
+    """ONE bare, memoised + coalesced GetRichMessage re-fetch for the /media cascade.
 
     BARE — no ``tg_rpc_bounded``: a reader /media request must NOT queue behind feed
     enrichment, and a FloodWait is already mapped to a retryable 429 by get_media's handler.
     ``safe_get_rich_message`` never raises (it returns a typed result), so a transient blip
     can never propagate as an ``RPCError(CODE==400)`` that the _runner classifier would blacken
-    into a permanent 404. Returns the enriched high-level rich message (possibly a #84 sentinel)
+    into a permanent 404. Returns the enriched high-level rich message (possibly a kurigram_compat sentinel)
     or None on any fetch failure; the value is memoised for _RICH_REFETCH_TTL seconds AND
     coalesced across concurrent callers for the same (channel, post_id).
     """
@@ -486,9 +480,9 @@ async def lifespan(_: FastAPI):
 
     # Enlarge the default threadpool: SQLite/python-magic/pickle/os.walk all run via
     # asyncio.to_thread, and the interpreter default (min(32, cpu+4) = 5-6 on a 1-2 CPU
-    # container) is too small under load. Configurable via IO_THREAD_POOL_SIZE.
+    # container) is too small under load.
     loop = asyncio.get_running_loop()
-    io_executor = ThreadPoolExecutor(max_workers=Config["io_thread_pool_size"], thread_name_prefix="io")
+    io_executor = ThreadPoolExecutor(max_workers=IO_THREAD_POOL_SIZE, thread_name_prefix="io")
     loop.set_default_executor(io_executor)
 
     os.makedirs(MEDIA_CACHE_DIR, exist_ok=True) # Create cache directory
@@ -514,12 +508,6 @@ async def lifespan(_: FastAPI):
             logger.info(f"legacy_media_file_ids_removed: {legacy_media_ids}")
         except OSError as e:
             logger.warning(f"legacy_media_file_ids_remove_error: {e}")
-
-    # Wire the self-heal restart -> negative-cache clear hook. telegram_client owns the
-    # restart; the negative cache lives here. Registering a plain callback (rather than
-    # importing api_server from telegram_client) keeps the dependency one-way and avoids a
-    # circular import. The hook fires ONLY on a verified restart — see _restart_client.
-    client.set_restart_callback(_clear_all_download_failures)
 
     await client.start()
     # Supervise the background tasks: if either dies (not via cancellation) it is logged
@@ -558,8 +546,9 @@ app = FastAPI(title="Pyrogram Bridge", lifespan=lifespan)
 app.add_middleware(RequestLoggingMiddleware)
 
 def mask_sensitive_value(input_str: str) -> str:
-    """Mask middle part of sensitive value, showing only first and last 4 characters"""
-    if not input_str or len(input_str) < 8:
+    """Mask a sensitive value. A value shorter than 32 characters is hidden entirely; a longer
+    one shows only its first and last 4 characters, so at most a quarter of it is visible."""
+    if not input_str or len(input_str) < 32:
         return '***'
     visible_chars = 4
     return f"{input_str[:visible_chars]}{'*' * (len(input_str) - visible_chars * 2)}{input_str[-visible_chars:]}"
@@ -572,7 +561,7 @@ if __name__ == "__main__":
     
     logger.info("Starting server with configuration:")
     for key, value in Config.items():
-        if any(sensitive in key.lower() for sensitive in ['token', 'tg_api_id', 'tg_api_hash']):
+        if any(sensitive in key.lower() for sensitive in ['token', 'secret', 'tg_api_id', 'tg_api_hash']):
             logger.info(f"    {key}: {mask_sensitive_value(str(value))}")
         else:
             logger.info(f"    {key}: {value}")
@@ -583,7 +572,7 @@ if __name__ == "__main__":
     try:
         uvicorn.run(
             "api_server:app",
-            host=Config["api_host"],
+            host=API_HOST,
             port=Config["api_port"],
             loop="uvloop"
         )
@@ -597,7 +586,7 @@ if __name__ == "__main__":
 
 async def find_file_id_in_message(message: Message, file_unique_id: str) -> Union[str, None]:
     """Find file_id by checking all possible media types in message"""
-    # Rich media (Kurigram 2.2.24, #85): a rich post carries its media inside rich blocks,
+    # Rich media (Kurigram 2.2.24): a rich post carries its media inside rich blocks,
     # not on message.<type>. Resolved from the LIVE Kurigram objects (file_id is ephemeral
     # and never stored in the tree). Checked BEFORE the general loop (same precedent as the
     # poll branch below); mutually exclusive with a POLL message.
@@ -659,6 +648,13 @@ async def find_file_id_in_message(message: Message, file_unique_id: str) -> Unio
         media_found.append(f"sticker ({message.sticker.file_unique_id})")
         if message.sticker.file_unique_id == file_unique_id:
             return message.sticker.file_id
+        # An animated sticker is shown by its thumbnail, keyed as the sticker's file_unique_id
+        # plus STICKER_THUMB_SUFFIX; the largest thumbnail is downloaded. No thumbnail falls
+        # through to the "not found" warning below.
+        if file_unique_id.endswith(STICKER_THUMB_SUFFIX):
+            thumbs = getattr(message.sticker, 'thumbs', None)
+            if thumbs and file_unique_id.removesuffix(STICKER_THUMB_SUFFIX) == message.sticker.file_unique_id:
+                return max(thumbs, key=lambda thumb: thumb.width * thumb.height).file_id
     if message.web_page and message.web_page.photo:
         media_found.append(f"web_page.photo ({message.web_page.photo.file_unique_id})")
         if message.web_page.photo.file_unique_id == file_unique_id:
@@ -736,7 +732,8 @@ async def prepare_file_response(file_path: str, request: Request,
     FileResponse handles Range/If-Range/206/416/multipart and sets
     Accept-Ranges/ETag/Last-Modified itself, and reads the file efficiently (no per-64KB
     to_thread hop that starved the threadpool). We keep: the early 404 pre-check, the MIME
-    logic (python-magic + SQLite type cache) and the stage-2 temp_* mtime touch.
+    logic (python-magic + SQLite type cache) and the temp_* mtime touch
+    (tests/test_stage2_static.py).
     """
     # `request` is unused now that FileResponse parses the Range header itself, but the
     # signature is kept for call-site compatibility (and future needs).
@@ -857,13 +854,13 @@ async def prepare_file_response(file_path: str, request: Request,
 def _media_download_timeout(file_size: int) -> float:
     """Scale the download timeout with file size.
 
-    Effective floor of `media_download_min_speed` bytes/s (timeout ≈ size / min_speed),
-    clamped to [media_download_timeout_min, media_download_timeout_max] seconds.
+    Effective floor of `MEDIA_DOWNLOAD_MIN_SPEED` bytes/s (timeout ≈ size / min_speed),
+    clamped to [MEDIA_DOWNLOAD_TIMEOUT_MIN_S, MEDIA_DOWNLOAD_TIMEOUT_MAX_S] seconds.
     A non-positive/unknown size falls back to the minimum timeout.
     """
-    min_t = Config["media_download_timeout_min"]
-    max_t = Config["media_download_timeout_max"]
-    min_speed = Config["media_download_min_speed"]
+    min_t = MEDIA_DOWNLOAD_TIMEOUT_MIN_S
+    max_t = MEDIA_DOWNLOAD_TIMEOUT_MAX_S
+    min_speed = MEDIA_DOWNLOAD_MIN_SPEED
     if file_size <= 0 or min_speed <= 0:
         return float(min_t)
     return float(min(max_t, max(min_t, file_size // min_speed)))
@@ -998,7 +995,7 @@ async def _download_deduped(channel: Union[str, int], post_id: int, file_unique_
 
     # Waiter timeout: a generous safety net above the maximum per-download timeout (the
     # download is itself internally bounded), so a live download always completes first.
-    waiter_timeout = float(Config["media_download_timeout_max"]) + 120.0
+    waiter_timeout = float(MEDIA_DOWNLOAD_TIMEOUT_MAX_S) + 120.0
     # shield so a timed-out / cancelled waiter does NOT cancel the shared Future that the
     # detached task owns and other waiters depend on.
     return await asyncio.wait_for(asyncio.shield(fut), timeout=waiter_timeout)
@@ -1061,7 +1058,7 @@ async def download_media_file(channel: Union[str, int], post_id: int, file_uniqu
         except Exception as e:
             logger.error(f"Failed to get video file size for message {post_id}: {str(e)}")
 
-    # Rich video (Kurigram 2.2.24, #85): a rich post has message.video=None but may embed a
+    # Rich video (Kurigram 2.2.24): a rich post has message.video=None but may embed a
     # >100MB video in a rich block. Route it through the same temp_ (non-cached) large-video
     # path, sized from the live rich object rather than message.video.
     if not is_large_video and message.video is None:
@@ -1086,7 +1083,7 @@ async def download_media_file(channel: Union[str, int], post_id: int, file_uniqu
             raise HTTPException(status_code=404, detail="File not found in message")
         # Scale the timeout with size (≈256 KB/s floor) so slow big-video downloads aren't
         # cut short at the fixed 120s used for regular files. large_video_size is sized from
-        # message.video for a regular large video, or from the rich video object (#85).
+        # message.video for a regular large video, or from the rich video object.
         file_size = large_video_size
         timeout = _media_download_timeout(file_size)
         logger.info(f"Downloading large video file {file_unique_id} to temporary path {temp_file_path} (timeout={timeout:.0f}s)")
@@ -1121,7 +1118,7 @@ async def download_media_file(channel: Union[str, int], post_id: int, file_uniqu
 
     file_id = await find_file_id_in_message(message, file_unique_id)
     if not file_id:
-        # Rich media download cascade (Kurigram 2.2.24, #86). The fid was not resolvable from
+        # Rich media download cascade (Kurigram 2.2.24). The fid was not resolvable from
         # the live (possibly partial / parse-degraded) rich object. Do ONE bare, memoised
         # GetRichMessage re-fetch and re-resolve the fid against the fuller object.
         rich_message = getattr(message, 'rich_message', None)
@@ -1173,7 +1170,7 @@ async def download_media_file(channel: Union[str, int], post_id: int, file_uniqu
     # path. _download_atomic owns the zero-size check, the race-loser cleanup, and the
     # rename-only-if-absent logic, keeping the "final name = complete file" invariant.
     try:
-        file_path = await _download_atomic(file_id, cache_path, timeout=float(Config["media_download_timeout_min"]))
+        file_path = await _download_atomic(file_id, cache_path, timeout=float(MEDIA_DOWNLOAD_TIMEOUT_MIN_S))
     except asyncio.TimeoutError:
         logger.error(f"Timeout downloading media {file_unique_id}")
         raise HTTPException(status_code=504, detail="Download timeout")
@@ -1236,8 +1233,11 @@ def remove_old_cached_files_sync(media_files: list, cache_dir: str) -> tuple[lis
         for file in files:
             is_large_video_temp = file.startswith("temp_")
             # Match the partial-download suffixes: the new `.part.{32 hex}` and the legacy
-            # `.tmp.{32 hex}` (old stubs may still be on disk after the rename to .part.).
-            is_race_temp = bool(re.match(r'^.+\.(part|tmp)\.[0-9a-f]{32}$', file))
+            # `.tmp.{32 hex}` (old stubs may still be on disk after the rename to .part.),
+            # plus Kurigram's own download file under such a name (`X.part.{32 hex}.temp`):
+            # Kurigram removes it only in its own except, so a process exit mid-download
+            # leaves it behind.
+            is_race_temp = bool(re.match(r'^.+\.(part|tmp)\.[0-9a-f]{32}(\.temp)?$', file))
             if not (is_large_video_temp or is_race_temp):
                 continue
             file_path = os.path.join(root, file)
@@ -1401,7 +1401,7 @@ async def background_download_worker():
 
 async def cache_media_files() -> None:
     """Background task for cache management: removes old files and downloads new ones"""
-    delay = Config["cache_sweep_interval"]
+    delay = CACHE_SWEEP_INTERVAL_S
     while True:
         try:
             # Load all media file ID records from SQLite
@@ -1560,7 +1560,7 @@ def is_local_request(request: Request) -> bool:
 def _enforce_token(request: Request, token: str | None, endpoint: str) -> None:
     """Authorize a request against the shared-secret token unless it is local.
 
-    Security invariants (issue #56): never log the presented token or the expected
+    Security invariants: never log the presented token or the expected
     secret at any level. On failure we log only a short SHA-256 prefix of the
     *presented* token so an attack can be correlated in the logs without disclosing
     either secret. The comparison is constant-time (hmac.compare_digest over the
@@ -1661,7 +1661,7 @@ async def get_raw_post_json(channel: str, post_id: int, request: Request, token:
         if isinstance(channel, str) and channel.startswith('-100'):
             channel_id = int(channel)
             
-        # Bound the RPC (stage-1 DoD: every Telegram RPC has a timeout). This
+        # Bound the RPC (invariant: every Telegram RPC has a timeout). This
         # endpoint is not under the tg_rpc gate, so a hang here only blocks this
         # one request, but leaving it unbounded still violates the invariant.
         message = await asyncio.wait_for(
@@ -1692,16 +1692,15 @@ async def ping() -> JSONResponse:
     # is_connected is None before client.start() and a bool afterwards; coerce so the JSON
     # "connected" field is always a bool (never null) and the pre-start window reports false.
     connected = bool(client.client.is_connected)
-    threshold = Config["tg_ping_unhealthy_after"]
+    threshold = PING_UNHEALTHY_AFTER_S
     # age is None right after boot: the watchdog hasn't run its first probe yet. Treat that
     # as healthy (gate on connected only) so a freshly-started container is not killed before
     # its first probe cycle — otherwise start_period would have to cover a full watchdog interval.
     #
     # The staleness branch (age >= threshold => degraded) is only meaningful while the watchdog
     # is running to refresh age. With the watchdog DISABLED (TG_WATCHDOG_ENABLED=false) nothing
-    # refreshes age — yet a disconnect-flap restart can still stamp it once (see _restart_client,
-    # which runs before the watchdog-enabled gate), after which age only grows. Letting that
-    # stale age drive /ping to 503 would spuriously fail the container healthcheck on a live
+    # stamps age (only watchdog probes do), so it stays None. The gate does not rely on that: a
+    # stale age driving /ping to 503 would spuriously fail the container healthcheck on a live
     # connection and trigger an autoheal restart. So gate staleness on the watchdog being on;
     # with it off, /ping is a pure connectivity check (no zombie-session detection — that
     # TG-liveness signal only exists while the watchdog runs).
@@ -1732,7 +1731,7 @@ async def health_check(request: Request, token: str | None = None) -> Response:
         
         config_info = {}    
         for config_key, config_value in Config.items():
-            if any(sensitive in config_key.lower() for sensitive in ['token', 'tg_api_id', 'tg_api_hash']):
+            if any(sensitive in config_key.lower() for sensitive in ['token', 'secret', 'tg_api_id', 'tg_api_hash']):
                 config_info[config_key] = mask_sensitive_value(str(config_value)) if config_value else None
             else:
                 config_info[config_key] = config_value
@@ -1746,18 +1745,18 @@ async def health_check(request: Request, token: str | None = None) -> Response:
             "tg_first_name": me.first_name,
             "tg_last_name": me.last_name,
             # Posts that failed to render and were surfaced as a degraded placeholder
-            # instead of being silently dropped (issue #60). A non-zero, growing value
+            # instead of being silently dropped. A non-zero, growing value
             # flags a render regression that would otherwise be invisible.
             "render_failed": get_render_failed_count(),
-            # Rich Messages parse-degradation counter (Kurigram 2.2.26, #83/#84), same
+            # Rich Messages parse-degradation counter (Kurigram 2.2.26), same
             # pattern as render_failed. A non-zero/growing value flags total rich
-            # degradation invisible to the reader; rich_part_seen signals phase-3 activation.
+            # degradation invisible to the reader.
             # (rich_block_parse_failed went with the block contour — see kurigram_compat.)
             "rich_msg_parse_failed": get_rich_msg_parse_failed_count(),
-            # Adapter (tree-build) per-block failures (Rich Messages phase 2, #85).
+            # Adapter (tree-build) per-block failures.
             "rich_block_adapt_failed": rich_tree.get_rich_block_adapt_failed_count(),
             "rich_part_seen": get_rich_part_seen_count(),
-            # Rich Messages phase 3 (#86): part=True GetRichMessage re-fetch attempts and
+            # part=True GetRichMessage re-fetch attempts and
             # failures (feed enrichment + /media cascade). A growing failed/attempt ratio flags
             # a DC/throttle problem that would otherwise only show as silently-persistent plaques.
             "rich_part_fetch_attempts": get_rich_part_fetch_attempt_count(),
@@ -1781,7 +1780,7 @@ async def get_media(channel: str, post_id: int, file_unique_id: str, request: Re
         verified = verify_media_digest(url, digest) if exp is None else verify_media_digest(url, digest, exp)
         if not verified:
             # Never log the expected digest: it is a signature over a secret key and would
-            # leak signing-oracle output for a chosen url (#56). The presented digest is
+            # leak signing-oracle output for a chosen url. The presented digest is
             # attacker-supplied, so it is safe to log for correlation.
             logger.warning(f"Invalid media digest for {url} (presented digest {digest} rejected)")
             raise HTTPException(status_code=403, detail="Invalid URL signature")
@@ -1908,7 +1907,7 @@ async def get_media(channel: str, post_id: int, file_unique_id: str, request: Re
     raise HTTPException(status_code=500, detail="Internal server error: Unexpected state reached in media handling.")
 
 # --------------------------------------------------------------------------- #
-# Conditional GET for feeds (issue #62)
+# Conditional GET for feeds
 #
 # Miniflux (and any conformant reader) sends If-None-Match / If-Modified-Since on
 # every poll. Honoring them lets us answer an unchanged feed with 304 + no body,

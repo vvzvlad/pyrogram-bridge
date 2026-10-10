@@ -13,17 +13,24 @@ Guards the three fixes in api_server:
 - Media digest check (get_media): an invalid digest must 403 WITHOUT logging the expected
   digest (a signing-oracle output over the secret key).
 
+Also guards the Config dump: media_signing_secret is masked in the startup log and in the
+/health response.
+
 The /flags endpoint is used as the token-check probe because it needs no Telegram client
 or DB — it exercises the exact same _enforce_token gate every authenticated route uses.
 """
 import logging
+import runpy
+from types import SimpleNamespace
 
 import pytest
+import uvicorn
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import api_server
+import config  # tests/mock_config.py, installed by conftest
 import url_signer
 
 
@@ -109,3 +116,41 @@ def test_invalid_media_digest_403_expected_not_logged(caplog, monkeypatch, tmp_p
     assert expected not in caplog.text
     # The presented (attacker-supplied) digest is safe to log for correlation.
     assert "bogusdigest" in caplog.text
+
+
+# --------------------------------------------------------------------------- #
+# Config dump — the signing secret is masked wherever the whole Config is shown.
+# --------------------------------------------------------------------------- #
+# A short secret (fully hidden) and a long one (only its edges shown).
+SIGNING_SECRETS = ["k9Qz7Lw2", "media-signing-secret-value-0123456789abcdef"]
+
+
+@pytest.mark.parametrize("signing_secret", SIGNING_SECRETS)
+def test_startup_log_masks_media_signing_secret(caplog, monkeypatch, signing_secret):
+    # The startup log is written by api_server's __main__ block: run it with uvicorn.run stubbed.
+    mock_settings = config.get_settings
+    monkeypatch.setattr(config, "get_settings", lambda: {**mock_settings(), "media_signing_secret": signing_secret})
+    monkeypatch.setattr(uvicorn, "run", lambda *args, **kwargs: None)
+    caplog.set_level(logging.INFO)
+
+    runpy.run_path(api_server.__file__, run_name="__main__")
+
+    assert f"media_signing_secret: {api_server.mask_sensitive_value(signing_secret)}" in caplog.text
+    assert signing_secret not in caplog.text
+
+
+@pytest.mark.parametrize("signing_secret", SIGNING_SECRETS)
+def test_health_masks_media_signing_secret(monkeypatch, signing_secret):
+    monkeypatch.setitem(api_server.Config, "media_signing_secret", signing_secret)
+
+    async def get_me():
+        return SimpleNamespace(username="u", id=1, phone_number="0", first_name="f", last_name="l")
+
+    monkeypatch.setattr(api_server, "client", SimpleNamespace(client=SimpleNamespace(get_me=get_me, is_connected=True)))
+    monkeypatch.setattr(api_server, "calculate_cache_stats", lambda: {})
+
+    r = TestClient(api_server.app).get(f"/health/{SECRET}")
+
+    assert r.status_code == 200
+    assert r.json()["config"]["media_signing_secret"] == api_server.mask_sensitive_value(signing_secret)
+    assert signing_secret not in r.text

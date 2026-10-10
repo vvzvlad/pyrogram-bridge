@@ -26,9 +26,7 @@ from url_signer import (
 
 @pytest.fixture(autouse=True)
 def _reset_keymanager(monkeypatch):
-    """Reset all KeyManager caches + signing env before each test (process-lifetime state)."""
-    for var in ("MEDIA_SIGNING_SECRET", "MEDIA_ALLOW_LEGACY_DIGEST", "MEDIA_URL_TTL_DAYS"):
-        monkeypatch.delenv(var, raising=False)
+    """Reset all KeyManager caches before each test (process-lifetime state)."""
     monkeypatch.setattr(KeyManager, "signing_key", None)
     monkeypatch.setattr(KeyManager, "_source_secret", None)
     monkeypatch.setattr(KeyManager, "_legacy_key", None)
@@ -36,7 +34,7 @@ def _reset_keymanager(monkeypatch):
 
 
 def _use_secret(monkeypatch, secret="unit-test-secret"):
-    monkeypatch.setenv("MEDIA_SIGNING_SECRET", secret)
+    monkeypatch.setitem(url_signer.Config, "media_signing_secret", secret)
     KeyManager.signing_key = None
     KeyManager._source_secret = None
 
@@ -89,7 +87,7 @@ def test_scope_binds_message(monkeypatch):
 # --------------------------------------------------------------------------- #
 def test_hkdf_key_deterministic_across_restarts(monkeypatch):
     """Same MEDIA_SIGNING_SECRET -> same signing key after a simulated restart."""
-    monkeypatch.setenv("MEDIA_SIGNING_SECRET", "fixed-secret-value")
+    monkeypatch.setitem(url_signer.Config, "media_signing_secret", "fixed-secret-value")
 
     KeyManager.signing_key = None
     KeyManager._source_secret = None
@@ -104,7 +102,7 @@ def test_hkdf_key_deterministic_across_restarts(monkeypatch):
     assert len(key1) == 32  # 16 bytes hex
 
     # A different secret derives a different key.
-    monkeypatch.setenv("MEDIA_SIGNING_SECRET", "other-secret-value")
+    monkeypatch.setitem(url_signer.Config, "media_signing_secret", "other-secret-value")
     KeyManager.signing_key = None
     KeyManager._source_secret = None
     assert KeyManager.get_or_create_signing_key() != key1
@@ -147,7 +145,7 @@ def test_legacy_digest_still_verifies_when_allowed(monkeypatch, tmp_path):
 def test_legacy_digest_rejected_when_disabled(monkeypatch, tmp_path):
     key_material = _write_legacy_key(monkeypatch, tmp_path)
     _use_secret(monkeypatch, "totally-different-secret")
-    monkeypatch.setenv("MEDIA_ALLOW_LEGACY_DIGEST", "false")
+    monkeypatch.setitem(url_signer.Config, "media_allow_legacy_digest", False)
 
     url = "durov/7/AgADlegacy"
     legacy_digest = hmac.new(key_material.encode(), url.encode(), hashlib.sha1).hexdigest()[:8]
@@ -161,11 +159,7 @@ def test_default_migration_same_file_key(monkeypatch, tmp_path):
     (SHA-256) digests both derive from that one file, so migration is seamless."""
     key_material = _write_legacy_key(monkeypatch, tmp_path)
     # No MEDIA_SIGNING_SECRET; force token fallback empty so source == the file key.
-    class _NoToken:
-        @staticmethod
-        def get_settings():
-            return {"token": ""}
-    monkeypatch.setitem(__import__("sys").modules, "config", _NoToken)
+    monkeypatch.setitem(url_signer.Config, "token", "")
     KeyManager.signing_key = None
     KeyManager._source_secret = None
 
@@ -182,14 +176,13 @@ def test_default_migration_same_file_key(monkeypatch, tmp_path):
 def test_expiry_off_by_default(monkeypatch):
     _use_secret(monkeypatch)
     assert media_url_expiry() is None
-    for bad in ("", "0", "-1", "notanint"):
-        monkeypatch.setenv("MEDIA_URL_TTL_DAYS", bad)
-        assert media_url_expiry() is None
+    monkeypatch.setitem(url_signer.Config, "media_url_ttl_days", 0)
+    assert media_url_expiry() is None
 
 
 def test_expiry_signed_and_enforced(monkeypatch):
     _use_secret(monkeypatch)
-    monkeypatch.setenv("MEDIA_URL_TTL_DAYS", "7")
+    monkeypatch.setitem(url_signer.Config, "media_url_ttl_days", 7)
     exp = media_url_expiry()
     assert exp is not None and exp > 0
 

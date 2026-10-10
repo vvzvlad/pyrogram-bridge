@@ -14,7 +14,7 @@ through sanitize_html().
 
 Backend: `nh3` (Rust `ammonia` binding). Migrated off `bleach[css]` 6.1.0 after the
 bleach maintainer declared the project end-of-life with no further security fixes
-(mozilla/bleach#698). nh3 is actively maintained and keeps the same allowlist model.
+(https://github.com/mozilla/bleach/issues/698). nh3 is actively maintained and keeps the same allowlist model.
 The one API gap — nh3 has no `CSSSanitizer` equivalent — is closed here by an
 `attribute_filter` that scrubs the `style` attribute down to the same 5 CSS
 properties, with a hard reject of any active-content token (see _sanitize_style).
@@ -33,9 +33,9 @@ from nh3 import clean as HTMLSanitizer
 logger = logging.getLogger(__name__)
 
 # Union of the three former copies. `s`/`del` (strikethrough) were previously
-# allowed only in the single-post path; registry §3.1 makes them survive in feeds too.
+# allowed only in the single-post path; now they survive in feeds too.
 # The structural tags (u, pre, code, blockquote, hr, h3-h6, table*, details, summary,
-# sub, sup, mark) were added for the rich-content renderer (rich_tree.render_html, #85).
+# sub, sup, mark) were added for the rich-content renderer (rich_tree.render_html).
 # Old (non-rich) posts never emit them, so golden output stays byte-identical.
 ALLOWED_TAGS = ['p', 'a', 'b', 'i', 'strong', 'em', 's', 'del',
                 'ul', 'ol', 'li', 'br', 'div', 'span',
@@ -47,7 +47,7 @@ ALLOWED_TAGS = ['p', 'a', 'b', 'i', 'strong', 'em', 's', 'del',
 
 # Identical in all three former copies — moved here as-is. nh3 wants per-tag sets.
 # The td/th colspan/rowspan, details 'open' and span 'id' entries were added for the
-# rich renderer (#85); `id` is additionally range-restricted by _attribute_filter below.
+# rich renderer; `id` is additionally range-restricted by _attribute_filter below.
 ALLOWED_ATTRIBUTES = {
     # '*' = attributes allowed on EVERY tag. Empty by design: nh3/ammonia otherwise
     # defaults generic attributes to {lang, title}, but bleach did NOT allow them
@@ -66,7 +66,7 @@ ALLOWED_ATTRIBUTES = {
     'details': {'open'},
 }
 
-# DOM-clobbering guard (#85): the ONLY `id` values allowed are rich-content anchors
+# DOM-clobbering guard: the ONLY `id` values allowed are rich-content anchors
 # (rich_tree emits ``id="rich-…"`` for RichBlockAnchor / RichTextReference). Any other
 # id — a page-element id an attacker planted in post text to clobber window.<name> /
 # document.getElementById — is dropped. Enforced in the config (not only the renderer)
@@ -144,7 +144,7 @@ def _attribute_filter(tag: str, attr: str, value: str):
             # the attribute instead keeps the fail-closed guarantee on the style path.
             return None
     if attr == 'id':
-        # DOM-clobbering guard (#85): keep only `rich-…` anchor ids, drop everything else.
+        # DOM-clobbering guard: keep only `rich-…` anchor ids, drop everything else.
         return value if _ALLOWED_ID_RE.match(value or '') else None
     return value
 
@@ -153,7 +153,7 @@ def sanitize_html(html_raw: str, log_context: str = "") -> str:
     """Sanitize one HTML fragment.
 
     FAIL-CLOSED: on any sanitizer error the fragment is html.escape()d, never returned
-    raw (stored-XSS guard — registry §3.2). log_context (e.g. "channel X, message_id
+    raw (stored-XSS guard). log_context (e.g. "channel X, message_id
     Y") is included in the error/slow logs to keep operational grep-ability across
     call sites.
     """
@@ -181,7 +181,7 @@ def sanitize_html(html_raw: str, log_context: str = "") -> str:
             link_rel=None,
         )
     except Exception as e:
-        # Single error-log name across all call sites (registry §3.16); log_context
+        # Single error-log name across all call sites; log_context
         # distinguishes them. Fail-closed: escape rather than emit the raw payload.
         _ctx = f"{log_context}, " if log_context else ""
         logger.error(f"html_sanitization_error: {_ctx}error {str(e)}")

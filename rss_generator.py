@@ -41,9 +41,9 @@ _XML_INCOMPATIBLE_RE = re.compile(r'[\x00-\x08\x0B\x0C\x0E-\x1F\uD800-\uDFFF\uFF
 
 
 # --------------------------------------------------------------------------- #
-# Canonical treatment of a post with no date (issue #59)
+# Canonical treatment of a post with no date
 # --------------------------------------------------------------------------- #
-# A dateless post (service/deleted message, or a degraded #60 placeholder built from a
+# A dateless post (service/deleted message, or a degraded placeholder built from a
 # dateless message) used to be handled THREE inconsistent ways:
 #   1. _create_messages_groups group sort  -> float('inf')  => sorts NEWEST, survives [:limit]
 #   2. _render_messages_groups final sort   -> 0.0          => sorts to the TAIL of the feed
@@ -51,25 +51,25 @@ _XML_INCOMPATIBLE_RE = re.compile(r'[\x00-\x08\x0B\x0C\x0E-\x1F\uD800-\uDFFF\uFF
 # So the feed ORDER (place 2, tail) and the pubDate (place 3, "now") contradicted each
 # other, and place 3 was NON-DETERMINISTIC: the post's pubDate changed on EVERY poll.
 # Miniflux sorts by date, so such a post kept floating to the top of the reader; and
-# because the feed ETag is a content signature over the serialized body incl. <pubDate>
-# (issue #62), a floating pubDate meant the ETag NEVER stabilized for any feed containing
+# because the feed ETag is a content signature over the serialized body incl. <pubDate>,
+# a floating pubDate meant the ETag NEVER stabilized for any feed containing
 # a dateless post \u2014 defeating conditional GET / 304 for that feed.
 #
 # Canonical rule: a dateless post gets ONE DETERMINISTIC fallback timestamp \u2014 the Unix
 # epoch (0.0, UTC) \u2014 used IDENTICALLY in every sort key AND in the RSS pubDate, never
 # now(). Same input -> same pubDate across every serialization, so the ETag is stable
-# (fixing #62's dateless-feed limitation). Epoch is the honest "unknown date = oldest"
+# (fixing conditional GET for dateless feeds). Epoch is the honest "unknown date = oldest"
 # interpretation: the post sorts to the tail consistently in both places, and can be
 # trimmed by [:limit] like any other oldest post instead of masquerading as the newest.
 # We deliberately do NOT synthesize a date from message_id: that would manufacture
 # arbitrary 1970-plus-id timestamps, and message_id already keys the (stable) guid so
-# multiple dateless posts never collide \u2014 determinism, not per-post ordering, is what #59
-# requires.
+# multiple dateless posts never collide \u2014 determinism, not per-post ordering, is the
+# requirement.
 MISSING_DATE_TS: float = 0.0
 
 
 def _sort_ts(date_ts: float | None) -> float:
-    """Timestamp sort key with the canonical dateless fallback (issue #59).
+    """Timestamp sort key with the canonical dateless fallback.
 
     `date_ts` is an already-computed POSIX timestamp (post['date']) or None. None -> the
     deterministic epoch fallback so a dateless post sorts to the tail (never as newest,
@@ -79,7 +79,7 @@ def _sort_ts(date_ts: float | None) -> float:
 
 
 def _msg_sort_ts(message: Message) -> float:
-    """Timestamp sort key for a raw Message, applying the same dateless fallback (#59).
+    """Timestamp sort key for a raw Message, applying the same dateless fallback.
 
     Naive-safe: a dated kurigram Message yields its (naive-local) timestamp; a dateless
     one yields the epoch fallback instead of an aware now(), so no naive/aware mix and no
@@ -89,7 +89,7 @@ def _msg_sort_ts(message: Message) -> float:
 
 
 # Process-wide count of posts whose render raised and were emitted as a degraded
-# placeholder instead of being silently dropped (issue #60). Rendering runs inside a
+# placeholder instead of being silently dropped. Rendering runs inside a
 # worker thread (asyncio.to_thread) and feeds can render concurrently, so guard the
 # counter with a lock. Surfaced read-only via get_render_failed_count() (exposed on
 # /health) so a silent render regression becomes observable.
@@ -104,7 +104,7 @@ def _record_render_failure():
 
 
 def get_render_failed_count() -> int:
-    """Total posts that fell back to a degraded placeholder since process start (#60)."""
+    """Total posts that fell back to a degraded placeholder since process start."""
     with _render_failed_lock:
         return _render_failed_count
 
@@ -117,11 +117,11 @@ _RENDER_FAILED_NOTE = "This post could not be rendered. See the original on Tele
 
 
 def _degraded_post(group: list[Message], error: Exception) -> dict:
-    """Build a visible placeholder entry for a post group whose render raised (#60).
+    """Build a visible placeholder entry for a post group whose render raised.
 
     A render exception must NOT make the post vanish silently from the feed: instead we
     emit a degraded entry carrying the SAME guid_basis the successful render would have
-    used (window-independent album/min-id basis, #58), so the feed guid stays stable —
+    used (window-independent album/min-id basis), so the feed guid stays stable —
     once the render is fixed the reader updates that entry in place, not resurfaces it.
 
     All attribute access here is defensive: the group already failed to render, so we
@@ -145,7 +145,7 @@ def _degraded_post(group: list[Message], error: Exception) -> dict:
     except Exception:
         date_ts = None
 
-    # Keep the SAME window-independent guid basis a successful render would use (#58),
+    # Keep the SAME window-independent guid basis a successful render would use,
     # so a degraded album entry does not diverge from its rendered self and get shown
     # twice. Defensive: the group already failed once, must not raise a second time.
     try:
@@ -179,7 +179,7 @@ def _strip_xml_incompatible(s):
 
 
 def _stable_guid_basis(group: list[Message]) -> tuple[str, object]:
-    """Return a window-independent identity for a rendered group's feed guid (issue #58).
+    """Return a window-independent identity for a rendered group's feed guid.
 
     A media group's guid must NOT depend on which subset of its messages happens to fall
     inside the current fetch window: the reader dedups on the guid, so a guid that shifts
@@ -239,8 +239,7 @@ def _compute_time_based_group_ids(messages: list[Message], merge_seconds: int = 
     reproducing its result for every input the old code survived on PRODUCTION
     data (naive kurigram dates). Inputs only aware-date test mocks could produce
     (fully-None and aware+None mixes, where the old code clustered the None-date
-    tail by insertion order incl. truthy-id adoption) are deliberately replaced
-    (registry §3.11):
+    tail by insertion order incl. truthy-id adoption) are deliberately replaced:
       - messages WITHOUT a date do not participate in time clustering and get
         NO mapping entry (their own media_group_id still applies downstream);
       - dated messages are ordered ascending by date via a timestamp key
@@ -308,24 +307,17 @@ def _create_messages_groups(messages: list[Message], group_ids: dict[int, str | 
     processing_groups: list[list[Message]] = []
     media_groups: dict[str | int, list[Message]] = {}
     # Time-clustering supplies effective ids as a PURE mapping (no message mutation,
-    # no deepcopy). Absent an entry, the message's own media_group_id applies
-    # (registry §3.11 / spec Этап 4).
+    # no deepcopy). Absent an entry, the message's own media_group_id applies.
     group_ids = group_ids or {}
 
     # First pass - collect messages and organize into processing groups
     for message in messages:
         try:
-            # Service messages (chat photo/title changes, giveaway launches/results, gifts,
-            # checklist updates, community membership, ...) are bookkeeping, not posts:
-            # post_parser renders them with no body — at most a stock title ("🖼 New chat
-            # photo"), mostly an empty "❓ Unknown Post" entry. A pin does get a quote block, but it only repeats a post already in
-            # the feed, so it stays skipped as before. Skip them all, except CUSTOM_ACTION
-            # with text — the only service type kurigram gives a text (action.message),
-            # which post_parser renders as the post body. An allowlist, so a service type
-            # added by a future kurigram stays out of the feed instead of showing up empty.
+            # Service messages (chat photo/title changes, pins, giveaways, gifts, ...) are
+            # bookkeeping, not posts, so the feed skips them all. CUSTOM_ACTION included: it
+            # is Telegram's placeholder for an action the client's API layer does not know.
             if message.service:
-                if not ('CUSTOM_ACTION' in str(message.service) and message.text):
-                    continue
+                continue
 
             effective_group_id = group_ids.get(message.id, message.media_group_id)
             if effective_group_id:
@@ -349,9 +341,9 @@ def _create_messages_groups(messages: list[Message], group_ids: dict[int, str | 
     # is naive-safe: kurigram dates are naive-local, and a None-date group used to fall
     # back to an AWARE datetime.now(timezone.utc) here, raising TypeError on the first
     # naive-vs-aware comparison — a 500 on ANY feed carrying a None-date post, in the
-    # DEFAULT path (registry §3.12). None-date groups now use the CANONICAL dateless
+    # DEFAULT path. None-date groups now use the CANONICAL dateless
     # fallback (epoch, MISSING_DATE_TS) here AND in the final _render_messages_groups sort
-    # AND in the RSS pubDate — one deterministic treatment across all three (issue #59):
+    # AND in the RSS pubDate — one deterministic treatment across all three:
     # they sort to the tail and are trimmed like any other oldest post.
     processing_groups.sort(key=lambda group: _msg_sort_ts(group[0]), reverse=True)
 
@@ -413,14 +405,14 @@ def _render_messages_groups(messages_groups: list[list[Message]],
                 combined_html_body = '\n<br><br>\n'.join(all_html_bodies)
 
                 # Deterministic merged flags: first-seen order across the group, then
-                # 'merged' (registry §3.8 — replaces the hash-ordered list(set(...))).
+                # 'merged' (replaces the hash-ordered list(set(...))).
                 merged_flags = list(dict.fromkeys(f for msg in processed_messages for f in msg['flags']))
                 merged_flags.append("merged")
 
                 # Render the merged footer DIRECTLY from the real main Message — no
                 # dict->mock round-trip. The raw Message carries its real reactions
-                # (custom emojis get their own span, registry §3.6) and its naive-local
-                # date (registry §3.7), matching a single post of the same message.
+                # (custom emojis get their own span) and its naive-local
+                # date, matching a single post of the same message.
                 footer_html = post_parser.generate_html_footer(main_raw, flags_list=merged_flags)
 
                 rendered_posts.append({
@@ -435,7 +427,7 @@ def _render_messages_groups(messages_groups: list[list[Message]],
                 })
                 
         except Exception as e:
-            # Issue #60: a post whose render raises must NOT disappear silently from the
+            # A post whose render raises must NOT disappear silently from the
             # feed (indistinguishable from "nothing was posted"). Emit a degraded
             # placeholder entry (stable guid) instead of dropping it, and count the
             # failure so the regression is observable on /health. sanitize/serialize of
@@ -472,7 +464,7 @@ def _render_messages_groups(messages_groups: list[list[Message]],
     
     # Sort by date; a None-date post uses the canonical epoch fallback (MISSING_DATE_TS),
     # identical to the group sort and the RSS pubDate, so feed order and pubDate agree and
-    # a dateless post no longer floats (issue #59).
+    # a dateless post no longer floats.
     rendered_posts.sort(key=lambda x: _sort_ts(x['date']), reverse=True)
     return rendered_posts
 
@@ -501,7 +493,7 @@ def _render_pipeline(messages: list[Message],
         # plus a date-ASC pre-sort with the same naive-safe timestamp key (None-date last
         # via +inf). A stable sorted() on the fetch-order input reproduces the old
         # `messages_sorted` order — including ties — and does NOT mutate the input, so the
-        # cache-protecting deepcopy is gone (spec Этап 4).
+        # cache-protecting deepcopy is gone.
         group_ids = _compute_time_based_group_ids(messages, merge_seconds)
         messages = sorted(messages, key=_msg_sort_ts)
         message_groups = _create_messages_groups(messages, group_ids)
@@ -513,10 +505,10 @@ def _render_pipeline(messages: list[Message],
     # Sanitize each surviving (post-filter) post exactly once, here in the worker
     # thread — no per-post thread hop / per-post CSSSanitizer anymore. Per-post
     # granularity means a failed post is html.escape()d in isolation instead of the
-    # whole feed (registry §3.5), and an unbalanced fragment is normalized within its
-    # OWN post rather than swallowing the following ones (registry §3.4). sanitize_html
-    # is fail-closed (registry §3.2). For the HTML path the <hr> divider is joined in
-    # the formatter AFTER this, so it survives sanitize (registry §3.3).
+    # whole feed, and an unbalanced fragment is normalized within its
+    # OWN post rather than swallowing the following ones. sanitize_html
+    # is fail-closed. For the HTML path the <hr> divider is joined in
+    # the formatter AFTER this, so it survives sanitize.
     for post in posts:
         post['html'] = sanitize_html(
             post['html'],
@@ -543,8 +535,8 @@ async def _prepare_feed_posts(channel: str | int,
     so BOTH feeds render the reply quote without extra RPC here.
 
     Raises ChannelNotFound (formatter -> create_error_feed), re-raises errors.FloodWait
-    for both the get_chat and the get_history path (§3.9; api_server -> HTTP 429), and
-    wraps any other resolution/history error in ValueError with unified text (§3.10).
+    for both the get_chat and the get_history path (api_server -> HTTP 429), and
+    wraps any other resolution/history error in ValueError with unified text.
     """
     # 1) Validate limit.
     if limit < 1:
@@ -589,7 +581,7 @@ async def _prepare_feed_posts(channel: str | int,
         from tg_cache import cached_get_chat_history
         messages = await cached_get_chat_history(post_parser.client, channel, limit=history_limit)
     except errors.FloodWait:
-        # §3.9: FloodWait from history propagates -> HTTP 429 (previously wrapped -> 400).
+        # FloodWait from history propagates -> HTTP 429 (previously wrapped -> 400).
         raise
     except Exception as e:
         logger.error(f"Error during get_chat_history for channel '{channel}' (type: {type(channel)}): {str(e)}", exc_info=True)
@@ -684,7 +676,7 @@ async def generate_channel_rss(channel: str | int,
             fe = fg.add_entry()
             # Every post-derived string is stripped of XML-incompatible control chars /
             # lone surrogates here, at the feedgen boundary, so a single bad byte in any
-            # field cannot 500 the whole feed (issue #54). CDATA does NOT protect against
+            # field cannot 500 the whole feed. CDATA does NOT protect against
             # this — lxml raises in the CDATA branch too.
             fe.title(_strip_xml_incompatible(post['title']))
 
@@ -708,13 +700,13 @@ async def generate_channel_rss(channel: str | int,
                 # deterministic fallback (epoch, MISSING_DATE_TS) — the SAME value the sort
                 # keys use — NOT datetime.now(). now() made this post's pubDate change on
                 # every poll: it floated to the top in Miniflux and kept busting the feed
-                # ETag (issue #62). A fixed epoch pubDate is stable across serializations,
+                # ETag. A fixed epoch pubDate is stable across serializations,
                 # matches the tail position the sort gives it, and keeps the ETag steady
-                # for dateless feeds (issue #59).
+                # for dateless feeds.
                 pub_date = datetime.fromtimestamp(MISSING_DATE_TS, tz=timezone.utc)
                 logger.warning(f"rss_entry_missing_date: channel {channel}, message_id {post['message_id']}, using deterministic epoch fallback {pub_date.isoformat()}")
                 fe.pubDate(pub_date)
-            # Derive the guid from the group's window-independent identity (issue #58) so a
+            # Derive the guid from the group's window-independent identity so a
             # media group is not re-shown as a duplicate when the fetch window boundary
             # shifts. A native album keys on its immutable Telegram media_group_id (not a
             # real page, so isPermaLink="false"); everything else keys on the immutable
@@ -785,8 +777,8 @@ async def generate_channel_html(channel: str | int,
         # Generate HTML content.
         html_gen_start_time = time.time()
         # Each post is already sanitized per-post inside _render_pipeline. Join with the
-        # <hr> divider AFTER sanitize so the divider survives (registry §3.3), and each
-        # post's DOM was normalized within its own fragment (registry §3.4). The join is
+        # <hr> divider AFTER sanitize so the divider survives, and each
+        # post's DOM was normalized within its own fragment. The join is
         # a trivial string op — no worker thread needed.
         html = '\n<hr class="post-divider">\n'.join(post['html'] for post in final_posts)
 
@@ -817,7 +809,7 @@ def create_error_feed(channel: str | int, base_url: str) -> str:
 
     # `channel` is a caller/URL-derived identifier that flows into text AND into URL
     # attributes (link/id/guid), and lxml rejects XML-incompatible chars in attributes
-    # too — so sanitize it ONCE here and use the clean value everywhere below (issue #54).
+    # too — so sanitize it ONCE here and use the clean value everywhere below.
     channel = _strip_xml_incompatible(channel)
 
     fg.title(_strip_xml_incompatible(f"Error: Channel @{channel} not found"))

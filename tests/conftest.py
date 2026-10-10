@@ -17,6 +17,13 @@ import tests.mock_config as _mock_config
 
 sys.modules['config'] = _mock_config
 
+# The Telegram session directory is a constant (telegram_client.SESSION_PATH = "data"). Point it
+# at the test data directory before any test module builds a TelegramClient, so a test run
+# from a working copy never touches the real session in ./data.
+import telegram_client
+
+telegram_client.SESSION_PATH = os.path.join(ROOT, 'tests', 'test_data')
+
 # Pin the runner timezone to UTC (stage-0 golden determinism, issue #27).
 # Naive kurigram dates are interpreted by datetime.timestamp() in the LOCAL tz, so
 # without this pin RSS <pubDate> values drift between machines (this sandbox is MSK).

@@ -5,7 +5,7 @@
 """Render-parity oracle for the snapshot cache (issue #23 review fix).
 
 The core ask of the review: prove that snapshot -> restore preserves EVERYTHING the
-render pipeline reads. The old golden test replays a pickle corpus and never renders a
+render pipeline reads. The old golden test replays a recorded corpus and never renders a
 live Message against its snapshot, so a field dropped from the allowlist (the exact
 bug the reviewer mutation-proved for web_page/sender_chat/... and for the special-media
 types) passes silently.
@@ -22,7 +22,7 @@ caption, a multi-message media group) and for EACH case:
 
 Any field the snapshot fails to preserve makes the two renders diverge and this test go
 red. It is a self-contained live-vs-restored parity oracle; it does NOT depend on the
-frozen pickle goldens.
+frozen goldens.
 """
 import asyncio
 from datetime import datetime
@@ -30,7 +30,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from pyrogram.enums import MessageMediaType, MessageServiceType
+from pyrogram.enums import MessageEntityType, MessageMediaType
+from pyrogram.types import MessageEntity
 
 from message_snapshot import snapshot_messages, restore_messages
 from tests import golden_replay as gr
@@ -133,6 +134,14 @@ def build_corpus():
                                               sticker=SimpleNamespace(file_unique_id="st2", emoji="🎥", is_video=True))]))
     corpus.append(("live_photo", [make_msg(media=MessageMediaType.LIVE_PHOTO,
                                            live_photo=SimpleNamespace(file_unique_id="lp1", file_size=4096))]))
+
+    # --- Animated (TGS) sticker with a thumbnail -------------------------- #
+    # The live render shows the thumbnail; a snapshot that loses thumbs restores to the text line.
+    corpus.append(("sticker_animated_thumb", [make_msg(
+        media=MessageMediaType.STICKER,
+        sticker=SimpleNamespace(file_unique_id="st_tgs_t", emoji="🐱", is_video=False, is_animated=True,
+                                thumbs=[SimpleNamespace(file_id="st_tgs_t_thumb", width=128, height=128)]),
+    )]))
 
     # --- Special-media types (Fix 1) ------------------------------------- #
     corpus.append(("story_photo", [make_msg(
@@ -282,6 +291,16 @@ def build_corpus():
         media=MessageMediaType.STORY,
         story=SimpleNamespace(video=None, photo=None, caption=None, deleted=True),
     )]))
+
+    # Story caption with a link: its markup comes from caption_entities, not from the caption.
+    corpus.append(("story_caption_link", [make_msg(
+        media=MessageMediaType.STORY,
+        story=SimpleNamespace(video=None, photo=SimpleNamespace(file_unique_id="sto_l", file_size=10),
+                              caption="see docs",
+                              caption_entities=[MessageEntity(type=MessageEntityType.TEXT_LINK, offset=4,
+                                                              length=4, url="https://example.com/docs")]),
+    )]))
+
     corpus.append(("audio_tags", [make_msg(media=MessageMediaType.AUDIO,
                                            audio=SimpleNamespace(file_unique_id="au_t", mime_type="audio/mpeg",
                                                                  file_size=100, performer="Justice", title="D.A.N.C.E."))]))
@@ -323,11 +342,6 @@ def build_corpus():
         reply_to_message_id=7,
         external_reply=SimpleNamespace(message_id=7, chat=None,
                                        origin=SimpleNamespace(type="hidden_user", sender_user_name="Anon")),
-    )]))
-    # CUSTOM_ACTION: kurigram puts action.message into .text as a plain str (no .html).
-    corpus.append(("custom_action", [make_msg(
-        service=MessageServiceType.CUSTOM_ACTION,
-        text="Custom <action> text",
     )]))
 
     # --- Multi-message media group (grouping merge) ----------------------- #
@@ -393,7 +407,7 @@ def test_corpus_covers_v9_snapshot_fields():
     names = {n for n, _ in build_corpus()}
     required = {"poll_description_photo", "poll_description_video", "story_caption", "story_deleted",
                 "audio_tags", "sticker_animated", "author_signature", "invoice",
-                "reply_selected_quote", "external_reply", "external_reply_hidden_user", "custom_action"}
+                "reply_selected_quote", "external_reply", "external_reply_hidden_user"}
     assert required <= names
 
 
@@ -407,13 +421,13 @@ def test_parity_cases_render_the_new_content(monkeypatch):
         "poll_description_video": "/pdm_v/",
         "story_caption": "Story &lt;caption&gt;<br>second line",
         "story_deleted": "Story unavailable",
+        "story_caption_link": 'see <a href="https://example.com/docs">docs</a>',
         "audio_tags": "🎵 Justice — D.A.N.C.E.<br>",
         "sticker_animated": "Sticker 🐱",
         "invoice": "Price: 12.50 USD",
         "reply_selected_quote": "<b>long</b> original",
         "external_reply": "selected <i>words</i>",
         "external_reply_hidden_user": "Reply to Anon, #7",
-        "custom_action": "Custom &lt;action&gt; text",
     }
     for name, needle in expected.items():
         restored = restore_messages(snapshot_messages(corpus[name]))
