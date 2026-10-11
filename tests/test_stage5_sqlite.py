@@ -3,7 +3,7 @@
 # pylint: disable=redefined-outer-name, logging-fstring-interpolation, line-too-long
 # pylance: disable=reportMissingImports, reportMissingModuleSource
 """
-Stage 5 (SQLite access-time batching) tests.
+SQLite access-time batching tests.
 
 Covers:
 - 5.1 accumulator: a /media cache hit records into api_server._access_updates and does NOT
@@ -69,10 +69,9 @@ async def test_cache_hit_records_accumulator_no_sqlite(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# 5.1 hot path (DoD guard): get_media's pre-semaphore cache-hit — the hottest
-# changed site, the one this PR exists for — records into the accumulator and
-# does NO synchronous SQLite access-write. Mirrors the download_media_file spy
-# so a regression re-introducing a per-hit write into THIS branch goes red.
+# 5.1 hot path: get_media's pre-semaphore cache-hit records into the accumulator and does
+# NO synchronous SQLite access-write. Mirrors the download_media_file spy so a per-hit
+# write in THIS branch goes red.
 # --------------------------------------------------------------------------- #
 @pytest.mark.asyncio
 async def test_get_media_pre_semaphore_cache_hit_no_sqlite(tmp_path, monkeypatch):

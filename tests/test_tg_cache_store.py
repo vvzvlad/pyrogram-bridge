@@ -2,10 +2,7 @@
 # pylint: disable=protected-access, missing-function-docstring, missing-class-docstring
 # pylint: disable=redefined-outer-name, logging-fstring-interpolation, line-too-long
 # pylance: disable=reportMissingImports, reportMissingModuleSource
-"""Tests for the tg_cache generic JSON store, prefix-limit, jitter and sweep (issue #23).
-
-Задания 2 / 6 / 17 / 18, verification item 8, 11, 12.
-"""
+"""Tests for the tg_cache generic JSON store, prefix-limit, jitter and sweep."""
 import json
 import os
 import time

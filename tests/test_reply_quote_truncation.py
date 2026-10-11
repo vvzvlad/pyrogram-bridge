@@ -4,9 +4,10 @@
 # pylance: disable=reportMissingImports, reportMissingModuleSource
 """Reply-quote truncation for a NEIGHBOURING post of the same channel (post_parser).
 
-A post answering the post right above it used to reprint that post in full, so two adjacent
-RSS entries read as half the same text (t.me/univelis/1472 quoted whole inside /1473), while
-Telegram itself shows only a short preview there. The quote is therefore cut — but ONLY when
+Without the cut, a post answering the post right above it reprints that post in full, so
+two adjacent RSS entries read as half the same text (t.me/univelis/1472 quoted whole inside
+/1473), while Telegram itself shows only a short preview there. The quote is therefore cut
+— but ONLY when
 all three conditions hold: the feed is a CHANNEL, the target belongs to that same channel, and
 it is at most `REPLY_QUOTE_TRUNCATE_DISTANCE` ids above the post. Every other reply (a group or
 discussion feed, a foreign channel, a user's message, an older post) keeps the full quote,
@@ -35,7 +36,7 @@ GROUP_ID = -1001111111111
 LONG_TEXT = ("Очень длинный пост канала, который целиком повторять в соседней записи "
              "ленты не нужно, потому что читатель уже видел его в предыдущем элементе. ") * 4
 # Text pyrogram hands over UNESCAPED (it only escapes inside entity ranges), angle brackets and
-# all — the shape that used to make the visible counter treat half the quote as free markup.
+# all — the visible counter must not treat it as free markup.
 ANGLE_TEXT = ("если x < 5 то мы получаем очень длинный текст поста, который должен быть обрезан " * 6
               + " и y > 3, конец.")
 
@@ -224,10 +225,10 @@ def test_unknown_chat_type_keeps_the_full_quote():
 # The target's own chat.id decides "same channel"; sender_chat is only a fallback.
 # --------------------------------------------------------------------------- #
 def test_signed_channel_post_is_truncated():
-    # REGRESSION: a channel with "Sign messages -> Show authors' profiles" gives every post a
-    # from_id, so pyrogram fills from_user and leaves sender_chat None
+    # A channel with "Sign messages -> Show authors' profiles" gives every post a from_id, so
+    # pyrogram fills from_user and leaves sender_chat None
     # (message.py: `sender_chat = ... if not from_user else None`). Deciding on from_user alone
-    # switched the whole feature off for such channels — silently, for every post.
+    # would switch the feature off for such channels.
     reply = _reply(id=1472, text=LONG_TEXT, caption=None, sender_chat=None,
                    chat=SimpleNamespace(id=CHANNEL_ID, title="Univelis", username="univelis"),
                    from_user=SimpleNamespace(first_name="Admin", last_name=None, username="admin"))
@@ -407,8 +408,8 @@ def test_reply_to_a_later_post_keeps_the_full_quote():
 
 
 def test_message_without_id_and_chat_keeps_the_full_quote():
-    # REGRESSION: the older fixtures (and any snapshot missing the fields) build a message with
-    # no id and no chat at all — the check must read them via getattr and simply say "no".
+    # Fixtures (and any snapshot missing the fields) may build a message with no id and no
+    # chat at all — the check must read them via getattr and simply say "no".
     out = _parser()._format_reply_info(_legacy_message(_own_channel_reply()))
 
     assert "…" not in out
@@ -500,9 +501,8 @@ def test_truncate_helper_leaves_short_and_disabled_quotes_untouched():
 
 
 def test_scan_is_bounded_by_the_budget_not_by_the_quote():
-    # The tokenizer stops one visible character past the budget. This file already carries a
-    # regression of exactly this class (see the _TRAILING_BR_RE note in post_parser: 235 ms ->
-    # 3.6 s), and a purely performance-shaped fix is otherwise pinned by nothing.
+    # The tokenizer stops one visible character past the budget; this pins that performance
+    # property (compare the _TRAILING_BR_RE note in post_parser).
     big = "x" * 2_000_000
     started = time.perf_counter()
     out = _truncate_quote_html(big, 200)
@@ -529,7 +529,7 @@ def test_truncate_helper_backs_off_to_a_word_boundary():
 # --------------------------------------------------------------------------- #
 # Raw '<' and '>' in the quoted TEXT: pyrogram escapes only inside entity ranges,
 # so plain user text arrives verbatim and must cost visible characters like any
-# other. Counting it as markup silently switched truncation off (REGRESSION).
+# other; counting it as markup would switch truncation off.
 # --------------------------------------------------------------------------- #
 def test_raw_angle_brackets_in_the_text_do_not_disable_truncation():
     out = _truncate_quote_html(ANGLE_TEXT, 200)
@@ -551,7 +551,7 @@ def test_raw_angle_brackets_are_truncated_on_the_render_path():
 
 
 def test_a_lone_bracket_still_costs_one_character():
-    # '<' with no '>' anywhere used to swallow the whole rest of the quote.
+    # '<' with no '>' anywhere must not swallow the rest of the quote.
     assert _truncate_quote_html("<" * 40, 10) == "<" * 10 + "…"
     assert _truncate_quote_html("a < b " + "c" * 300, 6) == "a < b…"
 

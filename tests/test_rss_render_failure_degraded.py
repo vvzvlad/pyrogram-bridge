@@ -2,16 +2,13 @@
 # pylint: disable=protected-access, missing-function-docstring, missing-class-docstring
 # pylint: disable=redefined-outer-name, line-too-long
 """
-Issue #60 — a render error on ONE post must not silently drop it from the feed.
+A render error on ONE post must not silently drop it from the feed.
 
-Before the fix, an exception while rendering a message group was logged and `continue`d,
-so the post vanished from the feed entirely. Because the guid is stable and RSS shows no
-"holes", the reader could not tell a post had ever existed — a silent data loss
-indistinguishable from "nothing was posted".
-
-rss_generator now emits a DEGRADED placeholder entry (title + date + stable link/guid +
-a "could not be rendered" note) for a group whose render raises, and counts the failure
-(surfaced on /health). The other posts still render normally and the feed still generates.
+The guid is stable and RSS shows no "holes", so a dropped post would be indistinguishable
+from "nothing was posted". rss_generator emits a DEGRADED placeholder entry (title + date +
+stable link/guid + a "could not be rendered" note) for a group whose render raises, and
+counts the failure (surfaced on /health). The other posts still render normally and the
+feed still generates.
 """
 from types import SimpleNamespace
 from datetime import datetime, timezone

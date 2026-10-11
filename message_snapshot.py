@@ -9,10 +9,10 @@
 
 """JSON snapshot / restore for pyrogram Message objects.
 
-The history cache no longer pickles live pyrogram objects. On write a plain JSON
+The history cache stores JSON, not pickled pyrogram objects. On write a plain JSON
 snapshot is extracted from a Message via an explicit allowlist, the FIELDS table; on read
 a duck-typed CachedMessage is restored that is indistinguishable from a real Message
-to the render pipeline (post_parser.py / rss_generator.py are NOT changed).
+to the render pipeline (post_parser.py / rss_generator.py).
 """
 
 import html

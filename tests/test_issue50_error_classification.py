@@ -2,7 +2,7 @@
 # pylint: disable=protected-access, missing-function-docstring, redefined-outer-name, line-too-long
 # pylance: disable=reportMissingImports, reportMissingModuleSource
 """
-Regression tests for issue #50 — permanent vs transient media-download error classification.
+Permanent vs transient media-download error classification.
 
 A PERMANENT failure (deleted post / genuinely-gone media -> 404) must be negative-cached as
 'permanent' so a later request in the backoff window returns a clean 404 (no Retry-After) and
@@ -197,7 +197,7 @@ async def test_get_media_rpcerror_500_maps_to_503_retry_after_60(monkeypatch, tm
 
 @pytest.mark.asyncio
 async def test_get_media_floodwait_precedes_rpcerror(monkeypatch, tmp_path):
-    """Regression: FloodWait subclasses RPCError; its except MUST precede the RPCError branch,
+    """FloodWait subclasses RPCError; its except MUST precede the RPCError branch,
     so a throttle returns a retryable 429 — never falling through to the 404/503 RPCError map."""
     monkeypatch.setattr(api_server, "MEDIA_CACHE_DIR", str(tmp_path / "cache"))
     monkeypatch.setattr(api_server, "verify_media_digest", lambda url, digest: True)
@@ -244,9 +244,9 @@ async def test_deleted_post_removes_db_row(monkeypatch, tmp_path):
 
 @pytest.mark.asyncio
 async def test_deduped_rpcerror_400_records_permanent(monkeypatch):
-    # Review round: a raw RPCError with CODE==400 (MsgIdInvalid/ChannelInvalid/PeerIdInvalid)
-    # is a genuinely-gone resource. get_media maps RPC-400 -> 404, so _runner MUST cache it
-    # 'permanent' too; caching it 'transient' would flap 404<->503 (the exact bug #50 kills).
+    # A raw RPCError with CODE==400 (MsgIdInvalid/ChannelInvalid/PeerIdInvalid) is a
+    # genuinely-gone resource. get_media maps RPC-400 -> 404, so _runner MUST cache it
+    # 'permanent' too; caching it 'transient' would flap 404<->503.
     from pyrogram import errors
 
     class _Fake400(errors.RPCError):

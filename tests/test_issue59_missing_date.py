@@ -2,21 +2,12 @@
 # pylint: disable=protected-access, missing-function-docstring, missing-class-docstring
 # pylint: disable=redefined-outer-name, line-too-long
 """
-Issue #59 — a post with no date used to be handled THREE inconsistent ways:
-
-  * _create_messages_groups group sort -> float('inf')      (sorts NEWEST, survives [:limit])
-  * _render_messages_groups final sort  -> 0.0              (sorts to the TAIL of the feed)
-  * generate_channel_rss pubDate        -> datetime.now(utc) (NON-DETERMINISTIC — changes per poll)
-
-Feed order (tail) and pubDate ("now") contradicted each other, and the now() pubDate made
-the entry float in date-sorted readers (Miniflux) and — because the feed ETag is a content
-signature over the serialized body incl. <pubDate> (#62) — kept the ETag from ever
-stabilizing for any feed containing a dateless post.
-
-The fix unifies all three on ONE deterministic fallback: the Unix epoch
-(rss_generator.MISSING_DATE_TS = 0.0), used identically in every sort key and in the RSS
-pubDate, never now(). These tests assert that unification, its determinism across
-serializations, and the resulting #62 ETag stability for dateless feeds.
+A post with no date gets ONE deterministic fallback, the Unix epoch
+(rss_generator.MISSING_DATE_TS = 0.0), used identically in the _create_messages_groups
+group sort, the _render_messages_groups final sort and the RSS pubDate, never now().
+A now() pubDate would float the entry in date-sorted readers (Miniflux) and keep the
+content-signature ETag from stabilizing. These tests assert the unification, its
+determinism across serializations, and the resulting ETag stability for dateless feeds.
 """
 from types import SimpleNamespace
 from datetime import datetime, timezone
@@ -152,7 +143,7 @@ async def test_dateless_post_pubdate_is_the_oldest(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# 4) #62 ETag no longer floats for a dateless feed.
+# 4) The ETag is stable for a dateless feed.
 # --------------------------------------------------------------------------- #
 @pytest.mark.asyncio
 async def test_dateless_feed_etag_is_stable_across_polls(monkeypatch):

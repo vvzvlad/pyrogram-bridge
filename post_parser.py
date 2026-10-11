@@ -316,9 +316,8 @@ def _story_media_object(message):
 # Single source of truth for media handling (tests/test_stage5_media_table.py).
 #
 # MEDIA_SOURCES maps a media type to a selector returning (media object, render
-# kind). It replaces the three hand-synced ladders that used to live in
-# _get_file_unique_id (dict map), _save_media_file_ids (if/elif) and
-# _generate_html_media (elif cascade). All three now go through this table.
+# kind). _get_file_unique_id, _save_media_file_ids and _generate_html_media all
+# go through this table.
 #
 # kind=None means "selector-only entry": the object participates in file-id
 # extraction/collection but is NOT rendered by the dispatcher. The ONLY kind=None
@@ -433,11 +432,9 @@ class RenderCtx:
 
 # Renderers return list[str] so the byte structure of the '\n'.join in
 # _generate_html_media is preserved (audio emits TWO items: <audio> tag + <br>;
-# pdf emits its two-append div block). Bodies are lifted VERBATIM from the old
-# if/elif branches, including the `src="{url}"style=` concatenation artifacts —
-# byte-for-byte fidelity is the contract (tests/test_stage5_media_table.py). The one later
-# addition is _render_file (generic non-image documents), which replaced a broken <img>
-# and therefore has no pre-refactor bytes to preserve.
+# pdf emits its two-append div block). Byte-for-byte output, including the
+# `src="{url}"style=` concatenation artifacts, is the contract
+# (tests/test_stage5_media_table.py).
 def _render_img_400(ctx: 'RenderCtx') -> List[str]:
     return [f'<img src="{ctx.url}" style="max-width:100%; width:auto; height:auto;'
             f'max-height:{MEDIA_MAX_HEIGHT_PX}; object-fit:contain;">']
@@ -528,8 +525,8 @@ def _format_invoice_price(total_amount, currency) -> Optional[str]:
 
 def _render_file(ctx: 'RenderCtx') -> List[str]:
     """Generic-document info block: file name + size linking to the t.me post.
-    Replaces the broken <img> that non-image documents (.stl/.zip/...) used to
-    render as. file_name is user-controlled -> escaped here (the boundary
+    Non-image documents (.stl/.zip/...) render as this block, not as an <img>.
+    file_name is user-controlled -> escaped here (the boundary
     sanitize pass would otherwise mangle any markup-looking name)."""
     name = html.escape(ctx.file_name) if ctx.file_name else 'Файл'
     size = _format_file_size(ctx.file_size)
@@ -1116,8 +1113,7 @@ class PostParser:
         # (Chat._parse(..., is_chat=True)) regardless of sender_chat/from_user. sender_chat alone
         # is not enough — a channel with "Sign messages -> Show authors' profiles" gives every
         # post a from_id, and pyrogram then sets from_user and leaves sender_chat None
-        # (message.py: `sender_chat = ... if not from_user else None`), which used to switch the
-        # whole feature off for such channels with no diagnostic at all.
+        # (message.py: `sender_chat = ... if not from_user else None`).
         target_chat_id = getattr(getattr(reply_to, 'chat', None), 'id', None)
         if target_chat_id is not None and chat_id is not None:
             return target_chat_id == chat_id
@@ -1445,14 +1441,14 @@ class PostParser:
 
         if debug:
             # title comes from _generate_title (user-controlled post text) and never goes
-            # through bleach — escape it before embedding, same as raw_message below.
+            # through the sanitizer — escape it before embedding, same as raw_message below.
             title_escaped = html.escape(str(data["html"]["title"]))
             html_content.append(f'<div class="title">Title: {title_escaped}</div><br>')
         html_content.append(_wrap_post_html(data["html"]["body"], data["html"]["footer"]))
         
         # Add raw JSON debug output if debug is enabled.
         # raw_message is the full str(message) serialization and may contain user-controlled
-        # text with HTML/JS — escape it before dropping it into the <pre> (bleach can't run
+        # text with HTML/JS — escape it before dropping it into the <pre> (the sanitizer can't run
         # here because <pre> is not in the allowed-tags whitelist and would be stripped).
         if debug:
             raw_escaped = html.escape(str(data.get("raw_message", "")))
@@ -1514,15 +1510,15 @@ class PostParser:
                 debug HTML need it; feed generation must pass False to avoid
                 serializing every post.
             sanitize: when True, run the html body and footer through a single
-                bleach pass each. Single-post HTML and JSON need this (there is no
+                sanitize pass each. Single-post HTML and JSON need this (there is no
                 feed-level pass on those paths). Feed generation passes False and
                 relies on the per-post sanitize in rss_generator._render_pipeline
                 (per-post for BOTH RSS and HTML), so no fragment is sanitized more
                 than once.
         """
         # The body is rendered once here; flags come from the message itself.
-        # The internal per-fragment sanitize passes are gone; sanitize runs exactly
-        # once at the output boundary here when requested, never inside body/footer.
+        # Sanitize runs exactly once, at the output boundary here when requested,
+        # never inside body/footer.
         html_body = self._generate_html_body(message)
         flags = self._extract_flags(message)
         footer = self.generate_html_footer(message, flags_list=flags)
@@ -1569,9 +1565,8 @@ class PostParser:
     
 
     def _sanitize_html(self, html_raw: str) -> str:
-        # Delegate to the single project-wide bleach config (sanitizer.sanitize_html).
-        # This drops the former fail-open branch: sanitize_html is fail-closed and
-        # html.escape()s on any bleach error.
+        # Delegate to the single project-wide sanitizer config (sanitizer.sanitize_html),
+        # which is fail-closed: it html.escape()s on any sanitizer error.
         return sanitize_html(html_raw)
 
     def _format_forward_info(self, message: Message) -> Union[str, None]:

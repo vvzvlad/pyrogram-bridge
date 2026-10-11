@@ -2,18 +2,12 @@
 # pylint: disable=protected-access, missing-function-docstring, redefined-outer-name, line-too-long
 # pylance: disable=reportMissingImports, reportMissingModuleSource
 """
-Regression tests for issue #52 — download a poll's description_media.
+Downloading a poll's description_media.
 
-Before the fix, download_media_file short-circuited every POLL message with
-`return None, False` BEFORE resolving the file_id. Consequences in prod:
-  - a poll's rendered /media URL always 404'd (file_path=None) -> broken image;
-  - the background worker treated the (None, False) as SUCCESS -> _clear_download_failure
-    -> backoff never armed -> the file was re-queued every cache sweep forever.
-
-The early return is gone, so a POLL now flows through the normal path:
+A POLL flows through the normal download_media_file path:
   - a poll WITH the requested description_media resolves its fid and downloads to cache;
   - a poll WITHOUT it falls into the standard "fid not found" branch: 404 + the SQLite row
-    is removed, so the endless re-queue dies on its own.
+    is removed, so it is not re-queued on every sweep.
 """
 import os
 from types import SimpleNamespace

@@ -1,7 +1,7 @@
 # flake8: noqa
 # pylint: disable=missing-function-docstring, missing-class-docstring, redefined-outer-name, line-too-long
 # pylint: disable=protected-access
-"""Unit tests for rich_tree (adapter + pure render + iterators), Rich Messages phase 2 (#85).
+"""Unit tests for rich_tree (adapter + pure render + iterators).
 
 No network / no Kurigram objects: the adapter dispatches by ``type(obj).__name__``, so
 every Kurigram Rich* class is stubbed by a tiny dynamically-named object carrying the same

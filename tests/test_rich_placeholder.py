@@ -5,9 +5,9 @@
 # pylint: disable=protected-access, wrong-import-position
 # pylance: disable=reportMissingImports, reportMissingModuleSource
 
-"""Rich Messages title/flag/special-block gates + the defensive parse contour (#84/#85).
+"""Rich Messages title/flag/special-block gates + the defensive parse contour.
 
-Covers the three post_parser gates (now routed through rich_tree.tree_of in phase 2),
+Covers the three post_parser gates (routed through rich_tree.tree_of),
 the snapshot rich_tree roundtrip, and the message-level parse contour in
 kurigram_compat. The rich RENDER pipeline itself is covered by test_rich_tree.py /
 test_rich_pipeline.py; here we only assert the gates fire for an EMPTY rich tree (the

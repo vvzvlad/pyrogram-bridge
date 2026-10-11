@@ -3,7 +3,7 @@
 # pylint: disable=redefined-outer-name, line-too-long
 # pylance: disable=reportMissingImports, reportMissingModuleSource
 """Tests for the canonical channel key: helper, the three wiring layers, and the
-one-shot migration (issue #24, tasks 8-11)."""
+one-shot migration."""
 
 import logging
 import os

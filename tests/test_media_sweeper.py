@@ -2,15 +2,13 @@
 # pylint: disable=protected-access, missing-function-docstring, redefined-outer-name, line-too-long
 # pylance: disable=reportMissingImports, reportMissingModuleSource
 """
-Issue #25 (package D) regressions:
+Cache sweeper:
 
-  * Задание 12 — the cache sweep must purge a >20-day-old SQLite row whose file is already
-    gone from disk EVEN when nothing was removed from disk in that pass (files_removed == 0).
-    Previously the DB diff ran only `if files_removed > 0`, so such a fileless-but-expired
-    row stayed in the table forever.
-  * Задание 14 — download_new_files must not re-enqueue an already-queued/in-flight file on
-    every sweep pass (dedup via the module-level _queued_media set), and the worker must free
-    the dedup slot in its finally so the file can be re-enqueued later.
+  * the cache sweep purges a >20-day-old SQLite row whose file is already gone from disk
+    EVEN when nothing was removed from disk in that pass (files_removed == 0).
+  * download_new_files does not re-enqueue an already-queued/in-flight file on every sweep
+    pass (dedup via the module-level _queued_media set), and the worker frees the dedup
+    slot in its finally so the file can be re-enqueued later.
 """
 import sqlite3
 from datetime import datetime

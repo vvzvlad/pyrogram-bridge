@@ -2,7 +2,7 @@
 # pylint: disable=protected-access, missing-function-docstring, missing-class-docstring
 # pylint: disable=redefined-outer-name, logging-fstring-interpolation, line-too-long
 # pylance: disable=reportMissingImports, reportMissingModuleSource
-"""Tests for message_snapshot.py (issue #23, Задания 4-5,7).
+"""Tests for message_snapshot.py.
 
 These verify that a pyrogram Message survives snapshot -> JSON -> restore as a
 CachedMessage that the render pipeline (post_parser.py) consumes identically.
@@ -126,8 +126,8 @@ def test_poll_formatted_text_unwrapped():
     msg = SimpleNamespace(poll=poll)
 
     snap = snapshot_message(msg)
-    # This MUST NOT raise. If the snapshot stored the FormattedText objects as-is, the
-    # SimpleNamespace values would make json.dumps raise TypeError (regression guard).
+    # This MUST NOT raise: storing FormattedText objects as-is would make json.dumps raise
+    # TypeError on the SimpleNamespace values.
     json.dumps(snap)
 
     restored = restore_message(snap)
@@ -393,9 +393,8 @@ def test_normal_video_is_collected():
 
 # --------------------------------------------------------------------------- #
 # Test 9b — the >100MB skip must fire for every media type whose selected object
-# flows into _save_media_file_ids' size check, not just video/live_photo. Before
-# file_size was added to these snapshots a restored >100MB doc/audio/animation/
-# video_note lacked file_size and was wrongly collected on a cache hit (F1).
+# flows into _save_media_file_ids' size check, not just video/live_photo: a restored
+# doc/audio/animation/video_note needs file_size, or it is collected on a cache hit.
 # --------------------------------------------------------------------------- #
 _BIG = 200 * 1024 * 1024
 
@@ -502,9 +501,8 @@ def test_snapshot_messages_list_roundtrip():
 
 
 # --------------------------------------------------------------------------- #
-# Special-media round trips (issue #23 review fix). One per type: assert the exact
-# sub-fields _format_special_media / find_file_id_in_message read survive the trip.
-# These are what silently vanished on a cache hit before the allowlist was completed.
+# Special-media round trips. One per type: assert the exact sub-fields
+# _format_special_media / find_file_id_in_message read survive the trip.
 # --------------------------------------------------------------------------- #
 def test_story_roundtrip_file_unique_id_survives():
     story = SimpleNamespace(

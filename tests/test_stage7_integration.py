@@ -3,29 +3,24 @@
 # pylint: disable=redefined-outer-name, logging-fstring-interpolation, line-too-long
 # pylance: disable=reportMissingImports, reportMissingModuleSource
 """
-Stage 7 — cross-stage END-TO-END integration tests.
+Cross-module END-TO-END integration tests.
 
-Unlike the per-stage suites (which pin one seam in isolation), these drive the real
-public entry points (`get_media`, `ping`, the access-time flush) so a regression that
-only shows up when the stages interact goes red. Every scenario here maps to one of the
-plan's "Стадия 7 — сквозные ручные сценарии"; the ones that genuinely need a running
-server + real downloads + lsof (fd-leak counting) are NOT faked here — they stay in
-docs/stability-verification.md for the operator's prod observation.
+These drive the real public entry points (`get_media`, `ping`, the access-time flush) so a
+break that only shows up when the parts interact goes red. Scenarios that need a running
+server + real downloads + lsof (fd-leak counting) are in docs/stability-verification.md.
 
 Automated here:
 - Range semantics at the /media ROUTE level (get_media -> prepare_file_response ->
   FileResponse driven through real ASGI): bytes=0-99 -> 206, bytes=-100 -> 206,
-  bytes=999999999- -> 416. (Stage 3 pins these on prepare_file_response directly; this
-  adds the end-to-end assertion that get_media's cache-hit branch reaches FileResponse
-  with a live Range still honored — i.e. stages 2+3 wired together.)
-- /ping (stage 6) stays fast + correct while a deliberately-slow op is in flight, issuing
-  ZERO Telegram RPC — proving the healthcheck is decoupled from the hot/blocked paths.
-- In-flight dedup + disconnect cleanup (stages 1/2) through the REAL get_media entry
-  point: concurrent requests share one download and the _inflight registry drains; a
-  cancelled request (client disconnect) leaves neither a stuck key nor a hung sibling.
-- str(channel) access-time key consistency (stage 5) end-to-end: a /media cache hit for
-  an int-ish channel records the str-keyed timestamp, and the flush UPDATE matches the
-  str-keyed DB row (hit -> flush -> DB), the exact affinity gotcha the plan warns about.
+  bytes=999999999- -> 416, through get_media's cache-hit branch.
+- /ping stays fast + correct while a deliberately-slow op is in flight, issuing ZERO
+  Telegram RPC.
+- In-flight dedup + disconnect cleanup through the REAL get_media entry point: concurrent
+  requests share one download and the _inflight registry drains; a cancelled request
+  (client disconnect) leaves neither a stuck key nor a hung sibling.
+- str(channel) access-time key consistency end-to-end: a /media cache hit for an int-ish
+  channel records the str-keyed timestamp, and the flush UPDATE matches the str-keyed DB
+  row (hit -> flush -> DB).
 """
 import time
 import sqlite3
@@ -65,11 +60,9 @@ def _seed_cache(tmp_path, channel, post_id, fid, body=BODY):
 
 
 # --------------------------------------------------------------------------- #
-# Range semantics at the /media ROUTE level (stages 2 + 3 wired together).
-# Plan scenario: `curl -H "Range: bytes=0-99" / "bytes=-100" / "bytes=999999999-"`.
-# Regression caught: any change that makes get_media's cache-hit branch stop reaching
-# FileResponse (e.g. re-buffering the body, hand-rolling headers, dropping the media_key
-# path) or that breaks the digest gate wiring — the Range would stop being honored.
+# Range semantics at the /media ROUTE level. Goes red if get_media's cache-hit branch stops
+# reaching FileResponse (re-buffering the body, hand-rolled headers, a dropped media_key
+# path) or the digest gate wiring breaks.
 # --------------------------------------------------------------------------- #
 def test_media_route_range_prefix_0_99(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
@@ -121,13 +114,9 @@ def test_media_route_range_unsatisfiable_416(monkeypatch, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# /ping (stage 6) stays fast + correct while a slow op is in flight, zero TG RPC.
-# Plan scenario: "Генерация фида на 100+ сообщений + параллельный /ping -> ping < 100 мс".
-# We model the concurrent slow op as a coroutine parked on an Event that is NEVER set
-# during the ping, and assert ping resolves while it is still pending AND touches no RPC.
-# Regression caught: re-coupling /ping to a TG RPC (get_me / safe_get_messages) or to any
-# awaitable that a blocked hot path could stall — the ping would no longer return promptly
-# or the spy counts would go non-zero.
+# /ping stays fast + correct while a slow op is in flight, zero TG RPC. The slow op is a
+# coroutine parked on an Event that is never set during the ping; ping must resolve while
+# it is pending and touch no RPC (get_me / safe_get_messages spies stay at zero).
 # --------------------------------------------------------------------------- #
 class _FakeKurigram:
     def __init__(self, is_connected=True):
@@ -208,13 +197,10 @@ async def test_ping_reports_degraded_promptly_while_slow_op_pending(monkeypatch)
 
 
 # --------------------------------------------------------------------------- #
-# In-flight dedup + disconnect cleanup (stages 1/2) through the REAL get_media entry.
-# Plan scenario: "Параллельные запросы одного большого видео -> нет частичной отдачи" and
-# "Отключение клиента на середине стрима -> нет утечки тасков/фд".
-# The pure-unit stage-2 tests pin _download_deduped directly; these drive get_media so the
-# HTTP semaphore + dedup registry + serve path are proven wired together.
-# Regression caught: moving the download back into the request coroutine (so a disconnect
-# cancels it), or dropping the finally-pop, would leave a stuck _inflight key / hung sibling.
+# In-flight dedup + disconnect cleanup through the REAL get_media entry: the HTTP semaphore,
+# dedup registry and serve path wired together. A download running in the request
+# coroutine (cancelled by a disconnect), or a missing finally-pop, leaves a stuck _inflight
+# key / hung sibling.
 # --------------------------------------------------------------------------- #
 async def test_get_media_concurrent_shares_one_download_and_drains_registry(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
@@ -290,12 +276,10 @@ async def test_get_media_request_cancel_does_not_stick_registry_or_hang_sibling(
 
 
 # --------------------------------------------------------------------------- #
-# temp_<fid> pre-download fast-path (issue #49): a cached LARGE video lives on disk as
-# temp_<fid> (not <fid>). get_media must serve it directly — WITHOUT acquiring a download
-# permit and WITHOUT the safe_get_messages RPC that download_media_file would otherwise do
-# before its own temp-cache check. Links to >100MB videos legitimately appear in feeds.
-# Regression caught: dropping the temp_ fast-path re-couples every large-video re-serve to a
-# Telegram RPC + a scarce download permit.
+# temp_<fid> pre-download fast-path: a cached LARGE video lives on disk as temp_<fid> (not
+# <fid>). get_media must serve it directly — WITHOUT acquiring a download permit and
+# WITHOUT the safe_get_messages RPC that download_media_file would otherwise do before its
+# own temp-cache check. Links to >100MB videos legitimately appear in feeds.
 # --------------------------------------------------------------------------- #
 async def test_get_media_temp_cached_large_video_served_without_rpc_or_permit(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
@@ -336,16 +320,13 @@ async def test_get_media_temp_cached_large_video_served_without_rpc_or_permit(mo
 
 
 # --------------------------------------------------------------------------- #
-# str(channel) access-time key consistency (stage 5) END-TO-END: hit -> flush -> DB.
-# Plan gotcha #9: "Ключи SQLite: channel всегда str(...)"; if the key the hot path RECORDS
-# and the key the flush UPDATEs by ever diverge, the timestamp silently stops updating and
-# the file eventually falls out of the cache. Stage 5 pins hit and flush separately; this
-# stitches them: the /media cache-hit records a (str-channel) key, and the flush's bulk
-# UPDATE must land on that exact DB row. (get_media's route channel is already a str, so the
-# str() there is a defensive no-op; the live int/str hazard is in download_media_file, pinned
-# by stage-5's test_cache_hit_keys_channel_as_str — this test covers the get_media+flush leg.)
-# Regression caught: any accumulator-key vs UPDATE-WHERE inconsistency (e.g. a transposed
-# key-column order in the bulk SQL, verified to turn this test red) leaves `added` stale.
+# str(channel) access-time key consistency END-TO-END: hit -> flush -> DB. If the key the
+# hot path RECORDS and the key the flush UPDATEs by diverge, the timestamp silently stops
+# updating and the file eventually falls out of the cache. The /media cache-hit records a
+# (str-channel) key, and the flush's bulk UPDATE must land on that exact DB row. (get_media's
+# route channel is already a str; the int/str hazard in download_media_file is pinned by
+# test_stage5_sqlite's test_cache_hit_keys_channel_as_str.) A transposed key-column order in
+# the bulk SQL turns this red.
 # --------------------------------------------------------------------------- #
 async def test_media_cache_hit_flush_updates_str_keyed_db_row(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)

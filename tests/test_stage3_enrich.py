@@ -2,18 +2,17 @@
 # pylint: disable=protected-access, missing-function-docstring, missing-class-docstring
 # pylint: disable=redefined-outer-name, line-too-long
 """
-Stage 3 (render-pipeline refactor epic, issue #30/#34) — reply-enrichment lock.
+Reply-enrichment lock.
 
-Reply enrichment (the live client.get_messages reply-target fetch) now lives in
-the FETCH layer: tg_cache.cached_get_chat_history enriches once per history-cache
-miss and persists the resolved reply target inside the history snapshot. The
-render layer (_prepare_feed_posts) no longer enriches at all — BOTH feeds (RSS
-and HTML) receive messages whose .reply_to_message is already populated
-(live-fetched or cache-restored) and render the quote from it.
+Reply enrichment (the live client.get_messages reply-target fetch) lives in the FETCH
+layer: tg_cache.cached_get_chat_history enriches once per history-cache miss and persists
+the resolved reply target inside the history snapshot. The render layer
+(_prepare_feed_posts) does not enrich — BOTH feeds (RSS and HTML) receive messages whose
+.reply_to_message is already populated (live-fetched or cache-restored) and render the
+quote from it.
 
-The stage-0 golden oracle CANNOT see this: its harness replays the corpus
-through monkeypatched tg_cache, bypassing the real fetch layer. So enrichment is
-locked here instead:
+The golden oracle cannot see this (its harness replays the corpus through monkeypatched
+tg_cache, bypassing the fetch layer), so enrichment is locked here:
 
   (a) get_messages is BATCHED by chat_id (one call per chat, not one per reply);
   (b) the fetched reply target is set onto the right source message by

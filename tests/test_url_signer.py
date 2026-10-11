@@ -1,6 +1,6 @@
 # flake8: noqa
 # pylint: disable=missing-function-docstring, redefined-outer-name, line-too-long, protected-access
-"""Unit tests for the v2 media-URL signing scheme (issue #57).
+"""Unit tests for the v2 media-URL signing scheme.
 
 Covers: new-scheme round-trip, tamper rejection, scope/domain separation, legacy
 (pre-v2 SHA-1/8-char) dual-verify with the MEDIA_ALLOW_LEGACY_DIGEST gate, deterministic

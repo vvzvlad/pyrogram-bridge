@@ -1,17 +1,13 @@
 # flake8: noqa
 # pylint: disable=protected-access, missing-function-docstring, missing-class-docstring
 # pylint: disable=redefined-outer-name, line-too-long
-"""Stage-5 media table tests (render-pipeline refactor epic, issue #32/#34).
+"""Media table tests.
 
-Two layers:
-  * 5a — the MEDIA_SOURCES table + renderers reproduce the three old ladders
-    (_get_file_unique_id, _save_media_file_ids, _generate_html_media). The fragment
-    snapshot (tests/test_data/media_fragments.json) is the PRE-REFACTOR BASE reference,
-    captured against the base post_parser.py; the 5a code reproduces it byte-for-byte
-    (two fragments carry registered §3.14 deltas — see fr.REGISTERED_DELTAS). Plus
-    table/selector/invariant unit tests.
-  * 5b — the registered fixes (§3.13 large-file guard for every object, §3.14 the
-    message-media div is closed in every branch) live in test_stage5b_media_fixes.py.
+The MEDIA_SOURCES table + renderers serve _get_file_unique_id, _save_media_file_ids and
+_generate_html_media. The fragment snapshot (tests/test_data/media_fragments.json) is the
+base reference and is reproduced byte-for-byte except two fragments with registered
+deltas (see fr.REGISTERED_DELTAS). Plus table/selector/invariant unit tests. The
+large-file guard and the closed message-media div are tested in test_stage5b_media_fixes.py.
 
 The cross-module invariant test pins the boundary with api_server.find_file_id_in_message:
 every object a selector returns must be resolvable there by its file_unique_id, or a new

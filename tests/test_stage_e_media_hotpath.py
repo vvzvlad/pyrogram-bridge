@@ -2,7 +2,7 @@
 # pylint: disable=protected-access, missing-function-docstring, missing-class-docstring
 # pylint: disable=redefined-outer-name, line-too-long
 """
-Issue #26 package E — media-cache path helper + in-memory MIME cache on the hot /media path.
+Media-cache path helper + in-memory MIME cache on the hot /media path.
 
 Covers:
 - media_cache_path builds EXACTLY the pre-existing on-disk layout (path-format regression).
@@ -43,7 +43,7 @@ def sample_file(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# Task 15 — media_cache_path path-format regression.
+# media_cache_path path format.
 # --------------------------------------------------------------------------- #
 def test_media_cache_path_layout():
     root = api_server.MEDIA_CACHE_DIR
@@ -151,7 +151,7 @@ def test_mime_cache_overflow_clears_and_repopulates(sample_file, monkeypatch):
 
     r = c.get("/f")  # must clear-all on overflow, then insert the new key — no exception
     assert r.status_code == 200
-    # Issue #55: text/plain is not in the inline allowlist, so the RESPONSE is neutralized
+    # text/plain is not in the inline allowlist, so the RESPONSE is neutralized
     # to octet-stream — but the INTERNAL MIME cache still stores the sniffed "text/plain"
     # (asserted below), which is the invariant this test guards.
     assert r.headers["content-type"] == "application/octet-stream"

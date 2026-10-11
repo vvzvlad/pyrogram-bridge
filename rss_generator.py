@@ -44,27 +44,12 @@ _XML_INCOMPATIBLE_RE = re.compile(r'[\x00-\x08\x0B\x0C\x0E-\x1F\uD800-\uDFFF\uFF
 # Canonical treatment of a post with no date
 # --------------------------------------------------------------------------- #
 # A dateless post (service/deleted message, or a degraded placeholder built from a
-# dateless message) used to be handled THREE inconsistent ways:
-#   1. _create_messages_groups group sort  -> float('inf')  => sorts NEWEST, survives [:limit]
-#   2. _render_messages_groups final sort   -> 0.0          => sorts to the TAIL of the feed
-#   3. generate_channel_rss pubDate         -> datetime.now(utc)
-# So the feed ORDER (place 2, tail) and the pubDate (place 3, "now") contradicted each
-# other, and place 3 was NON-DETERMINISTIC: the post's pubDate changed on EVERY poll.
-# Miniflux sorts by date, so such a post kept floating to the top of the reader; and
-# because the feed ETag is a content signature over the serialized body incl. <pubDate>,
-# a floating pubDate meant the ETag NEVER stabilized for any feed containing
-# a dateless post \u2014 defeating conditional GET / 304 for that feed.
-#
-# Canonical rule: a dateless post gets ONE DETERMINISTIC fallback timestamp \u2014 the Unix
-# epoch (0.0, UTC) \u2014 used IDENTICALLY in every sort key AND in the RSS pubDate, never
-# now(). Same input -> same pubDate across every serialization, so the ETag is stable
-# (fixing conditional GET for dateless feeds). Epoch is the honest "unknown date = oldest"
-# interpretation: the post sorts to the tail consistently in both places, and can be
-# trimmed by [:limit] like any other oldest post instead of masquerading as the newest.
-# We deliberately do NOT synthesize a date from message_id: that would manufacture
-# arbitrary 1970-plus-id timestamps, and message_id already keys the (stable) guid so
-# multiple dateless posts never collide \u2014 determinism, not per-post ordering, is the
-# requirement.
+# dateless message) gets ONE deterministic fallback timestamp, the Unix epoch (0.0, UTC),
+# used identically in every sort key AND in the RSS pubDate, never now(). Same input gives
+# the same pubDate, so the content-signature ETag stays stable and conditional GET works;
+# the post sorts to the tail and is trimmed by [:limit] like any other oldest post.
+# No date is synthesized from message_id: the id already keys the stable guid, and
+# determinism, not per-post ordering, is the requirement.
 MISSING_DATE_TS: float = 0.0
 
 
@@ -186,12 +171,9 @@ def _stable_guid_basis(group: list[Message]) -> tuple[str, object]:
     when the window boundary moves re-surfaces the same album as a brand-new (duplicate)
     unread entry on every poll while the album is entering or leaving the window.
 
-    The old basis — the message_id of the "first message carrying text/caption" — moves
-    both when that message leaves the window AND, as an album enters the window newest
-    member first, while the group composition itself grows ({102} -> {101,102} ->
-    {100,101,102}). A minimum-message_id basis has the same growth sensitivity. Only the
-    Telegram-assigned media_group_id is identical for every album member and independent
-    of how many are currently in the window.
+    Bases built from message ids (first message with text, minimum id) shift as an album
+    enters the window newest member first or leaves it; only the Telegram-assigned
+    media_group_id is identical for every album member.
 
     Returns a (kind, key) pair, consumed by the RSS formatter which owns channel_username:
     - ('album', media_group_id): the group's messages all share one truthy, immutable
@@ -235,25 +217,20 @@ def _compute_time_based_group_ids(messages: list[Message], merge_seconds: int = 
     Contract: all messages belong to ONE chat (message.id is unique only per
     chat); callers must not mix chats in a single call.
 
-    Pure re-implementation of the old _create_time_based_media_groups mutation,
-    reproducing its result for every input the old code survived on PRODUCTION
-    data (naive kurigram dates). Inputs only aware-date test mocks could produce
-    (fully-None and aware+None mixes, where the old code clustered the None-date
-    tail by insertion order incl. truthy-id adoption) are deliberately replaced:
+    Rules:
       - messages WITHOUT a date do not participate in time clustering and get
         NO mapping entry (their own media_group_id still applies downstream);
       - dated messages are ordered ascending by date via a timestamp key
         (naive-safe: no aware/naive mix once None-date are excluded);
       - a message joins the current cluster if the gap to the PREVIOUS message
         is <= merge_seconds; the gap is a NAIVE datetime subtraction
-        (msg.date - prev.date).total_seconds(), exactly as the old code — NOT a
-        timestamp diff (they diverge across a DST fold, and the old behavior is
-        the contract);
+        (msg.date - prev.date).total_seconds() — NOT a timestamp diff (they
+        diverge across a DST fold);
       - the effective id of a cluster is the FIRST TRUTHY media_group_id in
-        cluster order (old code used truthiness, not `is not None`, and
-        overwrote members' own differing ids — kept);
+        cluster order (truthiness, not `is not None`), and it overrides members'
+        own differing ids;
       - a cluster of >= 2 members with no truthy id gets a synthetic
-        f"time_{min(dates)}" id (exact old format);
+        f"time_{min(dates)}" id;
       - singleton clusters and clusters with no effective id produce NO entries;
         every member of a cluster with an effective id gets one.
     """
@@ -337,14 +314,11 @@ def _create_messages_groups(messages: list[Message], group_ids: dict[int, str | 
         media_group.sort(key=lambda x: x.id, reverse=False)
         processing_groups.append(media_group)
     
-    # Sort processing groups by date of first message in each group. Timestamp-based key
-    # is naive-safe: kurigram dates are naive-local, and a None-date group used to fall
-    # back to an AWARE datetime.now(timezone.utc) here, raising TypeError on the first
-    # naive-vs-aware comparison — a 500 on ANY feed carrying a None-date post, in the
-    # DEFAULT path. None-date groups now use the CANONICAL dateless
-    # fallback (epoch, MISSING_DATE_TS) here AND in the final _render_messages_groups sort
-    # AND in the RSS pubDate — one deterministic treatment across all three:
-    # they sort to the tail and are trimmed like any other oldest post.
+    # Sort processing groups by date of first message in each group. The timestamp key is
+    # naive-safe (kurigram dates are naive-local); None-date groups use the canonical
+    # dateless fallback (epoch, MISSING_DATE_TS), as do the final _render_messages_groups
+    # sort and the RSS pubDate, so they sort to the tail and are trimmed like any other
+    # oldest post.
     processing_groups.sort(key=lambda group: _msg_sort_ts(group[0]), reverse=True)
 
     return processing_groups
@@ -463,8 +437,7 @@ def _render_messages_groups(messages_groups: list[list[Message]],
         rendered_posts = filtered_posts
     
     # Sort by date; a None-date post uses the canonical epoch fallback (MISSING_DATE_TS),
-    # identical to the group sort and the RSS pubDate, so feed order and pubDate agree and
-    # a dateless post no longer floats.
+    # identical to the group sort and the RSS pubDate, so feed order and pubDate agree.
     rendered_posts.sort(key=lambda x: _sort_ts(x['date']), reverse=True)
     return rendered_posts
 
@@ -482,7 +455,7 @@ def _render_pipeline(messages: list[Message],
 
     Runs entirely in a worker thread via a single asyncio.to_thread call. It contains
     NO await, NO asyncio primitives, NO create_task/get_running_loop — all the CPU-heavy
-    work (grouping, rendering, bleach) happens here off the event loop.
+    work (grouping, rendering, sanitizing) happens here off the event loop.
     Media file-id records are accumulated on post_parser._pending_media_ids and flushed
     by the caller after this returns.
 
@@ -527,10 +500,9 @@ async def _prepare_feed_posts(channel: str | int,
                               history_limit: int,
                               log_prefix: str) -> PreparedFeed:
     """Single code path feeding both feeds: validate -> resolve chat -> fetch history ->
-    render/filter/sort/sanitize in one worker thread. The RSS/HTML formatters used to
-    duplicate this ~80% verbatim; path differences are now EXPLICIT parameters
-    (history_limit: RSS over-fetches limit*2; log_prefix 'rss'|'html' keeps today's
-    paired log-line names). Reply targets arrive already resolved from
+    render/filter/sort/sanitize in one worker thread. Path differences are explicit
+    parameters (history_limit: RSS over-fetches limit*2; log_prefix 'rss'|'html' names the
+    paired log lines). Reply targets arrive already resolved from
     cached_get_chat_history (enriched at fetch time, persisted in the history snapshot),
     so BOTH feeds render the reply quote without extra RPC here.
 
@@ -581,7 +553,7 @@ async def _prepare_feed_posts(channel: str | int,
         from tg_cache import cached_get_chat_history
         messages = await cached_get_chat_history(post_parser.client, channel, limit=history_limit)
     except errors.FloodWait:
-        # FloodWait from history propagates -> HTTP 429 (previously wrapped -> 400).
+        # FloodWait from history propagates -> HTTP 429.
         raise
     except Exception as e:
         logger.error(f"Error during get_chat_history for channel '{channel}' (type: {type(channel)}): {str(e)}", exc_info=True)
@@ -687,7 +659,7 @@ async def generate_channel_rss(channel: str | int,
 
             fe.description(_strip_xml_incompatible(post['text'].replace('\n', ' ')))
             # post['html'] is already sanitized per-post inside _render_pipeline
-            # (single project-wide bleach config, fail-closed). No per-post thread
+            # (single project-wide sanitizer config, fail-closed). No per-post thread
             # hop / CSSSanitizer here anymore.
             fe.content(content=_strip_xml_incompatible(post['html']), type='CDATA')
 

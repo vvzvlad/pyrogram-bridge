@@ -1,7 +1,7 @@
 # flake8: noqa
 # pylint: disable=missing-function-docstring, missing-module-docstring, protected-access
 """
-Issue #53 (cache-hygiene chore) regression tests.
+Cache-hygiene tests.
 
 Covers:
 - Part 1: the guarded DB delete `remove_media_file_ids_if_unchanged_sync`. A row whose

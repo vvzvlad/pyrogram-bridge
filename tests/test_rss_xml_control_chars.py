@@ -2,18 +2,15 @@
 # pylint: disable=protected-access, missing-function-docstring, missing-class-docstring
 # pylint: disable=redefined-outer-name, line-too-long
 """
-Issue #54 (critical) — XML-incompatible control chars / lone surrogates in a single
-post text must NOT crash the whole RSS feed.
+XML-incompatible control chars / lone surrogates in a single post text must NOT crash the
+whole RSS feed.
 
 feedgen serializes via lxml, which raises
     ValueError: All strings must be XML compatible ... no control characters
 for any XML-forbidden control char (\\x00-\\x08, \\x0B, \\x0C, \\x0E-\\x1F) or lone
-surrogate (\\uD800-\\uDFFF) — even inside CDATA. That ValueError used to propagate out
-of generate_channel_rss as an HTTP 500 on the ENTIRE feed, on every reader poll, until
-the bad post scrolled out of the fetch window.
-
-rss_generator now strips those chars from every string handed to feedgen, immediately
-before serialization, while keeping XML-valid whitespace (TAB \\x09, LF \\x0A, CR \\x0D).
+surrogate (\\uD800-\\uDFFF) — even inside CDATA — which would fail the ENTIRE feed with a 500.
+rss_generator strips those chars from every string handed to feedgen, immediately before
+serialization, while keeping XML-valid whitespace (TAB \\x09, LF \\x0A, CR \\x0D).
 """
 from types import SimpleNamespace
 from datetime import datetime, timezone
@@ -87,7 +84,7 @@ def test_strip_passes_through_non_str():
 
 
 # --------------------------------------------------------------------------- #
-# Regression: a bad post no longer 500s the feed, and its siblings survive.
+# A bad post does not 500 the feed, and its siblings survive.
 # --------------------------------------------------------------------------- #
 @pytest.mark.asyncio
 async def test_rss_feed_survives_control_chars_in_post_text(monkeypatch):
@@ -118,9 +115,8 @@ async def test_rss_feed_survives_control_chars_in_post_text(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# Regression (review round): U+FFFE / U+FFFF are XML-forbidden too (lxml rejects
-# them), and they are NOT C0 control chars — the first regex missed them, so a post
-# carrying one still 500'd the whole feed.
+# U+FFFE / U+FFFF are XML-forbidden too (lxml rejects them) although they are NOT C0
+# control chars.
 # --------------------------------------------------------------------------- #
 def test_strip_removes_bmp_noncharacters_fffe_ffff():
     dirty = "a" + chr(0xFFFE) + "b" + chr(0xFFFF) + "c"
@@ -142,9 +138,8 @@ async def test_rss_feed_survives_bmp_noncharacters(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# Regression (review round): create_error_feed put the raw, URL-derived `channel`
-# into link/id/guid ATTRIBUTES (which lxml also rejects for control chars) — a
-# not-found request with a control char in the channel id crashed the error feed.
+# create_error_feed must clean the URL-derived `channel` before putting it into link/id/guid
+# ATTRIBUTES (which lxml also rejects for control chars).
 # --------------------------------------------------------------------------- #
 def test_error_feed_survives_control_char_in_channel():
     from rss_generator import create_error_feed
