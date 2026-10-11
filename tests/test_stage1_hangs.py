@@ -3,7 +3,7 @@
 # pylint: disable=redefined-outer-name, logging-fstring-interpolation, line-too-long
 # pylance: disable=reportMissingImports, reportMissingModuleSource
 """
-Stage 1 (anti-hang) regression tests:
+Anti-hang tests:
 - RPC gate timeout: a hung RPC times out and the gate permit is NOT leaked; a
   subsequent call still succeeds.
 - Background worker: a download that raises Exception / FloodWait does not kill the

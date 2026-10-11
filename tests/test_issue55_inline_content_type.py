@@ -3,10 +3,10 @@
 # pylint: disable=redefined-outer-name, logging-fstring-interpolation, line-too-long
 # pylance: disable=reportMissingImports, reportMissingModuleSource
 """
-Issue #55 — never serve active content inline from our own origin.
+Never serve active content inline from our own origin.
 
 `prepare_file_response` still sniffs the MIME (and persists it to the type cache), but the
-RESPONSE content type is now chosen from an allowlist of passive image/video/audio types:
+RESPONSE content type is chosen from an allowlist of passive image/video/audio types:
   - allowlisted (e.g. image/png)  -> served inline with that exact type
   - anything else (text/html, image/svg+xml, application/*) -> served as a neutralized
     attachment with Content-Type: application/octet-stream (NOT refused)
@@ -117,11 +117,10 @@ def test_range_206_still_carries_security_headers(tmp_path):
 
 
 # --- Positive inline cases: the profile Telegram media types must be served INLINE with
-# their exact declared content type. These guard against the allowlist drifting away from
-# what python-magic/libmagic actually emits (issue #55 regression: the allowlist used
-# canonical IANA names like audio/wav/audio/mp4 while libmagic returns audio/x-wav /
-# audio/x-m4a, so legit voice/audio silently flipped to attachment). Each fixture is a
-# minimal but real container that libmagic sniffs to the expected type. -----------------
+# their exact declared content type. These guard the allowlist against drifting away from
+# what python-magic/libmagic actually emits (audio/x-wav and audio/x-m4a, not the IANA
+# audio/wav and audio/mp4). Each fixture is a minimal but real container that libmagic
+# sniffs to the expected type. -----------------
 
 def _pil_bytes(fmt):
     buf = io.BytesIO()
@@ -163,7 +162,7 @@ _INLINE_FIXTURES = [
     ("webp", lambda: _pil_bytes("WEBP"), "image/webp"),
     ("mp4", _mp4_video_bytes, "video/mp4"),
     ("ogg_audio", _ogg_audio_bytes, "audio/ogg"),
-    ("m4a", _m4a_bytes, "audio/x-m4a"),  # issue #55 regression case
+    ("m4a", _m4a_bytes, "audio/x-m4a"),  # libmagic's name, not audio/mp4
 ]
 
 

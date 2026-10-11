@@ -1,15 +1,13 @@
 # flake8: noqa
 # pylint: disable=missing-function-docstring, redefined-outer-name, line-too-long
-"""Unit tests for the single project-wide bleach config (sanitizer.py, issue #28 / §3).
+"""Unit tests for the single project-wide sanitizer config (sanitizer.py).
 
-Covers the stage-1 registry items that this module owns:
-  §3.1  s / del (strikethrough) survive.
-  §3.2  fail-closed: on a bleach error the fragment is html.escape()d, never returned raw.
-  §3.16 the single error-log name `html_sanitization_error` + log_context.
-Plus the two non-default bleach params the maintainer flagged as load-bearing:
-  strip=True (disallowed tags are REMOVED, not escaped into visible text) and
-  protocols including 'tg' (tg:// links survive).
-And the one-config invariant: only one ALLOWED_TAGS list exists in the repo.
+Covers:
+  * s / del (strikethrough) survive.
+  * fail-closed: on a sanitizer error the fragment is html.escape()d, never returned raw.
+  * the single error-log name `html_sanitization_error` + log_context.
+  * disallowed tags are REMOVED, not escaped into visible text, and tg:// links survive.
+  * the one-config invariant: only one ALLOWED_TAGS list exists in the repo.
 """
 import logging
 

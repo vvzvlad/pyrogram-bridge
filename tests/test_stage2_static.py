@@ -3,9 +3,9 @@
 # pylint: disable=redefined-outer-name, logging-fstring-interpolation, line-too-long
 # pylance: disable=reportMissingImports, reportMissingModuleSource
 """
-Stage 2 (static-media stability) regression tests.
+Static-media stability tests.
 
-Covers the four scenarios from the plan plus the subtle in-flight-dedup lifecycle:
+Covers:
 - _download_atomic: success publishes atomically and leaves no `.part.`; timeout / zero-size
   / race-loser all remove the partial and never leave a stub at the final name.
 - Concurrent large-video downloads never expose a partial file (atomic rename).
@@ -266,12 +266,11 @@ async def test_media_floodwait_returns_429_not_404(monkeypatch, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# 2.5 — Permit lifetime moved INTO _download_deduped's runner (issue #49): ONE
-# live download holds ONE permit regardless of how many requests wait on the
-# shared Future, and a saturated semaphore fast-rejects with a
-# DownloadAdmissionTimeout (mapped to 503) WITHOUT arming the download backoff.
-# The semaphore is a plain asyncio.Semaphore, so an over-release would SILENTLY
-# inflate the count and disable the limiter — assert the count.
+# 2.5 — the permit lives INSIDE _download_deduped's runner: ONE live download holds ONE
+# permit regardless of how many requests wait on the shared Future, and a saturated
+# semaphore fast-rejects with a DownloadAdmissionTimeout (mapped to 503) WITHOUT arming the
+# download backoff. The semaphore is a plain asyncio.Semaphore, so an over-release would
+# SILENTLY inflate the count and disable the limiter — assert the count.
 # --------------------------------------------------------------------------- #
 async def test_dedup_concurrent_requests_consume_one_permit(monkeypatch):
     # N concurrent requests for the SAME uncached file must burn exactly ONE permit:

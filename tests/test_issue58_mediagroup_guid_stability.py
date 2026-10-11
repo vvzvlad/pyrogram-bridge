@@ -2,18 +2,14 @@
 # pylint: disable=protected-access, missing-function-docstring, missing-class-docstring
 # pylint: disable=redefined-outer-name, line-too-long
 """
-Issue #58 — a media group's guid must be STABLE across polls, independent of which subset
-of the album's messages happens to fall inside the current fetch window.
+A media group's guid must be STABLE across polls, independent of which subset of the
+album's messages happens to fall inside the current fetch window.
 
-Before the fix the merged-group guid was derived from the message_id of the "first message
-carrying text/caption". That representative shifts as the album enters/leaves the window
-(the group composition itself grows newest-member-first), so the reader dedups on a guid
-that changes every poll -> the same album re-surfaces as a NEW unread entry (duplicate).
-
-The fix keys a native album's guid on its immutable Telegram media_group_id, which is
-identical for every member and independent of how many are in the window. This test drives
-the real generate_channel_rss path across several window subsets of one album and asserts
-the album's guid never changes (while the naive message-id basis demonstrably would).
+A native album's guid is keyed on its immutable Telegram media_group_id, identical for
+every member. A message-id basis shifts as the album enters/leaves the window, so the
+reader would see the same album as a new unread entry. This test drives the real
+generate_channel_rss path across several window subsets of one album and asserts the
+album's guid never changes (while the naive message-id basis demonstrably would).
 """
 from types import SimpleNamespace
 from datetime import datetime, timezone

@@ -3,7 +3,7 @@
 # pylint: disable=redefined-outer-name, logging-fstring-interpolation, line-too-long
 # pylance: disable=reportMissingImports, reportMissingModuleSource
 """
-Stage 6 (lightweight /ping healthcheck) regression tests.
+Lightweight /ping healthcheck tests.
 
 Covers:
 - /ping returns 200 "ok" when connected and the last probe is recent (age < threshold).

@@ -1,16 +1,10 @@
 # flake8: noqa
 # pylint: disable=missing-function-docstring, redefined-outer-name, line-too-long
-"""Stage-0 golden oracle (render-pipeline refactor epic, issue #27/#34).
+"""Golden oracle for the feed render pipeline.
 
 Regenerates the RSS + HTML feeds for the frozen recorded corpus and asserts
-byte-equality against the committed goldens after the spec's declared normalization
-(strip volatile <lastBuildDate>). Any other byte change = a render regression, and
-this test must catch it. (The stage-0 merged-flags sort normalization was removed in
-stage 2: flag order is now deterministic first-seen order — §3.8.)
-
-Guardrails: this stage only ADDS a loader + goldens + this test. No render/pipeline
-production code is touched; the goldens freeze CURRENT behavior including known bugs
-(fixed in later stages, each referencing a §3 registry item).
+byte-equality against the committed goldens after the one declared normalization
+(strip volatile <lastBuildDate>). Any other byte change is a render regression.
 
 Regenerate goldens with:  python -m tests.golden_replay
 """
@@ -66,9 +60,9 @@ def test_all_goldens_present_and_nonempty():
 
 
 def test_normalization_preserves_flag_order():
-    """Stage 2 (§3.8): merged-post flags are now emitted in deterministic first-seen
-    order, so normalize_html no longer reorders the flags div — a real flag reordering
-    must reach the byte comparison instead of being masked."""
+    """Merged-post flags are emitted in deterministic first-seen order, so normalize_html
+    does not reorder the flags div — a real flag reordering must reach the byte comparison
+    instead of being masked."""
     a = '<div class="message-flags"> 🏷 video 🏷 fwd 🏷 link </div>'
     b = '<div class="message-flags"> 🏷 link 🏷 fwd 🏷 video </div>'
     assert gr.normalize_html(a) != gr.normalize_html(b)

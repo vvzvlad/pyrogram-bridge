@@ -11,14 +11,8 @@ on:
 permissions:
   contents: read   # checkout
 
-# Two pushes to the same branch in a row must not race: the runs are independent
-# and the older one may finish last, leaving its :latest on the registry — a
-# watchtower deploy would then ship the previous commit to prod.
-# The group alone already fixes that: runs are serialised, so the newest commit's
-# :latest is written last. Cancelling is deliberately OFF — it would kill the
-# older run together with its :<sha> image, and on two quick pushes the
-# intermediate commit would never be built, leaving holes in the tag history
-# exactly where a rollback is most likely to be needed.
+# The group serialises runs per branch, so the newest commit's :latest is written last.
+# Cancelling stays off so an already running build still publishes its :<sha>.
 concurrency:
   group: image-${{ github.ref }}
   cancel-in-progress: false

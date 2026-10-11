@@ -1,19 +1,10 @@
 #!/bin/sh
 # Container entrypoint.
 #
-# The container starts as ROOT on purpose (see Dockerfile: no `USER app`).
-# Root is needed only for one thing at boot: fixing ownership of the mounted
-# data volume. The image layer is chown'd to `app` at build time, but that only
-# affects the image — a pre-existing named volume mounted at /app/data keeps
-# whatever ownership it had on disk. Installs that started on the old root image
-# have root-owned files there (media_file_ids.db, pyro_bridge.session,
-# cache/, tgcache/, media_digest.key). Once we drop to uid 1000 those become
-# unwritable and SQLite fails with "attempt to write a readonly database" in
-# init_db_sync during startup, crash-looping the container.
-#
-# All writable runtime state lives under /app/data (DB, session, cache/, tgcache/,
-# key), so a single recursive chown of that one directory migrates every existing
-# install. It is idempotent and fast (a no-op walk) once ownership is already app.
+# Starts as root (the Dockerfile has no `USER app`) only to chown the mounted data volume:
+# a named volume created by an older root-based image keeps root-owned files, which uid 1000
+# cannot write (SQLite: "attempt to write a readonly database"). All writable state lives
+# under /app/data, so one recursive chown covers it; it is a no-op once ownership is right.
 set -e
 
 # Started as non-root (compose `user:` pinned): chown and the privilege drop below both

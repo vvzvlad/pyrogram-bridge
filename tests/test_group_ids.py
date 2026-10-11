@@ -2,21 +2,16 @@
 # pylint: disable=protected-access, missing-function-docstring, missing-class-docstring
 # pylint: disable=redefined-outer-name, line-too-long
 # pylance: disable=reportMissingImports, reportMissingModuleSource
-"""Stage 4 (render-pipeline refactor, issue #31 / epic #34) — pure time-clustering.
+"""Pure time-clustering: `_compute_time_based_group_ids`.
 
-`_create_time_based_media_groups` deep-copied every cached message per feed request and
-MUTATED media_group_id. It is replaced by `_compute_time_based_group_ids`, a PURE function
-returning {message.id: effective_media_group_id}; `_create_messages_groups` reads that
-mapping instead of a mutated attribute. All tests use NAIVE dates (as kurigram emits on
-prod), not aware-UTC mocks.
+It returns {message.id: effective_media_group_id} without mutating messages, and
+`_create_messages_groups` reads that mapping. All tests use NAIVE dates (as kurigram
+emits), not aware-UTC mocks.
 
-Behavior registry items exercised here: §3.11 (None-date excluded from clustering, no
-mapping entry; own media_group_id still applies) and §3.12 (naive-safe sort keys).
-
-Issue #59 unified the treatment of a None-date post: it now uses ONE deterministic epoch
-fallback (rss_generator.MISSING_DATE_TS) in EVERY sort key and in the RSS pubDate, so it
-sorts to the tail everywhere and is trimmed by [:limit] like any other oldest post — it no
-longer masquerades as the newest to survive the slice (the old, self-contradictory hack).
+Covers None-date messages (excluded from clustering, no mapping entry, own
+media_group_id still applies), naive-safe sort keys, and the epoch fallback
+(rss_generator.MISSING_DATE_TS) that sorts a dateless post to the tail and lets [:limit]
+trim it like any other oldest post.
 """
 import os
 import time as _time
@@ -111,8 +106,8 @@ def test_ties_equal_dates_cluster_in_fetch_order():
 
 
 def test_gap_uses_naive_datetime_subtraction_not_timestamps():
-    # The gap is a NAIVE wall-clock subtraction, exactly as the old code — NOT a timestamp
-    # diff (they DIVERGE across a DST fold, and the old behavior is the contract). Pin a
+    # The gap is a NAIVE wall-clock subtraction — NOT a timestamp diff (they DIVERGE
+    # across a DST fold). Pin a
     # DST zone and straddle the ambiguous "fall back" hour with the two folds:
     #   a = 01:30:00 fold=0 -> the FIRST (EDT, UTC-4) occurrence of that wall-clock time;
     #   b = 01:30:02 fold=1 -> the SECOND (EST, UTC-5) occurrence, ~1h later in REAL time.
@@ -178,8 +173,8 @@ def test_none_date_media_group_still_assembled_downstream():
 # §3.12 — naive-safe group sort: None-date groups survive [:limit] and land at the tail.
 # --------------------------------------------------------------------------- #
 def test_create_messages_groups_none_date_does_not_crash_default_path():
-    # This is the LIVE default-path 500: a None-date group used to fall back to an AWARE
-    # now() in the group sort key and blow up against the naive real dates. No mapping /
+    # A None-date group in the default path must not compare an aware fallback against
+    # naive real dates. No mapping /
     # time_based_merge needed — plain grouping must survive.
     dated = Msg(1, at(0))
     nodate = Msg(2, None)
@@ -218,10 +213,8 @@ def _make_message(mid, text, date, media_group_id=None):
 
 @pytest.mark.asyncio
 async def test_none_date_post_renders_and_lands_at_feed_end(monkeypatch):
-    # END-TO-END regression for the live prod 500: a None-date post in a feed of real-dated
-    # posts, WITH time_based_merge. Old code raised TypeError (naive vs aware) in BOTH the
-    # group sort key (default path) and the time-cluster sort -> HTTP 500 on the default
-    # feed path. New code renders it and, per §3.12, places it at the tail of the feed.
+    # END-TO-END: a None-date post in a feed of real-dated posts, WITH time_based_merge,
+    # renders (no naive-vs-aware TypeError in either sort) and lands at the tail.
     posts = [
         _make_message(1, "OLDEST_REAL", at(0)),
         _make_message(2, "NEWEST_REAL", at(30)),
@@ -249,14 +242,10 @@ async def test_none_date_post_renders_and_lands_at_feed_end(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_none_date_group_sorts_oldest_and_is_dropped_under_limit(monkeypatch):
-    # Canonical #59 rule: a None-date group uses the epoch fallback in the group sort key,
-    # so it sorts as the OLDEST and is trimmed by [:limit] like any other oldest post —
-    # NOT kept alive as the newest (the old, self-contradictory float('inf') hack that
-    # contradicted its tail pubDate). This test applies REAL limit pressure (limit < number
-    # of groups) so the slice actually drops groups: with 5 dated posts + 1 None-date post
-    # and limit=3, the surviving 3 groups are the 3 NEWEST dated; the None-date group and
-    # the 2 oldest dated are dropped. If the fallback regressed back to 'inf' the None-date
-    # group would sort newest and survive -> this assertion fails.
+    # A None-date group uses the epoch fallback in the group sort key, so it sorts as the
+    # OLDEST and is trimmed by [:limit]. Real limit pressure: with 5 dated posts + 1 None-date
+    # post and limit=3, the surviving 3 groups are the 3 NEWEST dated; the None-date group and
+    # the 2 oldest dated are dropped. A float('inf') fallback would let it survive.
     posts = [_make_message(mid, f"DATED_{mid}", at(0, minute=mid)) for mid in range(1, 6)]
     posts.append(_make_message(99, "NONE_DATE_POST", None))
 

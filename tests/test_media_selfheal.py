@@ -2,13 +2,13 @@
 # pylint: disable=protected-access, missing-function-docstring, redefined-outer-name, line-too-long
 # pylance: disable=reportMissingImports, reportMissingModuleSource
 """
-Regression tests for the media self-healing fix (post 'static refactor' outage):
+Media self-healing.
 
-Root cause recap: Kurigram serializes downloads through a single get_file slot; a
-zombie media-DC connection makes every download time out while the main-DC watchdog
-stays green, so downloads jam forever. The fix adds (a) a negative-cache backoff so a
-repeatedly-failing file is not hammered, and (b) a consecutive-timeout streak that
-exits the process, so the container restart rebuilds the media connection.
+Kurigram serializes downloads through a single get_file slot; a zombie media-DC connection
+makes every download time out while the main-DC watchdog stays green. Covered: (a) the
+negative-cache backoff so a repeatedly-failing file is not hammered, and (b) the
+consecutive-timeout streak that exits the process, so the container restart rebuilds the
+media connection.
 
 Also covers the main-DC side of the same recovery: the watchdog exits the process after
 N failed probes or when its loop crashes, while disconnect events are only logged.
@@ -206,8 +206,8 @@ def test_backoff_capped_at_max():
     _DOWNLOAD_BACKOFF_MAX. After enough consecutive failures for the raw exponential to
     overtake the cap, the effective backoff must stay pinned at the cap. This test FAILS if
     the min(MAX, ...) cap is removed (the raw exponential would then blow past MAX). The
-    failure count is derived from the configured cap so it holds regardless of MEDIA_BACKOFF_MAX_S
-    (issue #51 raised the cap from 600s to 6h and made it env-tunable)."""
+    failure count is derived from the configured cap so it holds regardless of
+    MEDIA_BACKOFF_MAX_S."""
     key = ("selfheal_chan", 99, "fid_cap")
     api_server._download_failures.pop(key, None)
 

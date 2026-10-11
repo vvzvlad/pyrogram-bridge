@@ -2,13 +2,10 @@
 # pylint: disable=protected-access, missing-function-docstring, redefined-outer-name, line-too-long
 # pylance: disable=reportMissingImports, reportMissingModuleSource
 """
-Regression tests for issue #51 — background cache download: working backoff + dedup.
-
-Symptom fixed here: dead media files were retried on every ~15 min sweep for up to 20 days,
-the same file could download twice at once (live + background), and empty cache dirs piled up.
+Background cache download: working backoff + dedup.
 
   1. Backoff cap >= the sweep interval, so a dead file is skipped for whole sweeps instead of
-     being re-queued every pass (the retry-storm).
+     being re-queued every pass.
   2. After N consecutive failures the media row is dropped from SQLite (_DOWNLOAD_FAILURES_DROP_ROW).
   3. The background worker downloads via _download_deduped (shared with live requests) so one
      file is fetched once, and it does NOT keep its own failure accounting (runner owns it).

@@ -3,9 +3,9 @@
 # pylint: disable=redefined-outer-name, logging-fstring-interpolation, line-too-long
 # pylance: disable=reportMissingImports, reportMissingModuleSource
 """
-Issue #56 — secret-in-log leaks + constant-time token compare.
+Secret-in-log leaks and constant-time token compare.
 
-Guards the three fixes in api_server:
+Checks in api_server:
 - Token check (get_rss_feed / get_available_flags / ... via the shared _enforce_token
   helper): a wrong token must 403 WITHOUT the expected secret (Config["token"]) or the
   raw presented token ever reaching the logs; a correct token is accepted WITHOUT logging

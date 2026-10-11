@@ -2,13 +2,11 @@
 # pylint: disable=protected-access, missing-function-docstring, missing-class-docstring
 # pylint: disable=redefined-outer-name, logging-fstring-interpolation, line-too-long
 # pylance: disable=reportMissingImports, reportMissingModuleSource
-"""Render-parity oracle for the snapshot cache (issue #23 review fix).
+"""Render-parity oracle for the snapshot cache.
 
-The core ask of the review: prove that snapshot -> restore preserves EVERYTHING the
-render pipeline reads. The old golden test replays a recorded corpus and never renders a
-live Message against its snapshot, so a field dropped from the allowlist (the exact
-bug the reviewer mutation-proved for web_page/sender_chat/... and for the special-media
-types) passes silently.
+Proves that snapshot -> restore preserves EVERYTHING the render pipeline reads. The golden
+test replays a recorded corpus and never renders a live Message against its snapshot, so a
+field dropped from the allowlist would pass there silently.
 
 This test builds a CORPUS of representative live fake Message objects (plain text, every
 media type, every special-media type, web_page, poll, forwards Case 1-5, reactions,

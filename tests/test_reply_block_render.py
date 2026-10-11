@@ -5,8 +5,8 @@
 """Reply-block rendering (post_parser._format_reply_info).
 
 The reply block must name the AUTHOR of the quoted message (channel title / user
-name) instead of a bare "#<id>", and must quote the target IN FULL (the former
-100-char cut is gone). Reply targets reach the renderer either as live pyrogram
+name) instead of a bare "#<id>", and must quote the target IN FULL. Reply targets reach
+the renderer either as live pyrogram
 Messages or as restored cache snapshots (SimpleNamespace), so every attribute is
 read with getattr — the fixtures below deliberately omit attributes.
 
@@ -355,10 +355,10 @@ def test_whitespace_only_quote_counts_as_empty():
 
 
 def test_angle_bracket_text_is_quoted_not_swallowed():
-    # REGRESSION: emptiness used to be decided on a TAG-STRIPPED view of the html. A message
-    # without entities has .html == the raw text, so a quote whose whole text is angle-bracketed
-    # ('<без комментариев>', '<3>', '<-- x -->') looked like markup and the whole quote was
-    # erased — while nh3 escapes it at the boundary and a reader sees it fine.
+    # Emptiness must not be decided on a TAG-STRIPPED view of the html: a message without
+    # entities has .html == the raw text, so an angle-bracketed quote ('<без комментариев>',
+    # '<3>', '<-- x -->') would look like markup and be erased, while nh3 escapes it at the
+    # boundary and a reader sees it fine.
     for text in ("<без комментариев>", "<3>", "<...>", "<-- x -->"):
         reply = _reply(id=96, caption=None, sender_chat=None, text=FakeStr(text, text))
         out = _parser()._format_reply_info(_message(reply))
@@ -415,9 +415,9 @@ def test_edge_nbsp_is_kept_as_a_hand_made_indent():
 
 
 def test_pinned_target_titled_like_the_fallback_keeps_its_name_and_link():
-    # REGRESSION: the pinned wording used to be chosen by comparing the rendered label with the
-    # fallback TEXT, so a channel actually titled 'Unknown author' lost both its name and its
-    # t.me/c link. The decision comes from the source fields now.
+    # The pinned wording is decided from the source fields, not by comparing the rendered
+    # label with the fallback TEXT: a channel actually titled 'Unknown author' keeps its name
+    # and its t.me/c link.
     reply = _reply(id=99, text="pinned body", caption=None,
                    sender_chat=SimpleNamespace(id=-1001234567890, title="Unknown author", username=None))
     out = _parser()._format_reply_info(_message(reply, service="MessageServiceType.PINNED_MESSAGE"))

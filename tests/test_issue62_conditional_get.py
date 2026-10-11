@@ -1,9 +1,8 @@
 """
-Issue #62 — conditional GET on the feed endpoint.
+Conditional GET on the feed endpoint.
 
 The RSS/HTML feed responses must carry validators (ETag + Last-Modified) and honor
-If-None-Match / If-Modified-Since with a bodyless 304, so a reader's poll of an
-unchanged feed no longer forces a full regenerate+resend on the wire.
+If-None-Match / If-Modified-Since with a bodyless 304.
 
 These tests drive api_server.get_rss_feed through a TestClient with generate_channel_*
 mocked out, so they exercise the header/304 logic without touching Telegram.

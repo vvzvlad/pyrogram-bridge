@@ -1,4 +1,4 @@
-"""Shared test bootstrap (issue #17).
+"""Shared test bootstrap.
 
 Ensure the repo root is importable and install the config mock BEFORE any test
 module imports application code. Pytest imports conftest.py before collecting
@@ -33,7 +33,7 @@ import telegram_client
 
 telegram_client.SESSION_PATH = os.path.join(ROOT, 'tests', 'test_data')
 
-# Pin the runner timezone to UTC (stage-0 golden determinism, issue #27).
+# Pin the runner timezone to UTC (golden determinism).
 # Naive kurigram dates are interpreted by datetime.timestamp() in the LOCAL tz, so
 # without this pin RSS <pubDate> values drift between machines (this sandbox is MSK).
 os.environ['TZ'] = 'UTC'
@@ -44,7 +44,7 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _reset_media_mime_cache():
-    """Clear the process-lifetime MIME dict before each test (issue #26).
+    """Clear the process-lifetime MIME dict before each test.
 
     ``api_server._mime_types`` persists for the whole process, so an entry populated by one
     test would otherwise leak into another and mask a get/magic call the next test asserts on.

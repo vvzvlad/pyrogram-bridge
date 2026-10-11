@@ -2,7 +2,7 @@
 # pylint: disable=protected-access, missing-function-docstring, missing-class-docstring
 # pylint: disable=redefined-outer-name, line-too-long
 # pylance: disable=reportMissingImports, reportMissingModuleSource
-"""Post content the bridge used to lose (post-content coverage pass, snapshot v9).
+"""Post content coverage (snapshot v9).
 
 One section per item: service-message filtering, poll media on a cache hit, flags vs
 what the bridge itself adds to the body, selected reply fragments and replies to unresolved

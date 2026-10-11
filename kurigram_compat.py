@@ -20,16 +20,8 @@ that one call. It does two jobs:
     call. Instead we emit a ``part=True`` sentinel with empty blocks, which the
     re-fetch recognises and REPAIRS.
 
-HISTORY — removed in the 2.2.24 -> 2.2.26 bump: a second wrapper over ``RichBlock._parse``
-degraded ONE bad block to a marked ``RichBlockUnsupported`` node instead of losing the post.
-It existed for two deterministic upstream bugs (a missing document dereferenced without a
-None-guard; ``RichBlockListItem._parse`` recursing without forwarding photos/documents).
-2.2.26 fixed BOTH — every media branch now returns ``RichBlockUnsupported()`` on a missing
-document (rich_block.py:290, 331, 347) and the list-item recursion forwards the full
-argument set (rich_block.py:571, 596) — so the wrapper had nothing left to catch. A block
-that raises now degrades the whole post to the sentinel above rather than a single block:
-less granular, still never a crash. Restore the block contour from git history if a future
-layer reintroduces a per-block upstream crash.
+A block that raises degrades the whole post to the sentinel above: less granular than a
+per-block fallback, but never a crash.
 
 Rollback safety: on a Kurigram build that lacks the Rich* classes the import degrades to a
 no-op — the container must not crash-loop. The wrapper uses ``except Exception`` (NOT

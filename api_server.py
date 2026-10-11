@@ -212,13 +212,10 @@ API_HOST = "0.0.0.0"
 # exponentially growing backoff elapses. Cleared on the first successful download.
 # All access is from the single event-loop thread, so a plain dict needs no lock.
 _DOWNLOAD_BACKOFF_BASE = 60.0     # seconds; backoff after the first failure
-# Cap on the backoff (seconds), 6h. It must exceed CACHE_SWEEP_INTERVAL_S: with a shorter
-# cap the backoff always expires before the next sweep, so download_new_files re-queues
-# the dead file every pass (the retry-storm this fixes — a dead file was retried every
-# ~15 min for up to 20 days). A long cap is safe because the negative cache lives in
-# memory only: the process restart that recovers a hung session (watchdog or
-# media-timeout streak) empties it, so a healed system never holds a stale, long backoff
-# that keeps fast-503'ing a now-downloadable file.
+# Cap on the backoff (seconds), 6h. It must exceed CACHE_SWEEP_INTERVAL_S, or the backoff
+# always expires before the next sweep and download_new_files re-queues the dead file every
+# pass. A long cap is safe because the negative cache is memory-only: the restart that
+# recovers a hung session (watchdog or media-timeout streak) empties it.
 _DOWNLOAD_BACKOFF_MAX = 21600.0
 # After this many CONSECUTIVE failed downloads, drop the media row from SQLite so a
 # genuinely-dead file (deleted post, gone media) stops being re-queued forever.
@@ -421,15 +418,10 @@ async def _supervised(factory, name: str, min_restart_interval: float = 60.0):
             await asyncio.sleep(min_restart_interval - elapsed)
 
 
-# Access-time write accumulator. A /media cache hit used to touch SQLite on the hot path
-# (a threadpool hop + connect + UPDATE per request), which starves the threadpool under
-# active RSS polling. Instead a cache hit just records the timestamp here — a dict write
-# on the single-threaded event loop is cheap and atomic — and a periodic background task
-# flushes the whole batch to SQLite in one executemany. Keys use str(channel) to stay
-# consistent with the string form written at insert time and to not lean on SQLite's
-# implicit column-affinity coercion (the channel column is TEXT, so a bound int would be
-# coerced and still match — but we key the accumulator by the same type we store, rather
-# than depend on that).
+# Access-time write accumulator. A /media cache hit only records the timestamp here (a dict
+# write on the event loop) and a periodic task flushes the batch to SQLite in one
+# executemany, keeping SQLite off the hot path. Keys use str(channel), the type stored in
+# the TEXT channel column.
 ACCESS_FLUSH_INTERVAL = 60  # seconds between access-time flushes
 _access_updates: dict[tuple[str, int, str], float] = {}
 
@@ -497,8 +489,8 @@ async def lifespan(_: FastAPI):
     await asyncio.to_thread(migrate_channel_keys_sync, DB_PATH, MEDIA_CACHE_DIR)
 
     # One-shot startup maintenance of the history/chatinfo cache: drop legacy pickle files
-    # (which are now always a miss), age-sweep stale tgcache entries, and remove the
-    # pre-SQLite data/media_file_ids.json legacy dump (no longer read by any code).
+    # (always a miss), age-sweep stale tgcache entries, and remove the unused pre-SQLite
+    # data/media_file_ids.json dump.
     await asyncio.to_thread(cleanup_legacy_cache_files)
     await asyncio.to_thread(sweep_tgcache)
     legacy_media_ids = os.path.join("data", "media_file_ids.json")
@@ -511,7 +503,7 @@ async def lifespan(_: FastAPI):
 
     await client.start()
     # Supervise the background tasks: if either dies (not via cancellation) it is logged
-    # CRITICAL and restarted, so a crash can no longer silently stop cache sweeping or downloads.
+    # CRITICAL and restarted, so a crash cannot silently stop cache sweeping or downloads.
     background_task = asyncio.create_task(_supervised(cache_media_files, "cache_media_files"))
     worker_task = asyncio.create_task(_supervised(background_download_worker, "background_download_worker"))
     access_flush_task = asyncio.create_task(_supervised(_access_flush_loop, "access_flush_loop"))
@@ -607,12 +599,9 @@ async def find_file_id_in_message(message: Message, file_unique_id: str) -> Unio
 
     if message.media == MessageMediaType.POLL:
         # Kurigram 2.2.23: polls may carry media in description_media and
-        # explanation_media (MessageContent objects). This branch is now LIVE:
-        # download_media_file no longer short-circuits polls, so a signed /media URL for a
-        # poll's description_media resolves its fid here and downloads normally. The bridge
-        # renders only description_media, but explanation_media is searched too: if a signed
-        # URL for it ever exists, the download must still work. getattr-only access —
-        # older Poll objects/mocks do not define these fields.
+        # explanation_media (MessageContent objects); a signed /media URL for either
+        # resolves its fid here. The bridge renders only description_media. getattr-only
+        # access — older Poll objects/mocks do not define these fields.
         poll = getattr(message, 'poll', None)
         for container_name in ('description_media', 'explanation_media'):
             content = getattr(poll, container_name, None) if poll else None
@@ -717,15 +706,9 @@ def _rich_large_video_size(message: Message, file_unique_id: str) -> Union[int, 
 def _stat_size_or_none(path: str) -> int | None:
     """Return the file size via a single os.stat, or None if the file does not exist.
 
-    Collapses an exists()+getsize() pair into ONE syscall (called off-loop via
-    asyncio.to_thread on the hot paths) and closes a TOCTOU: a file swept between an
-    exists() and a getsize() no longer raises into a generic 500 — a missing file simply
-    returns None so the caller falls through to its normal (download) path.
-
-    Any OSError (not just FileNotFoundError) collapses to None. This matches the
-    fail-open behaviour of the replaced os.path.exists() (which returned False on ANY
-    stat error) and preserves this helper's whole point — never turn a stat problem into
-    a 500; treat an unreadable/vanished cache file as absent and re-download it.
+    One syscall (called off-loop via asyncio.to_thread on the hot paths) and no TOCTOU between
+    exists() and getsize(). Any OSError collapses to None, so an unreadable or vanished cache
+    file is treated as absent and re-downloaded instead of becoming a 500.
     """
     try:
         st = os.stat(path)
@@ -739,13 +722,11 @@ async def prepare_file_response(file_path: str, request: Request,
     """Serve a cached media file via Starlette's FileResponse.
 
     FileResponse handles Range/If-Range/206/416/multipart and sets
-    Accept-Ranges/ETag/Last-Modified itself, and reads the file efficiently (no per-64KB
-    to_thread hop that starved the threadpool). We keep: the early 404 pre-check, the MIME
+    Accept-Ranges/ETag/Last-Modified itself. This adds the early 404 pre-check, the MIME
     logic (python-magic + SQLite type cache) and the temp_* mtime touch
     (tests/test_stage2_static.py).
     """
-    # `request` is unused now that FileResponse parses the Range header itself, but the
-    # signature is kept for call-site compatibility (and future needs).
+    # `request` is unused (FileResponse parses Range itself); kept for call-site compatibility.
 
     # Keep an actively-viewed large-video temp file alive: refresh its mtime so the 1h
     # sweeper (which deletes temp_* by mtime) won't remove it out from under a viewer.
@@ -766,12 +747,9 @@ async def prepare_file_response(file_path: str, request: Request,
     # (a) preserves the 404 semantics: FileResponse with stat_result=None re-stats at
     # send-time and raises a RuntimeError (-> 500, escaping this handler's try/except) if
     # the file was swept between here and the send; and (b) makes the ETag/Last-Modified
-    # reflect exactly the mtime observed after the optional touch above. The remaining
-    # narrow window (deleted between this stat and FileResponse's own open) truncates the
-    # body — that pre-existed the FileResponse migration and is not handled here.
-    # ACCEPTED RISK: this stat->open race window is very narrow, and for temp_* files it is
-    # further mitigated by the mtime keepalive touch above (an actively-viewed large video is
-    # refreshed away from the 1h sweeper's deletion window). Deliberately not fixed.
+    # reflect exactly the mtime observed after the optional touch above. ACCEPTED RISK: a
+    # file deleted between this stat and FileResponse's own open truncates the body; the
+    # window is narrow, and the mtime touch keeps viewed temp_* files away from the sweeper.
     try:
         stat_result = await asyncio.to_thread(os.stat, file_path)
     except FileNotFoundError:
@@ -902,9 +880,8 @@ async def _download_atomic(file_id: str, final_path: str, timeout: float) -> str
                 f"Downloaded file for {final_path} is zero size or missing after download attempt."
             )
         # Publish atomically, but only if nobody else already produced the final file
-        # (a concurrent request that won the race). rename is atomic on POSIX. The
-        # rename-only-if-final-absent guard is preserved exactly; only its stat + rename
-        # now run off the event loop.
+        # (a concurrent request that won the race). rename is atomic on POSIX; the stat and
+        # rename run off the event loop.
         if not await asyncio.to_thread(os.path.exists, final_path):
             await asyncio.to_thread(os.rename, part_path, final_path)
         return final_path
@@ -931,10 +908,9 @@ async def _download_deduped(channel: Union[str, int], post_id: int, file_unique_
 
     The live-download permit (`semaphore`) is acquired INSIDE the detached runner, so ONE
     live download holds exactly ONE permit regardless of how many requests wait on the
-    shared Future — N concurrent requests for the same file no longer burn N permits. The
-    acquire is bounded (30s): on saturation the runner resolves the Future with a
-    DownloadAdmissionTimeout (server-busy, mapped to 503 by the caller) instead of hanging.
-    An admission timeout is NOT a download failure, so it must NOT arm the backoff.
+    shared Future. The acquire is bounded (30s): on saturation the runner resolves the Future
+    with a DownloadAdmissionTimeout (server-busy, mapped to 503 by the caller) instead of
+    hanging. An admission timeout is NOT a download failure, so it must NOT arm the backoff.
     """
     key = (str(channel), post_id, file_unique_id)
     fut = _inflight.get(key)
@@ -1079,7 +1055,7 @@ async def download_media_file(channel: Union[str, int], post_id: int, file_uniqu
     if is_large_video:
         # For large video, download without permanent caching; use a temporary file.
         temp_file_path = os.path.join(post_dir, f"temp_{file_unique_id}")
-        # A temp_{fid} file now only ever appears via atomic rename (see _download_atomic),
+        # A temp_{fid} file only ever appears via atomic rename (see _download_atomic),
         # so its presence GUARANTEES a complete file — serve it directly. Single off-loop
         # stat instead of exists()+getsize() on the event loop.
         temp_size = await asyncio.to_thread(_stat_size_or_none, temp_file_path)
@@ -1281,14 +1257,11 @@ def remove_old_cached_files_sync(media_files: list, cache_dir: str) -> tuple[lis
             except Exception as e:
                 logger.error(f"Failed to remove temporary file {file_path}: {str(e)}")
 
-    # Remove empty post-/channel- directories. A permanently-dead file that never downloads
-    # (backoff-skipped forever) can leave an empty dir behind now that makedirs is lazy, and
-    # empty dirs pile up and slow the sweeper's os.walk and calculate_cache_stats. Walk
-    # bottom-up so an emptied post dir lets its (now-empty) channel dir go in the same pass;
-    # rmdir only ever removes an EMPTY dir, so a dir holding a live file is left untouched.
-    # OSError is swallowed: a non-empty dir is legitimate, and a race with a concurrent fresh
-    # mkdir/download (rmdir vs mkdir) must never crash the sweep — _download_atomic recreates
-    # the dir on demand.
+    # Remove empty post-/channel- directories (left by files that never download, since
+    # makedirs is lazy); they slow os.walk and calculate_cache_stats. Bottom-up, so an emptied
+    # post dir frees its channel dir in the same pass. rmdir only removes EMPTY dirs, and
+    # OSError is swallowed: a race with a concurrent mkdir must not crash the sweep
+    # (_download_atomic recreates the dir on demand).
     for root, _dirs, _files in os.walk(cache_dir, topdown=False):
         if os.path.abspath(root) == os.path.abspath(cache_dir):
             continue  # never remove the cache root itself
@@ -1805,12 +1778,11 @@ async def get_media(channel: str, post_id: int, file_unique_id: str, request: Re
 
         try: # Wrap the download and prepare call
             # Pre-download cache check: serve already-cached files without acquiring a
-            # download permit or touching Telegram. The permit now lives inside
+            # download permit or touching Telegram. The permit lives inside
             # _download_deduped's runner, so this handler never holds one.
             cache_path = media_cache_path(fs_channel, post_id, file_unique_id)
-            # ONE off-loop stat (exists()+getsize() collapsed) — also closes the TOCTOU where
-            # a file swept between exists() and getsize() would raise into a generic 500; a
-            # missing file now returns None and simply falls through to the download path.
+            # ONE off-loop stat (no exists()/getsize() TOCTOU); a missing file returns None
+            # and falls through to the download path.
             cache_size = await asyncio.to_thread(_stat_size_or_none, cache_path)
             if cache_size is not None and cache_size > 0:
                 # File is already in cache — serve directly.
@@ -1921,11 +1893,9 @@ async def get_media(channel: str, post_id: int, file_unique_id: str, request: Re
 # Conditional GET for feeds
 #
 # Miniflux (and any conformant reader) sends If-None-Match / If-Modified-Since on
-# every poll. Honoring them lets us answer an unchanged feed with 304 + no body,
-# saving the response bandwidth and the reader-side parse. The server still renders
-# the feed to derive the ETag — the issue mandates the ETag be a sha256 of the
-# ACTUAL serialized body (a content signature), so it stays in lock-step with what
-# we would have sent; the win is on the wire and in the reader, not on the render.
+# every poll; an unchanged feed gets 304 with no body. The feed is still rendered to
+# derive the ETag, a sha256 of the actual serialized body, so the saving is on the wire
+# and in the reader, not on the render.
 # --------------------------------------------------------------------------- #
 
 # Cache-Control uses `private` on purpose: the feed URL carries an auth token and must

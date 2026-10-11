@@ -1,19 +1,16 @@
 # flake8: noqa
 # pylint: disable=missing-function-docstring, redefined-outer-name, line-too-long
 # pylint: disable=protected-access, wrong-import-position, import-outside-toplevel
-"""Stage-2 footer tests (render-pipeline refactor epic, issue #29/#34).
+"""Merged-footer tests.
 
-Stage 2 removed rss_generator.processed_message_to_tg_message and renders the merged
-footer DIRECTLY from the real main Message. These tests lock the registry §3 items that
-become visible as a consequence:
+The merged footer is rendered DIRECTLY from the real main Message:
 
-  §3.6  custom-emoji reactions in the merged footer get a separate "❓ N" span each
-        (no more aggregation into one "❓ N"), matching single posts.
-  §3.7  the merged footer date comes from the naive-local date of the real Message,
-        not a UTC mock — verified with a NON-UTC TZ where the delta is visible (the
-        TZ=UTC golden cannot see it).
-  §3.15 an empty reactions object no longer emits a leading footer separator (single
-        posts too).
+  * custom-emoji reactions in the merged footer get a separate "❓ N" span each,
+    matching single posts.
+  * the merged footer date comes from the naive-local date of the real Message,
+    not a UTC mock — verified with a NON-UTC TZ where the delta is visible (the
+    TZ=UTC golden cannot see it).
+  * an empty reactions object emits no leading footer separator (single posts too).
 
 Messages are built with the shared SimpleNamespace helper (naive dates where relevant,
 as kurigram emits on prod).

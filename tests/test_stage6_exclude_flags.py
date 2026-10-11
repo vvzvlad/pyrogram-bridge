@@ -1,13 +1,11 @@
 # flake8: noqa
 # pylint: disable=missing-function-docstring, redefined-outer-name
-"""Stage-6: unit lock for the `exclude_flags` feed filter (issue #33, epic #34).
+"""Unit lock for the `exclude_flags` feed filter.
 
-The filter (rss_generator._render_messages_groups) is a user-facing query-param
-that drops posts from the feed by flag. It is NOT exercised by the stage-0 golden
-oracle (golden_replay runs without exclude_flags), and stage 6 rewrote it from a
-`for/continue` loop into a list-comprehension. These tests pin the membership
-semantics so the rewrite (and any future one) stays honest — this is the
-"dedicated unit tests" that golden_replay.py's header comment refers to.
+The filter (rss_generator._render_messages_groups) is a user-facing query-param that
+drops posts from the feed by flag. The golden oracle runs without exclude_flags, so these
+tests pin the membership semantics — the "dedicated unit tests" golden_replay.py's header
+comment refers to.
 
 Flag shapes under the test config: a plain text post carries ['no_image']; a
 merged group additionally carries 'merged'. (Every rendered post carries at least

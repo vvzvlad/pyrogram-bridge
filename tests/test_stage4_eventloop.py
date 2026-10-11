@@ -3,14 +3,14 @@
 # pylint: disable=redefined-outer-name, logging-fstring-interpolation, line-too-long
 # pylance: disable=reportMissingImports, reportMissingModuleSource
 """
-Stage 4 (event-loop hygiene for feed generation) tests.
+Event-loop hygiene for feed generation.
 
 Covers:
 - 4.1 raw_message laziness: feeds do NOT compute str(message); JSON/debug HTML do.
-- 4.2 side-effect IO removed from process_message: _save_media_file_ids only appends to
+- 4.2 no side-effect IO in process_message: _save_media_file_ids only appends to
       self._pending_media_ids; the caller flushes once via upsert_media_file_ids_bulk_sync.
       Also: the render path contains NO create_task / get_running_loop / to_thread.
-- 4.3 render pipeline moved into a single thread: the four render functions are now plain
+- 4.3 the render pipeline runs in a single thread: the four render functions are plain
       sync functions and actually execute off the main thread; deepcopy of a pickled Message
       does not crash; a 100-message feed generates correctly.
 - 4.4 sanitize coverage (XSS): a <script> / onerror= / javascript: payload is stripped in
@@ -298,8 +298,8 @@ async def test_xss_stripped_in_single_post_html_debug():
 
 @pytest.mark.asyncio
 async def test_xss_in_title_escaped_in_debug_html():
-    # Issue #13: the debug branch of _format_html embeds data["html"]["title"], which is
-    # generated from user-controlled content and never passes through bleach. A poll whose
+    # The debug branch of _format_html embeds data["html"]["title"], which is
+    # generated from user-controlled content and never passes through the sanitizer. A poll whose
     # question carries a <script> tag yields the title "📊 Poll: <script>alert(1)</script>"
     # verbatim — it must be html-escaped before being embedded in the debug output.
     msg = make_message(25, media=MessageMediaType.POLL)
@@ -353,8 +353,8 @@ async def test_xss_stripped_in_html_feed(monkeypatch):
 
 def _media_msg_with_payload_caption(mid):
     # A photo message whose CAPTION carries the payload — this exercises the media
-    # fragment path (_generate_html_media / caption rendering) whose internal per-fragment
-    # sanitize pass was removed in 4.4. The covering pass must still strip it.
+    # fragment path (_generate_html_media / caption rendering), which has no sanitize pass
+    # of its own. The covering pass must still strip it.
     m = make_message(mid, media=MessageMediaType.PHOTO, photo_uid="pic123")
     m.caption = _Str(XSS_PAYLOAD)
     return m
@@ -396,12 +396,11 @@ async def test_xss_in_media_caption_stripped_in_feeds(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# §3.4 — per-post sanitize ISOLATION (stage-1 load-bearing invariant, PR #36).
-# A dangling/unbalanced tag in post A must be normalized WITHIN A's own fragment and
-# cannot swallow post B (cross-post DOM/XSS bleed). This holds because _render_pipeline
-# runs a SEPARATE bleach.clean per post and the formatter joins the <hr> divider AFTER
-# sanitize. A FUTURE stage that rejoins BEFORE sanitizing would reintroduce the bleed
-# and pass every single-message XSS test — so this 2-post case MUST turn it red.
+# Per-post sanitize ISOLATION. A dangling/unbalanced tag in post A must be normalized
+# WITHIN A's own fragment and cannot swallow post B (cross-post DOM/XSS bleed). This holds
+# because _render_pipeline sanitizes each post separately and the formatter joins the <hr>
+# divider AFTER sanitize. Joining BEFORE sanitizing would pass every single-message XSS
+# test — so this 2-post case MUST turn it red.
 # --------------------------------------------------------------------------- #
 @pytest.mark.asyncio
 async def test_unbalanced_post_does_not_swallow_next_post_html_feed(monkeypatch):
@@ -425,14 +424,14 @@ async def test_unbalanced_post_does_not_swallow_next_post_html_feed(monkeypatch)
     html = await generate_channel_html("testchan", client=SimpleNamespace(), limit=5)
 
     # The divider survives (joined AFTER per-post sanitize) and splits the feed into
-    # exactly two TOP-LEVEL fragments. A join-before-sanitize regression strips the
-    # non-whitelisted <hr> entirely (strip=True) -> this alone already goes red.
+    # exactly two TOP-LEVEL fragments. Joining before sanitize strips the
+    # non-whitelisted <hr> entirely -> this alone already goes red.
     parts = html.split('<hr class="post-divider">')
     assert len(parts) == 2, "expected exactly one top-level post-divider between the two posts"
     frag_a, frag_b = parts
 
     # A's dangling tags were balanced WITHIN A's own fragment, NOT deferred past the
-    # divider. A rejoin-before-sanitize regression closes them only at the very end of
+    # divider. Joining before sanitize closes them only at the very end of
     # the whole feed (after B), leaving frag_a with more opens than closes.
     assert "DANGLING_A" in frag_a
     assert frag_a.count("<div") == frag_a.count("</div>"), "post A's <div> not closed within its own fragment"
@@ -446,7 +445,7 @@ async def test_unbalanced_post_does_not_swallow_next_post_html_feed(monkeypatch)
 
 
 # --------------------------------------------------------------------------- #
-# Review round-1: the new bulk-upsert SQL executed for real (not mocked).
+# The bulk-upsert SQL executed for real (not mocked).
 # --------------------------------------------------------------------------- #
 def test_bulk_upsert_media_file_ids_real_sql(tmp_path):
     import sqlite3
@@ -479,8 +478,8 @@ def test_bulk_upsert_media_file_ids_real_sql(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# Review round-1: media ids collected before a render exception are still
-# flushed (the flush is in a finally). Removing the finally must break this.
+# Media ids collected before a render exception are still flushed (the flush is in a
+# finally). Removing the finally must break this.
 # --------------------------------------------------------------------------- #
 @pytest.mark.asyncio
 async def test_pending_media_flushed_on_render_exception(monkeypatch):
@@ -515,7 +514,7 @@ async def test_pending_media_flushed_on_render_exception(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# Review round-1 [security]: if the ONLY sanitize pass throws, the feed must
+# [security] If the ONLY sanitize pass throws, the feed must
 # FAIL CLOSED (html.escape the raw content), never emit the raw XSS payload.
 # --------------------------------------------------------------------------- #
 @pytest.mark.asyncio

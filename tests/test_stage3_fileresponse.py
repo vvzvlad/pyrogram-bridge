@@ -3,38 +3,27 @@
 # pylint: disable=redefined-outer-name, logging-fstring-interpolation, line-too-long
 # pylance: disable=reportMissingImports, reportMissingModuleSource
 """
-Stage 3 (FileResponse + HTTP-layer cleanup) regression tests.
+FileResponse + HTTP-layer tests.
 
 Covers:
-- The HTTP Range matrix asserted against the FINAL (Starlette FileResponse) behavior,
-  each case documented, including the RFC-7233-permitted deltas vs the old hand-rolled
-  streaming (garbage header -> 400 not 416; multi-range -> proper multipart 206 not 416;
-  416 Content-Range now `*/size`; ETag/Last-Modified now present; ASCII filename no longer
-  gets a redundant filename*= form).
-- Stage-2 behavior preserved through the rewrite: a served temp_* file still has its mtime
-  refreshed; the media_key MIME cache is still consulted and populated. (The dead
-  temp-file auto-deletion background-task machinery was removed in #53, so the response
-  now never carries a background task.)
+- The HTTP Range matrix of Starlette's FileResponse, each case documented (table below).
+- A served temp_* file has its mtime refreshed; the media_key MIME cache is consulted and
+  populated; the response carries no background task.
 - The pure-ASGI RequestLoggingMiddleware: a normal request still returns (body intact, not
   buffered/truncated) and is logged.
 
-Before/after Range matrix (2048-byte file), old = hand-rolled streaming, new = FileResponse:
+Range matrix (2048-byte file):
 
-  request                | old                         | new (FileResponse)
-  -----------------------+-----------------------------+-----------------------------------
-  no Range               | 200 full                    | 200 full (+ETag/Last-Modified)
-  bytes=0-499            | 206 bytes 0-499/2048        | 206 bytes 0-499/2048 (same bytes)
-  bytes=500-             | 206 bytes 500-2047/2048     | 206 bytes 500-2047/2048 (same)
-  bytes=-500             | 206 bytes 1548-2047/2048    | 206 bytes 1548-2047/2048 (same)
-  bytes=999999- (>EOF)   | 416 `bytes */2048`          | 416 `*/2048`  (Starlette omits the
-                         |                             |   `bytes ` prefix; RFC-acceptable)
-  garbage header         | 416                         | 400 Bad Request (RFC 7233 lets a
-                         |                             |   server reject/ignore a malformed
-                         |                             |   Range; Starlette returns 400)
-  bytes=0-9,20-29        | 416 (old parser bug)        | 206 multipart/byteranges (correct)
-
-All 206 responses that carry data return byte-for-byte identical slices old vs new, so no
-real regression is hidden behind an "accepted difference".
+  request                | response
+  -----------------------+---------------------------------------------------------------
+  no Range               | 200 full (+ETag/Last-Modified)
+  bytes=0-499            | 206 bytes 0-499/2048
+  bytes=500-             | 206 bytes 500-2047/2048
+  bytes=-500             | 206 bytes 1548-2047/2048
+  bytes=999999- (>EOF)   | 416 `*/2048` (Starlette omits the `bytes ` prefix; RFC-acceptable)
+  garbage header         | 400 Bad Request (RFC 7233 lets a server reject/ignore a
+                         |   malformed Range)
+  bytes=0-9,20-29        | 206 multipart/byteranges
 """
 import os
 import time
@@ -88,7 +77,7 @@ def test_no_range_returns_full_200(sample_file):
     assert r.headers["accept-ranges"] == "bytes"
     assert r.headers["cache-control"] == "public, max-age=86400, immutable"
     # Content-Disposition filename set by FileResponse itself (no manual double-set).
-    # BODY sniffs to image/x-tga, which is NOT in the inline allowlist (issue #55), so the
+    # BODY sniffs to image/x-tga, which is NOT in the inline allowlist, so the
     # response is served as a neutralized attachment. The filename encoding is still owned
     # by FileResponse. (Inline serving is covered by the allowlisted-PNG test below.)
     assert r.headers["content-disposition"].startswith("attachment")
@@ -138,10 +127,8 @@ def test_range_start_past_eof_returns_416(sample_file):
 def test_garbage_range_header_returns_400(sample_file):
     c = _make_client(sample_file)
     r = c.get("/f", headers={"Range": "somethinggarbage"})
-    # DELTA (RFC-acceptable): the old hand-rolled parser returned 416 on an unparseable
-    # header; Starlette rejects a malformed Range with 400 Bad Request. RFC 7233 permits a
-    # server to reject/ignore a bad Range; this is a conscious accepted difference, not a
-    # data regression (no bytes are served either way).
+    # Starlette rejects a malformed Range with 400 Bad Request; RFC 7233 permits a server to
+    # reject/ignore a bad Range, and no bytes are served either way.
     assert r.status_code == 400
 
 
@@ -209,8 +196,8 @@ def test_non_temp_file_mtime_untouched(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# 3.1 (#53) — the dead temp-file auto-deletion background-task machinery was removed: the
-# response never carries a background task, and a served file is NOT deleted after streaming.
+# 3.1 — the response never carries a background task, and a served file is NOT deleted
+# after streaming.
 # --------------------------------------------------------------------------- #
 async def test_response_has_no_background_task(tmp_path):
     fp = tmp_path / "temp_kept"

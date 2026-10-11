@@ -27,8 +27,8 @@ Design guarantees:
     snapshot see the exact same tree — live/cache render parity is structural.
   * :func:`from_pyrogram` is fail-soft PER BLOCK: a block that raises becomes a
     ``{"t": "unsupported"}`` node (+ a WARNING and a /health counter), never a crash.
-    This is the ONLY per-block degradation left — the kurigram_compat block contour was
-    removed in the 2.2.26 bump — and it covers the adapt step, not the library's parse.
+    This is the only per-block degradation, and it covers the adapt step, not the
+    library's parse.
     A live ``parse_failed`` marker is never written into the tree, so :func:`render_html`
     reads ONLY the tree and never a live object's attributes.
   * :func:`render_html` is PURE: it reads the tree, html.escape()s every user string,

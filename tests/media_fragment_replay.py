@@ -1,23 +1,17 @@
 # flake8: noqa
 # pylint: disable=import-outside-toplevel, missing-function-docstring, line-too-long
-"""Stage-5 fragment-level snapshot helpers (render-pipeline refactor epic, issue #32/#34).
+"""Fragment-level snapshot helpers for the media renderers.
 
 Captures the raw `_generate_html_media` output (BEFORE sanitize) for every media
-render kind and edge branch, as a SEPARATE oracle layer from the stage-0 feed goldens
-(spec §4: "два слоя эталонов, не смешивать").
+render kind and edge branch, as an oracle layer separate from the feed goldens.
 
-`media_fragments.json` is the PRE-REFACTOR BASE reference: it was captured by running
-THIS harness against the BASE `post_parser.py` checkout (the pre-refactor code), NOT
-against stage-5 code — so it is a genuine base-anchored golden layer, not a circular
-self-snapshot of the refactor. The 5a refactor (MEDIA_SOURCES table + renderers) must
-reproduce these base fragments byte-for-byte. The ONLY 5b-registered changes vs the base
-are the two entries in REGISTERED_DELTAS (§3.14 unclosed-div close); the §3.13 large-file
-guard is collection-only and changes no fragment bytes.
+`media_fragments.json` was captured against the code before the MEDIA_SOURCES table and
+renderers existed; the current renderers must reproduce it byte-for-byte, except for the
+entries in REGISTERED_DELTAS.
 
-Cases whose type exists in the recorded corpus could be pulled from it, but the media
-FRAGMENT is a pure function of a single Message, so deterministic hand-built mocks give
-the same bytes with far less machinery and also reach the mock-only exotic types
-(PAID_MEDIA, LIVE_PHOTO, STORY) — exactly the set the spec allows mocks for.
+The media FRAGMENT is a pure function of a single Message, so deterministic hand-built
+mocks give the same bytes as recorded posts and also reach the mock-only exotic types
+(PAID_MEDIA, LIVE_PHOTO, STORY).
 
 Run `python -m tests.media_fragment_replay` from the repo root to (re)generate the snapshot.
 """
@@ -132,14 +126,12 @@ def build_cases():
 
 
 # --------------------------------------------------------------------------- #
-# Registered 5b deltas vs the pre-refactor base snapshot.
+# Registered deltas vs the base snapshot.
 #
-# Spec §3.14: the empty <div class="message-media"> container is now CLOSED in every
-# render branch. The base (pre-refactor) code left it OPEN whenever the selected media
-# object had no usable file_unique_id, so the base snapshot captured an unbalanced div
-# for exactly these two cases. `collected` is byte-identical to the base; only `html`
-# differs by the added `</div>`. These are the ONLY fragments the 5b registered fixes
-# change relative to the pre-refactor base — every other case reproduces base bytes.
+# The empty <div class="message-media"> container is CLOSED in every render branch; the
+# base code left it open when the selected media object had no usable file_unique_id.
+# For these two cases `collected` is byte-identical to the base and `html` differs only by
+# the added `</div>`. Every other case reproduces base bytes.
 REGISTERED_DELTAS = {
     "file_unique_id_none": {
         "collected": [],

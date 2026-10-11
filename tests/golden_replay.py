@@ -1,11 +1,10 @@
 # flake8: noqa
 # pylint: disable=import-outside-toplevel, missing-function-docstring, line-too-long
-"""Stage-0 golden-baseline replay helpers (render-pipeline refactor epic, issue #27/#34).
+"""Golden-baseline replay helpers for the feed render pipeline.
 
 Replays the frozen recorded corpus (tests/test_data/recorded/) through the REAL
 cache-hit path and captures the full generate_channel_rss / generate_channel_html
-output as an equivalence oracle for every later refactor stage. NO production render
-code is touched here — only a test loader + determinism pins.
+output as an equivalence oracle for render changes.
 
 The recorded corpus holds the Kurigram objects the prod bridge cache served, one file
 per channel, written as JSON where every value carries its type (see the loader below):
@@ -62,11 +61,11 @@ GOLDEN_SIGNING_KEY = "stage0-golden-fixed-signing-key-0000000000000000"
 # `_client` (the recording never kept it), the None-valued ones included, so hasattr()
 # answers as it does on the live object for every data field. Types are
 # looked up by their PUBLIC name, so a class moving between modules inside Kurigram does
-# not break the load, while a class or enum member the library no longer ships raises out
-# of the loader: there are no stand-ins. (ChatColor, dropped in Kurigram 2.2.26 and never
-# read by the feed, was recorded as null.) The goldens are never regenerated to absorb a
-# library bump: goldens matching byte-for-byte is exactly the evidence that the bump did
-# not move the render.
+# not break the load, while a class or enum member the library does not ship raises out
+# of the loader: there are no stand-ins. (ChatColor, absent from Kurigram 2.2.26 and never
+# read by the feed, is recorded as null.) The goldens are never regenerated to absorb a
+# library bump: goldens matching byte-for-byte is the evidence that the bump did not move
+# the render.
 # --------------------------------------------------------------------------- #
 def _decode(value):
     if isinstance(value, list):
@@ -167,11 +166,9 @@ def capture_html(channel):
 _LASTBUILDDATE_RE = re.compile(r"<lastBuildDate>.*?</lastBuildDate>", re.DOTALL)
 # feedgen 1.0.0 emits no <generator>; normalized anyway as cheap insurance vs. a lib upgrade.
 _GENERATOR_RE = re.compile(r"<generator>.*?</generator>", re.DOTALL)
-# NOTE: the stage-0 flag-sort normalization (_FLAGS_DIV_RE / _sort_flags_div) was
-# removed in stage 2 (§3.8). Merged-post flags are now built in deterministic
-# first-seen order (rss_generator._render_messages_groups: dict.fromkeys(...)),
-# so the golden stores the real order and no normalization is needed — keeping it
-# would only mask a real flag-order regression.
+# No flag-order normalization: merged-post flags are built in deterministic first-seen
+# order (rss_generator._render_messages_groups: dict.fromkeys(...)), so the golden stores
+# the real order.
 
 
 def normalize_rss(xml):

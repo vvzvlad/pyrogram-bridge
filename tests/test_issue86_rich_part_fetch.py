@@ -1,9 +1,9 @@
 # flake8: noqa
 # pylint: disable=protected-access, missing-function-docstring, missing-class-docstring
 # pylint: disable=redefined-outer-name, line-too-long
-"""Rich Messages phase 3/3 (#86) — part=True full-content re-fetch via messages.GetRichMessage.
+"""Rich Messages: part=True full-content re-fetch via messages.GetRichMessage.
 
-Covers the mandated matrix (mock client, non-vacuous):
+Covers (mock client, non-vacuous):
   (а) part=True -> re-fetch -> FULL tree in the snapshot (memo invalidated).
   (б) re-fetch failed -> partial tree kept + part=True -> plaque in the rendered HTML.
   (в) part=False -> ZERO re-fetches (call count 0).

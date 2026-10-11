@@ -4,11 +4,10 @@
 # pylance: disable=reportMissingImports, reportMissingModuleSource
 """Generic-document 'file' render block + single-post album page.
 
-Non-image, non-PDF documents (.stl/.zip/.iso/...) used to render as a broken
-<img> tag. They now render through the new 'file' kind as an info block (file
-name + size + t.me link with the "откройте Telegram, чтобы скачать" hint), and
-the single-post HTML page (get_post output_type='html') renders the WHOLE media
-group so every file of an album is listed. Snapshot schema v4 carries
+Non-image, non-PDF documents (.stl/.zip/.iso/...) render through the 'file' kind as an
+info block (file name + size + t.me link with the "откройте Telegram, чтобы скачать"
+hint), and the single-post HTML page (get_post output_type='html') renders the WHOLE
+media group so every file of an album is listed. The snapshot carries
 document.file_name so cache hits render the same block.
 """
 from datetime import datetime, timezone

@@ -6,17 +6,11 @@
 
 """The ONLY HTML-sanitizer configuration in the project.
 
-Before this module the sanitize config was copy-pasted three times (the single-post
-path in post_parser plus the RSS and HTML feed paths in rss_generator) and had
-drifted: `s`/`del` survived only in the single-post copy, and the three error-log
-names diverged. Here the config lives exactly once; every render path routes
-through sanitize_html().
+Every render path (the single-post path in post_parser, the RSS and HTML feed paths in
+rss_generator) routes through sanitize_html().
 
-Backend: `nh3` (Rust `ammonia` binding). Migrated off `bleach[css]` 6.1.0 after the
-bleach maintainer declared the project end-of-life with no further security fixes
-(https://github.com/mozilla/bleach/issues/698). nh3 is actively maintained and keeps the same allowlist model.
-The one API gap — nh3 has no `CSSSanitizer` equivalent — is closed here by an
-`attribute_filter` that scrubs the `style` attribute down to the same 5 CSS
+Backend: `nh3` (Rust `ammonia` binding), an allowlist sanitizer. nh3 has no `CSSSanitizer`
+equivalent, so an `attribute_filter` scrubs the `style` attribute down to 5 CSS
 properties, with a hard reject of any active-content token (see _sanitize_style).
 """
 
@@ -25,18 +19,17 @@ import re
 import time as _time
 from html import escape as _html_escape
 
-# Imported under this name so tests can monkeypatch `sanitizer.HTMLSanitizer`
-# (kept from the bleach era — sanitize_html resolves the name as a module global
-# at call time, so the fail-closed path stays test-patchable). No behaviour change.
+# Imported under this name so tests can monkeypatch `sanitizer.HTMLSanitizer`:
+# sanitize_html resolves the name as a module global at call time, so the fail-closed
+# path stays test-patchable.
 from nh3 import clean as HTMLSanitizer
 
 logger = logging.getLogger(__name__)
 
-# Union of the three former copies. `s`/`del` (strikethrough) were previously
-# allowed only in the single-post path; now they survive in feeds too.
-# The structural tags (u, pre, code, blockquote, hr, h3-h6, table*, details, summary,
-# sub, sup, mark) were added for the rich-content renderer (rich_tree.render_html).
-# Old (non-rich) posts never emit them, so golden output stays byte-identical.
+# `s`/`del` (strikethrough) are allowed on every path. The structural tags (u, pre, code,
+# blockquote, hr, h3-h6, table*, details, summary, sub, sup, mark) serve the rich-content
+# renderer (rich_tree.render_html); non-rich posts never emit them, so golden output is
+# unaffected.
 ALLOWED_TAGS = ['p', 'a', 'b', 'i', 'strong', 'em', 's', 'del',
                 'ul', 'ol', 'li', 'br', 'div', 'span',
                 'img', 'video', 'audio', 'source',
@@ -50,9 +43,8 @@ ALLOWED_TAGS = ['p', 'a', 'b', 'i', 'strong', 'em', 's', 'del',
 # rich renderer; `id` is additionally range-restricted by _attribute_filter below.
 ALLOWED_ATTRIBUTES = {
     # '*' = attributes allowed on EVERY tag. Empty by design: nh3/ammonia otherwise
-    # defaults generic attributes to {lang, title}, but bleach did NOT allow them
-    # globally (only title on <a>, via the per-tag entry below). This keeps exact
-    # parity — the per-tag entries are the ONLY source of allowed attributes.
+    # defaults generic attributes to {lang, title}; the per-tag entries are the ONLY
+    # source of allowed attributes (title only on <a>).
     '*': set(),
     'a': {'href', 'title', 'target'},
     'img': {'src', 'alt', 'style'},
@@ -87,7 +79,7 @@ ALLOWED_PROTOCOLS = ['http', 'https', 'tg']
 _ALLOWED_TAGS_SET = frozenset(ALLOWED_TAGS)
 _ALLOWED_URL_SCHEMES = frozenset(ALLOWED_PROTOCOLS)
 
-# --- style-attribute sanitizer (replaces bleach's CSSSanitizer) --------------- #
+# --- style-attribute sanitizer (nh3 has no CSSSanitizer) ---------------------- #
 # `<prop>: <value>` inside a single declaration. Property matched against the
 # 5-item whitelist; value passed through the guards below.
 _STYLE_DECL_RE = re.compile(r'^\s*([A-Za-z-]+)\s*:\s*(.+?)\s*$')
@@ -162,15 +154,13 @@ def sanitize_html(html_raw: str, log_context: str = "") -> str:
         # Load-bearing config:
         #   url_schemes=_ALLOWED_URL_SCHEMES keeps tg:// links alive (nh3's default
         #     scheme list would strip them);
-        #   attribute_filter=_attribute_filter replaces bleach's CSSSanitizer, keeping
-        #     only the 5 inert CSS props on `style`;
-        #   disallowed tags are REMOVED (nh3 strips them, matching the old strip=True —
-        #     the tag vanishes rather than being escaped to visible text);
-        #   clean_content_tags=set() preserves bleach's strip=True semantics for raw-text
-        #     elements: strip the <script>/<style> TAG but keep its (now-inert) text
-        #     content, instead of nh3's default of deleting tag AND content;
-        #   strip_comments stays default (True), matching all former call sites;
-        #   link_rel=None preserves bleach's exact <a> output (no injected rel).
+        #   attribute_filter=_attribute_filter keeps only the 5 inert CSS props on `style`;
+        #   disallowed tags are REMOVED (the tag vanishes rather than being escaped to
+        #     visible text);
+        #   clean_content_tags=set(): strip the <script>/<style> TAG but keep its (now-inert)
+        #     text content, instead of nh3's default of deleting tag AND content;
+        #   strip_comments stays default (True);
+        #   link_rel=None: no injected rel on <a>.
         sanitized_html = HTMLSanitizer(
             html_raw,
             tags=_ALLOWED_TAGS_SET,
